@@ -1,3 +1,5 @@
+
+
 import os
 import html
 import re
@@ -879,6 +881,117 @@ st.markdown(
     .me-programme-result * {
         color: #111827 !important;
     }
+
+    /* =========================================================
+       ANALYSIS CHATBOT — ISOLATED MODULE
+       Does not modify existing dashboard classes.
+       ========================================================= */
+    .danip-analysis-chat {
+        border: 1px solid #1e3a8a;
+        border-radius: 16px;
+        background: linear-gradient(135deg, #0b1f3a 0%, #123a68 55%, #0a2748 100%);
+        padding: 1rem 1.05rem;
+        margin: 1.1rem 0 1rem 0;
+        box-shadow: 0 2px 8px rgba(15, 23, 42, .04);
+    }
+
+    .danip-analysis-chat .chat-kicker {
+        color: #93c5fd !important;
+        -webkit-text-fill-color: #2563eb !important;
+        font-size: .70rem;
+        font-weight: 900;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+        margin-bottom: .2rem;
+    }
+
+    .danip-analysis-chat .chat-title {
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+        font-size: 1.12rem;
+        font-weight: 850;
+        margin-bottom: .25rem;
+    }
+
+    .danip-analysis-chat .chat-help {
+        color: #dbeafe !important;
+        -webkit-text-fill-color: #dbeafe !important;
+        font-size: .82rem;
+        line-height: 1.5;
+        margin-bottom: .7rem;
+    }
+
+    .danip-chat-source {
+        display: inline-block;
+        border: 1px solid #dbeafe;
+        background: #eff6ff;
+        color: #1d4ed8 !important;
+        -webkit-text-fill-color: #1d4ed8 !important;
+        border-radius: 999px;
+        padding: .25rem .55rem;
+        font-size: .68rem;
+        font-weight: 800;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .danip-chat-answer {
+        border: 1px solid #dbe2ea;
+        border-left: 4px solid #2563eb;
+        border-radius: 10px;
+        background: #ffffff;
+        padding: .85rem 1rem;
+        margin: .55rem 0 .75rem 0;
+        color: #111827 !important;
+        -webkit-text-fill-color: #111827 !important;
+        line-height: 1.65;
+    }
+
+    .danip-chat-answer * {
+        color: #111827 !important;
+        -webkit-text-fill-color: #111827 !important;
+    }
+
+    .danip-chat-note {
+        color: #64748b !important;
+        -webkit-text-fill-color: #64748b !important;
+        font-size: .72rem;
+        margin-top: .35rem;
+    }
+
+    /* Professional dark-blue chat composer */
+    [data-testid="stChatInput"] {
+        background: #0b1f3a !important;
+        border: 1px solid #1d4ed8 !important;
+        border-radius: 12px !important;
+    }
+
+    [data-testid="stChatInput"] textarea {
+        color: #111827 !important;
+        background: #ffffff !important;
+        caret-color: #111827 !important;
+    }
+
+    [data-testid="stChatInput"] textarea::placeholder {
+        color: #475569 !important;
+        opacity: 1 !important;
+    }
+
+    [data-testid="stChatInput"] button {
+        background: #1d4ed8 !important;
+        color: #ffffff !important;
+    }
+
+
+    @media (max-width: 640px) {
+        .danip-analysis-chat {
+            padding: .75rem;
+            border-radius: 13px;
+        }
+    }
+
 </style>
     """,
     unsafe_allow_html=True,
@@ -3093,22 +3206,181 @@ def render_quality_dashboard(
 # ============================================================
 
 def aggregate_series(series, aggregation):
-    if aggregation == "mean":
+    """Apply the user's selected aggregation deterministically."""
+    aggregation = str(aggregation or "sum").strip().lower()
+
+    if aggregation in {"mean", "average"}:
         return series.mean()
 
     if aggregation == "median":
         return series.median()
 
-    if aggregation == "min":
+    if aggregation in {"min", "minimum"}:
         return series.min()
 
-    if aggregation == "max":
+    if aggregation in {"max", "maximum"}:
         return series.max()
 
     if aggregation == "count":
         return series.count()
 
     return series.sum()
+
+
+def resolve_analysis_aggregation(analysis_type, selected_aggregation):
+    """Return ONLY the aggregation selected by the user.
+
+    Analysis Type and Aggregation are independent controls.  The selected
+    aggregation is the mathematical operation used inside every X-axis group.
+    """
+    value = str(selected_aggregation or "sum").strip().lower()
+
+    aliases = {
+        "sum": "sum",
+        "total": "sum",
+        "average": "mean",
+        "avg": "mean",
+        "mean": "mean",
+        "median": "median",
+        "minimum": "min",
+        "minimum value": "min",
+        "min": "min",
+        "maximum": "max",
+        "maximum value": "max",
+        "max": "max",
+        "count": "count",
+        "number of records": "count",
+    }
+
+    return aliases.get(value, "sum")
+
+
+def aggregation_display_name(aggregation):
+    """Return a clear user-facing name for the actual aggregation."""
+    names = {
+        "sum": "Sum",
+        "mean": "Average",
+        "median": "Median",
+        "min": "Minimum",
+        "max": "Maximum",
+        "count": "Count",
+    }
+    return names.get(str(aggregation).strip().lower(), str(aggregation).title())
+
+
+def aggregation_group_diagnostic(df, x_column, y_columns, aggregation):
+    """
+    Explain when different aggregation choices legitimately produce the same
+    result because every X-axis category contains only one valid observation.
+
+    This is especially important for DHIS2 extracts where the selected
+    indicator may already be at the reporting grain (for example, one value
+    per period). In that situation Sum == Average == Median == Minimum ==
+    Maximum, while Count == 1.
+    """
+    if not x_column or x_column not in df.columns or not y_columns:
+        return None
+
+    try:
+        observations = []
+        for y in y_columns:
+            if y not in df.columns:
+                continue
+
+            temp = pd.DataFrame({
+                "__x__": df[x_column],
+                "__value__": pd.to_numeric(df[y], errors="coerce"),
+            }).dropna(subset=["__x__", "__value__"])
+
+            if temp.empty:
+                continue
+
+            group_sizes = temp.groupby("__x__", dropna=False)["__value__"].count()
+
+            if not group_sizes.empty:
+                observations.append({
+                    "indicator": y,
+                    "groups": int(group_sizes.size),
+                    "max_observations_per_group": int(group_sizes.max()),
+                    "repeated_groups": int((group_sizes > 1).sum()),
+                })
+
+        if not observations:
+            return None
+
+        # Only show the diagnostic when all selected indicators have at most
+        # one valid observation in every X-axis category.
+        if all(x["max_observations_per_group"] <= 1 for x in observations):
+            return (
+                "Aggregation note: each selected X-axis category has only "
+                "one valid observation. Therefore Sum, Average, Median, "
+                "Minimum and Maximum are mathematically identical for this "
+                "view; Count will return 1 per category. To see differences "
+                "between aggregations, use an X-axis with repeated records "
+                "(for example Organisation Unit when multiple periods exist)."
+            )
+
+    except Exception:
+        return None
+
+    return None
+
+
+def apply_analysis_operation(result_df, analysis_type, x_column, value_column="value"):
+    """
+    Apply analysis-type operations AFTER the selected aggregation.
+
+    Aggregation determines the value represented by each X-axis group.
+    Analysis Type adds a secondary analytical operation without replacing
+    the user's aggregation.
+    """
+    analysis = str(analysis_type or "statistical").strip().lower()
+
+    if result_df is None or result_df.empty or value_column not in result_df.columns:
+        return result_df
+
+    result_df = result_df.copy()
+    result_df[value_column] = pd.to_numeric(
+        result_df[value_column],
+        errors="coerce",
+    )
+
+    if analysis == "percentage":
+        total = result_df[value_column].sum(skipna=True)
+        if total != 0 and pd.notna(total):
+            result_df[value_column] = (
+                result_df[value_column] / total * 100.0
+            )
+        else:
+            result_df[value_column] = 0.0
+        return result_df
+
+    if analysis in {"difference", "change"} and x_column and len(result_df) >= 2:
+        valid = result_df.dropna(subset=[value_column]).copy()
+
+        if len(valid) >= 2:
+            first = float(valid[value_column].iloc[0])
+            last = float(valid[value_column].iloc[-1])
+
+            if analysis == "change":
+                change_value = last - first
+            else:
+                change_value = float(
+                    valid[value_column].max()
+                    - valid[value_column].min()
+                )
+
+            result_df["analysis_result"] = change_value
+
+    if analysis == "ranking" and value_column in result_df.columns:
+        # Ranking is applied to the already aggregated values.
+        result_df = result_df.sort_values(
+            value_column,
+            ascending=False,
+            kind="stable",
+        ).reset_index(drop=True)
+
+    return result_df
 
 
 # ============================================================
@@ -3362,7 +3634,7 @@ def build_requested_analysis_evidence(
         ):
             x_column = dimension_column
 
-        aggregation = chart_plan.get(
+        selected_aggregation = chart_plan.get(
             "aggregation",
             "sum",
         )
@@ -3370,6 +3642,13 @@ def build_requested_analysis_evidence(
         analysis_type = chart_plan.get(
             "analysis_type",
             "custom",
+        )
+
+        # IMPORTANT: Total and Average have explicit mathematical meaning.
+        # All other analysis types continue to respect the Aggregation control.
+        aggregation = resolve_analysis_aggregation(
+            analysis_type,
+            selected_aggregation,
         )
 
         ranking_limit = chart_plan.get(
@@ -3638,6 +3917,14 @@ def build_requested_analysis_evidence(
             ignore_index=True,
         )
 
+        # Apply the selected analysis operation after aggregation.
+        result_df = apply_analysis_operation(
+            result_df,
+            analysis_type,
+            x_column,
+            value_column="value",
+        )
+
         # ----------------------------------------------------
         # Ranking
         # ----------------------------------------------------
@@ -3754,10 +4041,26 @@ def build_chart_data_dataframe(
         "group_column"
     )
 
-    aggregation = plan.get(
+    selected_aggregation = plan.get(
         "aggregation",
         "sum",
     )
+
+    analysis_type = plan.get(
+        "analysis_type",
+        "statistical",
+    )
+
+    # IMPORTANT: the Aggregation widget is the single source of truth for
+    # the grouped chart values. Analysis Type must never silently replace it.
+    aggregation = resolve_analysis_aggregation(
+        analysis_type,
+        selected_aggregation,
+    )
+    # IMPORTANT: never use analysis_type as a fallback mathematical operation.
+    # The user's Aggregation control is the sole source of truth.
+    if aggregation not in {"sum", "mean", "median", "min", "max", "count"}:
+        aggregation = "sum"
 
     if chart_type == "none":
         return None, None
@@ -3797,30 +4100,25 @@ def build_chart_data_dataframe(
         subset=[x_column]
     )
 
-    # Scatter = row-level observations
+    # Scatter: use the selected aggregation when possible. If X is numeric,
+    # keep row-level observations because grouping a continuous X would
+    # destroy the meaning of the scatter plot.
     if chart_type == "scatter":
 
         y = y_columns[0]
+        temp = work[[x_column, y]].dropna(subset=[x_column, y]).copy()
 
-        work = work.dropna(
-            subset=[y]
-        )
+        x_numeric = pd.to_numeric(temp[x_column], errors="coerce")
+        if x_numeric.notna().all():
+            temp[x_column] = x_numeric
+            return temp[[x_column, y]], None
 
-        work[x_column] = pd.to_numeric(
-            work[x_column],
-            errors="coerce",
+        grouped = (
+            temp.groupby(x_column, dropna=False)[y]
+            .agg(aggregation)
+            .reset_index()
         )
-
-        work = work.dropna(
-            subset=[x_column, y]
-        )
-
-        return (
-            work[
-                [x_column, y]
-            ],
-            None,
-        )
+        return grouped[[x_column, y]], None
 
     group_cols = [x_column]
 
@@ -4381,10 +4679,25 @@ def render_user_chart(
             "📊 Requested Visualization"
         )
 
+    effective_aggregation = resolve_analysis_aggregation(
+        plan.get("analysis_type", "statistical"),
+        plan.get("aggregation", "sum"),
+    )
+
     st.caption(
         f"{title} • "
-        f"{plan.get('aggregation', 'sum')} aggregation"
+        f"Analysis: {str(plan.get('analysis_type', 'statistical')).title()} • "
+        f"Aggregation: {aggregation_display_name(effective_aggregation)}"
     )
+
+    diagnostic = aggregation_group_diagnostic(
+        df,
+        plan.get("x_column"),
+        plan.get("y_columns", []),
+        effective_aggregation,
+    )
+    if diagnostic:
+        st.info("ℹ️ " + diagnostic)
 
     _render_single_chart(
         df,
@@ -4458,6 +4771,15 @@ def render_requested_visualizations(
         "Showing only the graph types selected by the user. "
         "All selected visualizations use the same X-axis, "
         "indicators and aggregation."
+    )
+
+    effective_aggregation = resolve_analysis_aggregation(
+        plan.get("analysis_type", "statistical"),
+        plan.get("aggregation", "sum"),
+    )
+    st.caption(
+        f"Calculation: {str(plan.get('analysis_type', 'statistical')).title()} "
+        f"analysis using {aggregation_display_name(effective_aggregation)} aggregation."
     )
 
     label_by_type = {
@@ -5437,6 +5759,1603 @@ def create_excel_report(
     return output
 
 
+
+# ============================================================
+# ANALYSIS CHATBOT — QUESTIONS AGAINST THE CURRENT DATASET
+# ============================================================
+
+def _chat_json_safe(value):
+    """Convert pandas/numpy values into JSON-safe Python values."""
+    if value is None:
+        return None
+
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            pass
+
+    return value
+
+
+def _chat_dimension_candidates(df):
+    """
+    Identify useful dimensions for conversational analysis without changing
+    the existing analysis pipeline.
+    """
+    preferred_tokens = (
+        "country", "nation", "region", "province", "state", "district",
+        "zone", "woreda", "facility", "organisation", "organization",
+        "orgunit", "org unit", "ou", "period", "month", "year", "date",
+        "quarter", "sex", "gender", "age", "category", "indicator",
+    )
+
+    candidates = []
+
+    for column in df.columns:
+        series = df[column]
+        if pd.api.types.is_numeric_dtype(series):
+            continue
+
+        name = str(column).strip().lower()
+        unique_count = int(series.nunique(dropna=True))
+
+        if unique_count == 0 or unique_count > 200:
+            continue
+
+        score = sum(1 for token in preferred_tokens if token in name)
+
+        # The active chart X-axis is especially useful to the chatbot.
+        if str(column) == str(
+            st.session_state.get("analysis_chat_x_column", "")
+        ):
+            score += 20
+
+        if score > 0:
+            candidates.append((score, unique_count, column))
+
+    candidates.sort(
+        key=lambda item: (-item[0], item[1], str(item[2]).lower())
+    )
+
+    # Avoid a very large prompt while retaining the most useful dimensions.
+    return [item[2] for item in candidates[:6]]
+
+
+def _build_chat_group_evidence(df, dimensions, indicators):
+    """
+    Calculate compact, deterministic summaries for common user questions
+    such as highest/lowest country, trend by period, total by OU, etc.
+    """
+    evidence = {}
+
+    work = df.copy()
+
+    valid_indicators = []
+    for column in indicators:
+        if column in work.columns:
+            numeric = pd.to_numeric(work[column], errors="coerce")
+            if numeric.notna().any():
+                work[column] = numeric
+                valid_indicators.append(column)
+
+    if not valid_indicators:
+        return evidence
+
+    for dimension in dimensions:
+        if dimension not in work.columns:
+            continue
+
+        try:
+            grouped = work.groupby(
+                dimension,
+                dropna=False,
+            )[valid_indicators].agg(
+                ["sum", "mean", "max", "count"]
+            ).reset_index()
+        except Exception:
+            continue
+
+        # Flatten MultiIndex columns.
+        flattened = []
+        for column in grouped.columns:
+            if isinstance(column, tuple):
+                parts = [str(x) for x in column if str(x) != ""]
+                flattened.append("_".join(parts))
+            else:
+                flattened.append(str(column))
+        grouped.columns = flattened
+
+        records = grouped.replace(
+            {np.nan: None}
+        ).to_dict(orient="records")
+
+        # Keep exact deterministic ranking/trend evidence compact.
+        dimension_block = {
+            "unique_values": int(work[dimension].nunique(dropna=True)),
+            "indicator_summaries": {},
+        }
+
+        for indicator in valid_indicators:
+            sum_col = f"{indicator}_sum"
+            mean_col = f"{indicator}_mean"
+            max_col = f"{indicator}_max"
+            count_col = f"{indicator}_count"
+
+            if sum_col not in grouped.columns:
+                continue
+
+            temp = grouped[
+                [dimension, sum_col, mean_col, max_col, count_col]
+            ].copy()
+
+            temp[sum_col] = pd.to_numeric(
+                temp[sum_col], errors="coerce"
+            )
+            temp[mean_col] = pd.to_numeric(
+                temp[mean_col], errors="coerce"
+            )
+
+            temp = temp.dropna(subset=[sum_col])
+
+            if temp.empty:
+                continue
+
+            # For periods, provide chronological-looking latest records where
+            # possible; for other dimensions provide highest/lowest rankings.
+            name_lower = str(dimension).lower()
+            if any(token in name_lower for token in ["period", "date", "month", "year", "quarter"]):
+                # Prefer parsed date ordering for trend questions; fall back to
+                # the source ordering when the period values are not parseable.
+                sort_values = pd.to_datetime(
+                    temp[dimension].astype(str),
+                    errors="coerce",
+                )
+                if sort_values.notna().any():
+                    temp = temp.assign(_chat_sort=sort_values).sort_values(
+                        "_chat_sort"
+                    ).drop(columns=["_chat_sort"])
+                else:
+                    temp = temp.sort_values(
+                        dimension,
+                        kind="stable",
+                    )
+                latest = temp.tail(15)
+                ranked = latest
+            else:
+                ranked = temp.sort_values(
+                    sum_col,
+                    ascending=False,
+                ).head(10)
+
+            lowest = temp.sort_values(
+                sum_col,
+                ascending=True,
+            ).head(10)
+
+            dimension_block["indicator_summaries"][str(indicator)] = {
+                "highest_by_sum": ranked.replace(
+                    {np.nan: None}
+                ).to_dict(orient="records"),
+                "lowest_by_sum": lowest.replace(
+                    {np.nan: None}
+                ).to_dict(orient="records"),
+                "records": int(len(temp)),
+            }
+
+        if dimension_block["indicator_summaries"]:
+            evidence[str(dimension)] = dimension_block
+
+    return evidence
+
+
+
+def _chat_normalize_text(value):
+    """Normalize text for indicator/question matching."""
+    value = str(value or "").lower()
+    value = re.sub(r"[^a-z0-9]+", " ", value)
+    return " ".join(value.split())
+
+
+def _chat_indicator_candidates(question, df, chart_plan=None, limit=3):
+    """
+    Identify the indicators most relevant to the user's question.
+
+    Priority:
+      1. Explicitly selected dashboard indicators.
+      2. Exact/near-exact indicator-name matches.
+      3. Semantic token overlap with column names.
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return []
+
+    selected = []
+    if isinstance(chart_plan, dict):
+        for col in (
+            chart_plan.get("indicator_columns", [])
+            + chart_plan.get("y_columns", [])
+        ):
+            if col in df.columns and col not in selected:
+                selected.append(col)
+
+    q = _chat_normalize_text(question)
+    q_tokens = set(q.split())
+
+    scored = []
+    for col in df.columns:
+        if col not in get_numeric_columns(df):
+            continue
+
+        name = _chat_normalize_text(col)
+        name_tokens = set(name.split())
+
+        score = 0.0
+        if name and name in q:
+            score += 100
+        if q and q in name:
+            score += 90
+
+        overlap = len(q_tokens & name_tokens)
+        score += overlap * 8
+
+        # Strong M&E terms that usually identify the indicator itself.
+        for token in (
+            "indicator", "coverage", "rate", "percent", "percentage",
+            "number", "women", "pregnant", "children", "attending",
+            "received", "screened", "treated", "supplementation",
+            "anc", "vas", "wifa", "zinc", "mnhn",
+        ):
+            if token in q_tokens and token in name_tokens:
+                score += 5
+
+        if col in selected:
+            score += 25
+
+        if score > 0:
+            scored.append((score, str(col)))
+
+    scored.sort(key=lambda x: (-x[0], x[1].lower()))
+
+    result = [name for _, name in scored[:limit]]
+
+    # If the user asks about "this indicator", use the active selection.
+    if not result and selected:
+        result = selected[:limit]
+
+    return result
+
+
+def _chat_infer_indicator_context(indicator):
+    """
+    Give ChatGPT a cautious M&E interpretation from the indicator label.
+
+    This is NOT treated as an official indicator definition. The prompt
+    explicitly tells the model to distinguish label-based inference from
+    authoritative metadata.
+    """
+    name = str(indicator)
+    n = _chat_normalize_text(name)
+
+    if any(x in n for x in ["percentage", "percent", "coverage", "rate", "proportion"]):
+        indicator_type = "coverage/rate/proportion indicator"
+    elif any(x in n for x in ["number", "women", "pregnant", "children", "clients", "cases", "#"]):
+        indicator_type = "count/output indicator"
+    else:
+        indicator_type = "numeric programme indicator"
+
+    focus = []
+    if any(x in n for x in ["anc", "antenatal", "pregnant", "pregnancy"]):
+        focus.append("maternal/antenatal care access or service utilisation")
+    if any(x in n for x in ["first 12 weeks", "12 weeks", "early", "timely", "first trimester"]):
+        focus.append("timeliness of early service initiation")
+    if any(x in n for x in ["vas", "vitamin a"]):
+        focus.append("vitamin A supplementation")
+    if any(x in n for x in ["wifa", "iron", "folic"]):
+        focus.append("women's iron/folic-acid supplementation")
+    if any(x in n for x in ["zinc", "diarr"]):
+        focus.append("zinc treatment/service delivery")
+    if any(x in n for x in ["mnhn", "maternal", "newborn"]):
+        focus.append("maternal/newborn health service delivery")
+
+    if not focus:
+        focus.append("the programme result represented by the indicator label")
+
+    return {
+        "indicator": name,
+        "type": indicator_type,
+        "label_based_m_and_e_focus": focus,
+        "definition_status": (
+            "Label-based interpretation only. An official DHIS2 indicator "
+            "definition should be used when numerator, denominator, "
+            "calculation formula or metadata are available."
+        ),
+    }
+
+
+def _chat_find_num_den_context(df, indicator):
+    """Find plausible numerator/denominator fields related to one indicator."""
+    num_cols = [
+        c for c in df.columns
+        if re.search(r"(^|[_\s-])num(erator)?($|[_\s-])", str(c), re.I)
+    ]
+    den_cols = [
+        c for c in df.columns
+        if re.search(r"(^|[_\s-])den(ominator)?($|[_\s-])", str(c), re.I)
+    ]
+
+    def base(v):
+        s = _chat_normalize_text(v)
+        return re.sub(r"\b(numerator|denominator|num|den)\b", " ", s).strip()
+
+    selected_base = base(indicator)
+    pairs = []
+
+    for num in num_cols:
+        for den in den_cols:
+            score = 0
+            nb = base(num)
+            db = base(den)
+
+            if selected_base and (
+                selected_base in nb or selected_base in db
+                or nb in selected_base or db in selected_base
+            ):
+                score += 10
+
+            # Shared tokens are useful when columns are long DHIS2 labels.
+            score += len(set(nb.split()) & set(db.split()))
+
+            pairs.append((score, num, den))
+
+    pairs.sort(key=lambda x: (-x[0], str(x[1]).lower(), str(x[2]).lower()))
+
+    if not pairs:
+        return []
+
+    result = []
+    for score, num, den in pairs[:3]:
+        result.append({
+            "numerator": str(num),
+            "denominator": str(den),
+            "relevance_score": score,
+        })
+    return result
+
+
+def build_chat_mne_indicator_context(df, indicators, quality_issues=None):
+    """
+    Build the M&E context used by the chatbot.
+
+    It combines:
+      - indicator label and cautious label-based meaning,
+      - deterministic statistics,
+      - focused DHIS2 indicator-level quality assessment,
+      - numerator/denominator fields when available.
+
+    No values are changed.
+    """
+    context = []
+
+    if not isinstance(df, pd.DataFrame):
+        return context
+
+    for indicator in indicators:
+        if indicator not in df.columns:
+            continue
+
+        numeric = pd.to_numeric(df[indicator], errors="coerce")
+        valid = numeric.dropna()
+
+        item = _chat_infer_indicator_context(indicator)
+
+        if not valid.empty:
+            item["observed_data"] = {
+                "records_with_numeric_value": int(valid.count()),
+                "missing_values": int(numeric.isna().sum()),
+                "total": float(valid.sum()),
+                "average": float(valid.mean()),
+                "median": float(valid.median()),
+                "minimum": float(valid.min()),
+                "maximum": float(valid.max()),
+                "zero_count": int((valid == 0).sum()),
+            }
+        else:
+            item["observed_data"] = {
+                "records_with_numeric_value": 0,
+                "missing_values": int(numeric.isna().sum()),
+            }
+
+        # Focused indicator-level DQ is more useful than sending the entire
+        # dataset-level matrix to ChatGPT.
+        try:
+            ind_issues, ind_matrix, ind_summary = build_indicator_quality_matrix(
+                df, indicator
+            )
+            item["indicator_quality"] = {
+                "summary": ind_summary,
+                "issues": ind_issues[:12],
+                "matrix": ind_matrix[:12],
+            }
+        except Exception as exc:
+            item["indicator_quality"] = {
+                "error": str(exc),
+            }
+
+        item["numerator_denominator_candidates"] = _chat_find_num_den_context(
+            df, indicator
+        )
+
+        context.append(item)
+
+    return context
+
+
+def _chat_local_mne_answer(
+    question,
+    df,
+    indicators,
+    chart_plan=None,
+    quality_issues=None,
+):
+    """Deterministic M&E assistant used whenever AI is unavailable."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return "No dataset is currently loaded. Please load the DHIS2 data first."
+
+    # Prefer the user's selected indicator(s). If the question names another
+    # indicator, _chat_indicator_candidates() will already have selected it.
+    if not indicators:
+        if isinstance(chart_plan, dict):
+            indicators = [
+                c for c in (chart_plan.get("y_columns") or [])
+                if c in df.columns
+            ][:3]
+        if not indicators:
+            indicators = get_numeric_columns(df)[:3]
+
+    if not indicators:
+        return (
+            "I could not identify a numeric indicator in the current dataset. "
+            "Please select an indicator in User-Requested Analysis."
+        )
+
+    q = _chat_normalize_text(question)
+
+    # Build indicator-specific evidence for every selected indicator.
+    profiles = []
+    for indicator in indicators[:3]:
+        if indicator not in df.columns:
+            continue
+
+        values = pd.to_numeric(df[indicator], errors="coerce")
+        valid = values.dropna()
+        context = _chat_infer_indicator_context(indicator)
+
+        try:
+            _, ind_matrix, ind_summary = build_indicator_quality_matrix(
+                df, indicator
+            )
+        except Exception:
+            ind_matrix, ind_summary = [], {}
+
+        profile = {
+            "indicator": str(indicator),
+            "type": context.get("type", "indicator"),
+            "focus": context.get("label_based_m_and_e_focus", []),
+            "observations": int(valid.count()),
+            "missing": int(values.isna().sum()),
+            "total": float(valid.sum()) if not valid.empty else None,
+            "average": float(valid.mean()) if not valid.empty else None,
+            "median": float(valid.median()) if not valid.empty else None,
+            "minimum": float(valid.min()) if not valid.empty else None,
+            "maximum": float(valid.max()) if not valid.empty else None,
+            "quality_score": float(ind_summary.get("score", 0)) if ind_summary else None,
+            "quality_rating": str(ind_summary.get("rating", "Unknown")) if ind_summary else "Unknown",
+            "quality_matrix": ind_matrix[:12] if isinstance(ind_matrix, list) else [],
+        }
+
+        # Add period/OU extrema where possible.
+        x_column = chart_plan.get("x_column") if isinstance(chart_plan, dict) else None
+        if x_column in df.columns and not valid.empty:
+            tmp = pd.DataFrame({
+                "__x": df[x_column].astype(str),
+                "__v": values,
+            }).dropna(subset=["__v"])
+            if not tmp.empty:
+                hi = tmp.loc[tmp["__v"].idxmax()]
+                lo = tmp.loc[tmp["__v"].idxmin()]
+                profile["highest_category"] = str(hi["__x"])
+                profile["lowest_category"] = str(lo["__x"])
+
+                # Trend is descriptive only and follows the displayed order.
+                if len(tmp) >= 2:
+                    first = float(tmp["__v"].iloc[0])
+                    last = float(tmp["__v"].iloc[-1])
+                    profile["first_value"] = first
+                    profile["last_value"] = last
+                    profile["change"] = last - first
+                    profile["change_pct"] = (
+                        (last - first) / abs(first) * 100
+                        if first != 0 else None
+                    )
+
+        profiles.append(profile)
+
+    if not profiles:
+        return "I could not calculate evidence for the selected indicator(s)."
+
+    primary = profiles[0]
+    name = primary["indicator"]
+    name_lower = name.lower()
+    focus = "; ".join(primary.get("focus") or [])
+
+    # ---------------------------------------------------------
+    # Indicator meaning / M&E significance
+    # ---------------------------------------------------------
+    meaning_terms = (
+        "what does", "what is", "meaning", "mean", "interpret",
+        "definition", "measure", "measures", "why is", "why this",
+        "importance", "important", "m&e", "program relevance",
+        "programme relevance", "what does this indicator tell",
+    )
+    if any(t in q for t in meaning_terms):
+        if any(x in name_lower for x in ["within", "first 12 weeks", "early"]):
+            mne_role = (
+                "This indicator is relevant to monitoring timely access to "
+                "early service utilisation. For an M&E team, it can help "
+                "track whether the programme is reaching the intended "
+                "population within the expected service window."
+            )
+        elif any(x in name_lower for x in ["coverage", "rate", "percent", "%", "proportion"]):
+            mne_role = (
+                "This appears to be a coverage/rate indicator. Its programme "
+                "meaning depends on the numerator, denominator, target and "
+                "reporting grain, so the observed percentage should not be "
+                "judged without those elements."
+            )
+        elif any(x in name_lower for x in ["number of", "# of", "count", "women", "children", "people"]):
+            mne_role = (
+                "This appears to be a service/output volume indicator. It can "
+                "help monitor the amount of service or reach recorded by the "
+                "programme, but a higher count is not automatically better "
+                "without considering the eligible population, target and "
+                "reporting completeness."
+            )
+        else:
+            mne_role = (
+                "The indicator's M&E meaning should be confirmed against the "
+                "official DHIS2 indicator metadata. The current interpretation "
+                "is based on the indicator label and observed data only."
+            )
+
+        observed = (
+            f"The current dataset contains **{primary['observations']:,}** valid "
+            f"observations. The average is **{primary['average']:,.2f}**, "
+            f"minimum **{primary['minimum']:,.2f}**, and maximum "
+            f"**{primary['maximum']:,.2f}**."
+            if primary["average"] is not None else
+            "No valid numeric observations are available for this indicator."
+        )
+
+        quality = (
+            f"Indicator-level quality is **{primary['quality_rating']}** "
+            f"({primary['quality_score']:.1f}/100)."
+            if primary["quality_score"] is not None else
+            "Indicator-level quality could not be scored."
+        )
+
+        return f"""
+## Indicator / Direct Answer
+
+**{name}** is being interpreted as a **{primary['type']}** indicator based on its label.
+
+## M&E Interpretation
+
+{mne_role}
+
+The label-based M&E focus is: **{focus or 'programme performance monitoring'}**.
+
+The official indicator definition, numerator, denominator, target and calculation formula should be confirmed from DHIS2 metadata where available. They are not inferred as official definitions by this assistant.
+
+## Current Evidence
+
+{observed}
+
+## Programme-Management Implication
+
+Use this indicator to monitor the level, trend and distribution of reported performance. Investigate material differences between reporting periods or organisation units and compare the observed result with the approved programme target before making a performance judgement.
+
+## Data Quality Note
+
+{quality}
+"""
+
+    # ---------------------------------------------------------
+    # Total / average / median / min / max / count
+    # ---------------------------------------------------------
+    if primary["average"] is not None:
+        if any(t in q for t in ["total", "sum", "altogether", "overall total"]):
+            return (
+                f"## Direct Answer\n\n**{name} total:** "
+                f"**{primary['total']:,.2f}** across {primary['observations']:,} "
+                f"valid observations.\n\n## M&E Interpretation\n\n"
+                f"This represents the total recorded volume in the loaded dataset. "
+                f"For programme interpretation, consider reporting completeness, "
+                f"population size and the approved target before treating a higher "
+                f"total as better performance."
+            )
+
+        if any(t in q for t in ["average", "mean"]):
+            return (
+                f"## Direct Answer\n\n**{name} average:** "
+                f"**{primary['average']:,.2f}**.\n\n"
+                f"This is the mean across {primary['observations']:,} valid observations. "
+                f"Use it to describe the typical observed level; compare it with "
+                f"the programme target or benchmark before judging performance."
+            )
+
+        if "median" in q:
+            return (
+                f"## Direct Answer\n\n**{name} median:** "
+                f"**{primary['median']:,.2f}**.\n\n"
+                f"The median represents the middle observed value and can be useful "
+                f"when unusually high or low observations may influence the mean."
+            )
+
+        if any(t in q for t in ["highest", "maximum", "max", "top"]):
+            category = primary.get("highest_category")
+            suffix = f" in **{category}**" if category else ""
+            return (
+                f"## Direct Answer\n\n**{name} highest observed value:** "
+                f"**{primary['maximum']:,.2f}**{suffix}.\n\n"
+                f"## M&E Interpretation\n\n"
+                f"The highest observed value identifies where reported performance "
+                f"is greatest in the current dataset. It should not automatically "
+                f"be classified as best performance without the relevant target, "
+                f"denominator and reporting context."
+            )
+
+        if any(t in q for t in ["lowest", "minimum", "min", "bottom"]):
+            category = primary.get("lowest_category")
+            suffix = f" in **{category}**" if category else ""
+            return (
+                f"## Direct Answer\n\n**{name} lowest observed value:** "
+                f"**{primary['minimum']:,.2f}**{suffix}.\n\n"
+                f"## M&E Interpretation\n\n"
+                f"The lowest observed value identifies an area or period that may "
+                f"warrant programme review. Verify reporting completeness and the "
+                f"underlying source before interpreting it as a performance gap."
+            )
+
+        if any(t in q for t in ["how many", "count", "number of records", "observations"]):
+            return (
+                f"## Direct Answer\n\n**{name}:** "
+                f"**{primary['observations']:,} valid observations**.\n\n"
+                f"Missing values: **{primary['missing']:,}**."
+            )
+
+    # ---------------------------------------------------------
+    # Trend
+    # ---------------------------------------------------------
+    if any(t in q for t in ["trend", "improving", "increase", "decrease", "changed"]):
+        if primary.get("change") is not None:
+            change = primary["change"]
+            pct = primary.get("change_pct")
+            direction = "increased" if change > 0 else "decreased" if change < 0 else "remained unchanged"
+            pct_text = f" ({pct:+.1f}%)" if pct is not None else ""
+            return (
+                f"## Direct Answer\n\n**{name}** {direction} from the first to the last "
+                f"displayed observation by **{abs(change):,.2f}**{pct_text}.\n\n"
+                f"## M&E Interpretation\n\n"
+                f"This is a descriptive change in the loaded reporting sequence. "
+                f"It should be assessed against the programme target, expected "
+                f"direction and data-quality findings before being classified as "
+                f"improvement or deterioration."
+            )
+        return (
+            f"There are not enough ordered observations for **{name}** to establish "
+            f"a trend from the current dataset."
+        )
+
+    # ---------------------------------------------------------
+    # Data quality
+    # ---------------------------------------------------------
+    if any(t in q for t in ["data quality", "dqa", "quality", "reliable", "missing", "complete"]):
+        score = primary.get("quality_score")
+        rating = primary.get("quality_rating", "Unknown")
+        missing = primary.get("missing", 0)
+        return f"""
+## Data Quality Assessment — {name}
+
+**Indicator quality rating:** {rating}
+
+**Quality score:** {score:.1f}/100
+
+**Valid observations:** {primary['observations']:,}
+
+**Missing observations:** {missing:,}
+
+## M&E Interpretation
+
+The result should be interpreted together with completeness, validity, plausibility, timeliness and consistency findings. A numerical result should not be treated as fully reliable simply because a value exists.
+
+## Programme Management Attention
+
+Prioritise any HIGH or MEDIUM DQA finding linked to this indicator and verify the result with the responsible reporting unit/source register before high-stakes decisions.
+"""
+
+    # ---------------------------------------------------------
+    # Multi-indicator comparison
+    # ---------------------------------------------------------
+    if len(profiles) > 1 and any(t in q for t in ["compare", "comparison", "difference", "which indicator", "better"]):
+        lines = ["## Indicator Comparison", ""]
+        for p in profiles:
+            lines.append(
+                f"- **{p['indicator']}** — average: "
+                f"{p['average']:,.2f}; minimum: {p['minimum']:,.2f}; "
+                f"maximum: {p['maximum']:,.2f}."
+            )
+        lines.extend([
+            "",
+            "## M&E Interpretation",
+            "",
+            "The indicators should only be compared directly when they have compatible units, definitions and denominators. A larger numeric value does not automatically indicate better programme performance.",
+        ])
+        return "\n".join(lines)
+
+    # ---------------------------------------------------------
+    # Generic indicator-specific response
+    # ---------------------------------------------------------
+    return f"""
+## Direct Answer
+
+I identified **{name}** as the primary indicator for this question.
+
+## M&E Interpretation
+
+This indicator is treated as a **{primary['type']}** indicator based on its label, with the M&E focus of **{focus or 'programme performance monitoring'}**.
+
+## Current Evidence
+
+Average: **{primary['average']:,.2f}**  
+Minimum: **{primary['minimum']:,.2f}**  
+Maximum: **{primary['maximum']:,.2f}**  
+Valid observations: **{primary['observations']:,}**
+
+## Programme-Management Implication
+
+Review the level, trend and geographic/reporting-unit differences against the approved programme target or benchmark. Do not infer causality from the descriptive result alone.
+
+## Data Quality Note
+
+Indicator-level quality: **{primary['quality_rating']} ({primary['quality_score']:.1f}/100)**.
+"""
+
+
+def build_analysis_chat_evidence(
+    df,
+    source_url,
+    chart_plan=None,
+    quality_issues=None,
+    quality_matrix=None,
+    quality_summary=None,
+    question="",
+):
+    """
+    Build a compact deterministic evidence package for the chatbot.
+
+    The previous implementation sent a broad evidence object to OpenAI. This
+    version first identifies the relevant indicator(s), then sends only the
+    M&E context and evidence needed for that question. This reduces API
+    failures and makes indicator-specific M&E answers much more reliable.
+    """
+    if not isinstance(df, pd.DataFrame):
+        return {}
+
+    numeric_columns = get_numeric_columns(df)
+    indicators = _chat_indicator_candidates(
+        question,
+        df,
+        chart_plan=chart_plan,
+        limit=3,
+    )
+
+    if not indicators:
+        indicators = [
+            c for c in (
+                (chart_plan or {}).get("y_columns", [])
+                if isinstance(chart_plan, dict) else []
+            )
+            if c in df.columns
+        ][:3]
+
+    if not indicators:
+        indicators = numeric_columns[:3]
+
+    if isinstance(chart_plan, dict):
+        st.session_state["analysis_chat_x_column"] = chart_plan.get(
+            "x_column", ""
+        )
+
+    dimensions = _chat_dimension_candidates(df)
+
+    # Keep grouped evidence restricted to the relevant indicators.
+    grouped_evidence = _build_chat_group_evidence(
+        df,
+        dimensions,
+        indicators,
+    )
+
+    # Complete deterministic profile only for relevant indicators.
+    indicator_context = build_chat_mne_indicator_context(
+        df,
+        indicators,
+        quality_issues=quality_issues,
+    )
+
+    selected = []
+    if isinstance(chart_plan, dict):
+        for column in (
+            chart_plan.get("indicator_columns", [])
+            + chart_plan.get("y_columns", [])
+        ):
+            if column in df.columns and column not in selected:
+                selected.append(column)
+
+    current_analysis = {
+        "x_column": (chart_plan or {}).get("x_column") if isinstance(chart_plan, dict) else None,
+        "y_columns": (chart_plan or {}).get("y_columns", []) if isinstance(chart_plan, dict) else [],
+        "aggregation": (chart_plan or {}).get("aggregation") if isinstance(chart_plan, dict) else None,
+        "chart_types": (chart_plan or {}).get("chart_labels") if isinstance(chart_plan, dict) else [],
+    }
+
+    return {
+        "source_url": str(source_url or ""),
+        "dataset": {
+            "rows": int(len(df)),
+            "columns": int(len(df.columns)),
+            "column_names": [str(c) for c in df.columns],
+        },
+        "current_analysis": current_analysis,
+        "relevant_indicators": indicators,
+        "indicator_m_and_e_context": indicator_context,
+        "quality_summary": quality_summary or {},
+        "quality_issues": (quality_issues or [])[:15],
+        "quality_matrix": (quality_matrix or [])[:15],
+        "grouped_evidence": grouped_evidence,
+    }
+
+
+
+def _chat_external_research_requested(question):
+    """Detect questions that explicitly ask for external/UN/WHO evidence."""
+    q = str(question or "").lower().strip()
+    triggers = [
+        "un report", "un reports", "un publication", "un publications",
+        "un agency", "un agencies", "un guideline", "un guidelines",
+        "un recommendation", "un recommendations", "un evidence",
+        "un data", "un statistics", "un study", "un studies",
+        "who report", "who reports", "who guideline", "who guidelines",
+        "who recommendation", "who recommendations", "who evidence",
+        "unicef", "unfpa", "who ", "world health organization",
+        "united nations", "dhis2 guidance", "dhis2 guideline",
+        "global guideline", "international guideline", "international report",
+        "latest report", "recent report", "current report", "published report",
+        "according to un", "according to the un", "according to who",
+        "according to unicef", "according to unfpa", "according to dhis2",
+        "external evidence", "external research", "research this indicator",
+        "find a report", "find reports", "find a study", "find studies",
+        "literature", "research evidence", "published evidence",
+    ]
+    return any(t in q for t in triggers)
+
+
+UN_EVIDENCE_DOMAINS = [
+    "un.org", "unstats.un.org", "who.int", "data.who.int",
+    "unicef.org", "data.unicef.org", "unfpa.org", "data.unfpa.org",
+    "undp.org", "wfp.org", "fao.org", "worldbank.org",
+    "dhis2.org", "docs.dhis2.org", "nutritionintl.org",
+]
+
+
+def research_chat_external_question(question, indicators=None, current_evidence=None):
+    """
+    Dedicated external UN/WHO evidence research engine.
+
+    IMPORTANT:
+    - This function is used ONLY when the user explicitly asks for external
+      evidence, a UN/WHO report, guideline, study, publication, etc.
+    - Dashboard values are context only and NEVER replace external evidence.
+    - The numerical dashboard/M&E calculation engine remains separate.
+    - The function retries compatible web-search configurations so a project
+      using a slightly different OpenAI SDK/API configuration can still work.
+    """
+
+    if client is None:
+        return {
+            "status": "DISABLED",
+            "source": "UN_WHO_EXTERNAL_RESEARCH",
+            "text": (
+                "External research is unavailable because OPENAI_API_KEY "
+                "is not configured."
+            ),
+            "sources": [],
+        }
+
+    question = str(question or "").strip()
+    if not question:
+        return {
+            "status": "ERROR",
+            "source": "UN_WHO_EXTERNAL_RESEARCH",
+            "text": "No external research question was provided.",
+            "sources": [],
+        }
+
+    indicators = indicators or []
+
+    # Only send indicator names as context. Do NOT send the complete
+    # deterministic dashboard evidence to the external-research prompt.
+    indicator_text = "\n".join(
+        f"- {str(indicator)}" for indicator in indicators[:5]
+    ) or "- No dashboard indicator was confidently identified."
+
+    prompt = f"""
+You are the DANIP-NI External Evidence Research Assistant.
+
+The user has explicitly requested external evidence.
+This request MUST be answered using authoritative external sources, not by
+substituting the loaded DHIS2/dashboard data.
+
+USER QUESTION:
+{question}
+
+CURRENT DASHBOARD INDICATOR NAMES (CONTEXT ONLY):
+{indicator_text}
+
+RESEARCH PRIORITY:
+1. United Nations official publications and agencies
+2. WHO
+3. UNICEF
+4. UNFPA
+5. UN Statistics
+6. World Bank where relevant
+7. DHIS2 official documentation where relevant
+8. Nutrition International where relevant
+
+For maternal health / antenatal care questions, prioritize WHO, UNICEF,
+UNFPA and United Nations sources.
+
+SEARCH CONCEPTS:
+If the question concerns pregnant women attending ANC-1 within the first
+12 weeks of pregnancy, also search equivalent standardized concepts such as:
+- antenatal care in the first trimester
+- first antenatal care contact before 12 weeks
+- early antenatal care
+- ANC1 first trimester
+- first antenatal care visit within 12 weeks
+- early initiation of antenatal care
+
+MATCHING RULES:
+
+EXACT MATCH means the external source supports substantially the same:
+- population
+- indicator concept
+- timing
+- numerator/denominator or definition
+
+RELATED MATCH means the source is conceptually relevant but differs in
+population, timing, definition, numerator, denominator or measurement.
+
+Never describe a RELATED MATCH as an exact match.
+
+If no exact source can be verified, explicitly state:
+"No verified exact UN report found."
+Then provide only clearly labelled related official evidence.
+
+DO NOT:
+- use dashboard values as external evidence
+- invent statistics
+- invent targets
+- invent indicator definitions
+- invent publication titles
+- invent URLs
+- change, cap, recalculate or replace dashboard values
+- claim that a related indicator is identical to the dashboard indicator
+- claim programme causality from descriptive evidence
+
+ANSWER FORMAT:
+
+## 🌐 External Evidence
+
+State that the answer is based on external research.
+
+## UN / WHO Evidence
+
+For each verified source provide:
+
+**Organization:**
+**Report / publication:**
+**Year/date:**
+**Match:** EXACT MATCH or RELATED MATCH
+**Relevant evidence:**
+**Why it is relevant:**
+
+## 📌 Indicator Definition
+
+Give the externally supported definition when available.
+If the exact dashboard definition cannot be verified, say so explicitly.
+
+## 🧭 M&E Relevance
+
+Explain the monitoring and programme-management relevance of the
+external evidence without inventing a target.
+
+## 🔗 Sources
+
+Provide the official source URLs returned by the search.
+Only provide URLs that are actually available from the search response.
+
+If no credible source is found, say so explicitly.
+"""
+
+    api_errors = []
+
+    # Try the current Responses API web_search tool first, restricted to the
+    # trusted evidence domains used by DANIP-NI.
+    search_attempts = [
+        (
+            "web_search_trusted_domains",
+            {
+                "type": "web_search",
+                "filters": {
+                    "allowed_domains": UN_EVIDENCE_DOMAINS,
+                },
+                "search_context_size": "high",
+            },
+        ),
+        # Fallback: remove the domain filter if the installed API/project does
+        # not accept the filter syntax. The prompt still requires authoritative
+        # UN/WHO sources and the answer must label evidence clearly.
+        (
+            "web_search_unfiltered",
+            {
+                "type": "web_search",
+                "search_context_size": "high",
+            },
+        ),
+        # Compatibility fallback for environments still exposing the preview
+        # tool name.
+        (
+            "web_search_preview_trusted_domains",
+            {
+                "type": "web_search_preview",
+                "filters": {
+                    "allowed_domains": UN_EVIDENCE_DOMAINS,
+                },
+                "search_context_size": "high",
+            },
+        ),
+        (
+            "web_search_preview_unfiltered",
+            {
+                "type": "web_search_preview",
+                "search_context_size": "high",
+            },
+        ),
+    ]
+
+    for attempt_name, search_tool in search_attempts:
+        try:
+            response = client.responses.create(
+                model=OPENAI_MODEL,
+                tools=[search_tool],
+                input=prompt,
+            )
+
+            answer = (response.output_text or "").strip()
+
+            if not answer:
+                api_errors.append(f"{attempt_name}: empty response")
+                continue
+
+            try:
+                urls = _extract_response_urls(response)
+            except Exception as url_error:
+                urls = []
+                api_errors.append(
+                    f"{attempt_name}: URL extraction warning: {url_error}"
+                )
+
+            return {
+                "status": "SUCCESS",
+                "source": "UN_WHO_EXTERNAL_RESEARCH",
+                "text": answer,
+                "sources": urls,
+                "search_method": attempt_name,
+            }
+
+        except Exception as exc:
+            message = str(exc)
+            api_errors.append(f"{attempt_name}: {message}")
+
+            lower = message.lower()
+
+            # Authentication/quota errors will not be fixed by changing the
+            # search-tool configuration, so stop retrying in those cases.
+            if any(token in lower for token in (
+                "invalid_api_key",
+                "incorrect api key",
+                "authentication",
+                "unauthorized",
+                "401",
+                "insufficient_quota",
+                "credit_balance_exhausted",
+                "429",
+                "rate limit",
+            )):
+                break
+
+    # Keep the actual technical error visible while testing. This is much more
+    # useful than the old generic message that hid the reason for failure.
+    error_text = "\n\n".join(api_errors)[-6000:]
+
+    return {
+        "status": "ERROR",
+        "source": "UN_WHO_EXTERNAL_RESEARCH",
+        "text": (
+            "### 🌐 External research could not be completed\n\n"
+            "DANIP-NI correctly detected this as an external UN/WHO research "
+            "question, but the external web-search request failed.\n\n"
+            "**Technical details:**\n"
+            f"```text\n{error_text}\n```\n\n"
+            "The dashboard data was NOT substituted for the requested "
+            "external evidence."
+        ),
+        "sources": [],
+        "error": error_text,
+    }
+
+
+def ask_analysis_chatbot(
+    user_question,
+    df,
+    source_url,
+    chart_plan=None,
+    quality_issues=None,
+    quality_matrix=None,
+    quality_summary=None,
+):
+    """
+    M&E conversational assistant.
+
+    Architecture:
+        Question
+          -> relevant indicator detection
+          -> deterministic Python evidence
+          -> M&E indicator context
+          -> ChatGPT narrative
+          -> deterministic fallback if API fails
+
+    ChatGPT is therefore the interpretation layer, not the calculation engine.
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return {
+            "status": "ERROR",
+            "source": "LOCAL",
+            "text": "No dataset is currently loaded. Please enter a data URL first.",
+        }
+
+    question = str(user_question or "").strip()
+    if not question:
+        return None
+
+    indicators = _chat_indicator_candidates(
+        question,
+        df,
+        chart_plan=chart_plan,
+        limit=3,
+    )
+    if not indicators:
+        indicators = (
+            [
+                c for c in (chart_plan.get("y_columns") or [])
+                if c in df.columns
+            ][:3]
+            if isinstance(chart_plan, dict)
+            else []
+        )
+
+    # Always prepare a deterministic fallback first.
+    local_answer = _chat_local_mne_answer(
+        question=question,
+        df=df,
+        indicators=indicators,
+        chart_plan=chart_plan,
+        quality_issues=quality_issues,
+    )
+
+    evidence = build_analysis_chat_evidence(
+        df=df,
+        source_url=source_url,
+        chart_plan=chart_plan,
+        quality_issues=quality_issues,
+        quality_matrix=quality_matrix,
+        quality_summary=quality_summary,
+        question=question,
+    )
+
+    # ---------------------------------------------------------
+    # EXTERNAL RESEARCH MODE
+    # ---------------------------------------------------------
+    # If the user explicitly asks for a UN/WHO/report/guideline/study,
+    # do NOT answer from the dashboard alone. Search authoritative
+    # external sources and clearly separate them from current data.
+    if _chat_external_research_requested(question):
+        external = research_chat_external_question(
+            question=question,
+            indicators=indicators,
+            current_evidence=evidence,
+        )
+
+        if external.get("status") == "SUCCESS":
+            source_lines = external.get("sources") or []
+            source_block = ""
+            if source_lines:
+                source_block = "\n\n**🔗 External source links**\n" + "\n".join(
+                    f"- {url}" for url in source_lines[:10]
+                )
+
+            return {
+                "status": "SUCCESS",
+                "source": "UN_WHO_EXTERNAL_RESEARCH",
+                "text": external.get("text", "") + source_block,
+                "sources": source_lines,
+            }
+
+        # If external search fails, make the failure explicit instead of
+        # silently presenting local dashboard evidence as an UN answer.
+        return {
+            "status": "EXTERNAL_UNAVAILABLE",
+            "source": "UN_WHO_EXTERNAL_RESEARCH",
+            "text": (
+                "### 🌐 External knowledge requested\n\n"
+                "Your question specifically asks for UN/WHO or external evidence, "
+                "so DANIP-NI did not substitute the dashboard data for that evidence.\n\n"
+                + external.get("text", "External research is currently unavailable.")
+            ),
+            "sources": external.get("sources", []),
+        }
+
+    # OpenAI is an enhancement layer. A missing key must never break chat.
+    if client is None:
+        return {
+            "status": "FALLBACK",
+            "source": "LOCAL_M_AND_E",
+            "text": local_answer,
+        }
+
+    history = st.session_state.get("analysis_chat_messages", [])
+    recent_history = [
+        {
+            "role": item.get("role"),
+            "content": item.get("content"),
+        }
+        for item in history[-6:]
+        if isinstance(item, dict)
+    ]
+
+    # IMPORTANT: only the compact relevant evidence is sent to the model.
+    prompt = f"""
+You are the DANIP-NI M&E Conversational Assistant.
+
+You are a senior Monitoring, Evaluation and Learning (M&E) advisor and
+programme manager supporting a DHIS2-based nutrition/public-health programme.
+
+Your job is to explain the CURRENT indicator(s) and CURRENT dashboard result
+in practical programme-management language.
+
+NON-NEGOTIABLE RULES:
+1. Python deterministic evidence is the numerical source of truth.
+2. Never invent or change a number.
+3. Never calculate from a sample or first rows.
+4. Never silently change the user's selected aggregation.
+5. If an official indicator definition, numerator, denominator, target or
+   formula is NOT present, say so explicitly.
+6. You MAY explain the likely M&E meaning from the indicator label, but label
+   that as a label-based interpretation, not an official definition.
+7. For counts, explain service/output volume.
+8. For rates/coverage, explain performance relative to the relevant
+   denominator, but do not invent the denominator.
+9. For indicators involving timing such as "within first 12 weeks", explain
+   the monitoring importance of timeliness/early initiation.
+10. Discuss trend, level, gap, comparison and data quality when supported.
+11. Distinguish observation from possible explanation.
+12. Never claim programme causality from descriptive dashboard data alone.
+13. If numerator and denominator fields are available, use them only when they
+    clearly correspond to the selected indicator.
+14. If the user asks "what does this indicator mean?", answer the M&E meaning
+    first, then describe the current observed result.
+15. If the user asks "why is it important?", explain its programme-management
+    relevance, monitoring use and follow-up implications.
+16. If the user asks "is it good/bad?", do not make a target judgement unless
+    a target or benchmark is supplied. Instead say whether the observed pattern
+    warrants routine monitoring or investigation.
+17. Keep the response concise but substantive.
+
+CURRENT SOURCE:
+{source_url}
+
+USER QUESTION:
+{question}
+
+RECENT CHAT:
+{safe_json_dumps(recent_history)}
+
+M&E INDICATOR CONTEXT AND DETERMINISTIC EVIDENCE:
+{safe_json_dumps(evidence)}
+
+Use this response structure when appropriate:
+
+**Indicator / Direct answer**
+...
+
+**M&E interpretation**
+...
+
+**Current evidence**
+...
+
+**Programme-management implication**
+...
+
+**Data quality note**
+...
+
+Do not include sections that are not relevant.
+"""
+
+    api_errors = []
+
+    # First try the configured model.
+    models_to_try = [OPENAI_MODEL]
+    # Common deployment issue: configured model may not be available to the
+    # project. Only try alternates for model/access errors; quota errors will
+    # still fall through to the deterministic M&E answer.
+    for model in ["gpt-5-mini", "gpt-4.1-mini"]:
+        if model and model not in models_to_try:
+            models_to_try.append(model)
+
+    for model in models_to_try:
+        try:
+            response = client.responses.create(
+                model=model,
+                input=prompt,
+            )
+
+            answer = (response.output_text or "").strip()
+            if answer:
+                return {
+                    "status": "SUCCESS",
+                    "source": "OPENAI_M_AND_E",
+                    "model": model,
+                    "text": answer,
+                }
+
+            api_errors.append(f"{model}: empty response")
+
+        except Exception as exc:
+            message = str(exc)
+            api_errors.append(f"{model}: {message}")
+
+            lower = message.lower()
+            # If this is clearly quota/rate-limit/auth failure, trying more
+            # models will not help and only wastes time.
+            if any(token in lower for token in (
+                "insufficient_quota",
+                "credit_balance_exhausted",
+                "rate limit",
+                "429",
+                "invalid_api_key",
+                "401",
+                "authentication",
+            )):
+                break
+
+    # Never show the generic "please try again" anymore.
+    # The user gets a useful M&E answer even when OpenAI is unavailable.
+    return {
+        "status": "FALLBACK",
+        "source": "LOCAL_M_AND_E",
+        "text": local_answer + (
+            "\n\n*ChatGPT interpretation was unavailable for this request, "
+            "so the answer above uses the dashboard's deterministic M&E "
+            "evidence and indicator context.*"
+        ),
+        "error": " | ".join(api_errors)[-3000:],
+    }
+
+
+def render_analysis_chatbot(
+    df,
+    source_url,
+    chart_plan=None,
+    quality_issues=None,
+    quality_matrix=None,
+    quality_summary=None,
+):
+    """
+    Render an isolated conversational analysis module.
+
+    It appears only after a dataset is loaded and does not alter any existing
+    chart, quality, M&E or data-loading controls.
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return
+
+    chat_source = str(source_url or "").strip()
+
+    # Reset only the chatbot conversation when the user switches source URL.
+    previous_chat_source = st.session_state.get(
+        "analysis_chat_source_url"
+    )
+    if previous_chat_source != chat_source:
+        st.session_state["analysis_chat_messages"] = []
+        st.session_state["analysis_chat_source_url"] = chat_source
+
+    if "analysis_chat_messages" not in st.session_state:
+        st.session_state["analysis_chat_messages"] = []
+
+    st.markdown(
+        """
+        <div class="danip-analysis-chat">
+            <div class="chat-kicker">DANIP-NI CONVERSATIONAL ANALYSIS · M&E CHAT v3</div>
+            <div class="chat-title">💬 Ask questions about this analysis</div>
+            <div class="chat-help">
+                Ask follow-up questions about the currently loaded data,
+                indicators, trends, rankings, totals, averages or data quality.
+                Answers are based on the same source and analysis shown above.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        f'<span class="danip-chat-source">🔗 Current source: {html.escape(chat_source)}</span>',
+        unsafe_allow_html=True,
+    )
+
+    # Render conversation history.
+    for message in st.session_state["analysis_chat_messages"]:
+        role = message.get("role", "assistant")
+        content = message.get("content", "")
+
+        with st.chat_message(
+            "user" if role == "user" else "assistant"
+        ):
+            if role == "assistant":
+                st.markdown(
+                    f'<div class="danip-chat-answer">{content}</div>',
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(content)
+
+    question = st.chat_input(
+        "Ask about the current analysis, e.g. Which country has the highest value?",
+        key="analysis_chat_input",
+    )
+
+    if not question:
+        return
+
+    question = question.strip()
+    if not question:
+        return
+
+    st.session_state["analysis_chat_messages"].append(
+        {
+            "role": "user",
+            "content": question,
+        }
+    )
+
+    with st.chat_message("user"):
+        st.markdown(question)
+
+    with st.chat_message("assistant"):
+        with st.spinner("🧠 Checking the current analysis..."):
+            try:
+                result = ask_analysis_chatbot(
+                    user_question=question,
+                    df=df,
+                    source_url=chat_source,
+                    chart_plan=chart_plan,
+                    quality_issues=quality_issues,
+                    quality_matrix=quality_matrix,
+                    quality_summary=quality_summary,
+                )
+            except Exception as exc:
+                # Chat must never fail because of an AI/API exception.
+                # Build the answer locally from the same loaded dataset.
+                try:
+                    indicators = _chat_indicator_candidates(
+                        question, df, chart_plan=chart_plan, limit=3
+                    )
+                    if not indicators and isinstance(chart_plan, dict):
+                        indicators = [
+                            c for c in (chart_plan.get("y_columns") or [])
+                            if c in df.columns
+                        ][:3]
+                    local_text = _chat_local_mne_answer(
+                        question=question,
+                        df=df,
+                        indicators=indicators,
+                        chart_plan=chart_plan,
+                        quality_issues=quality_issues,
+                    )
+                    result = {
+                        "status": "FALLBACK",
+                        "source": "LOCAL_M_AND_E",
+                        "text": local_text,
+                        "error": str(exc),
+                    }
+                except Exception as fallback_exc:
+                    result = {
+                        "status": "ERROR",
+                        "source": "LOCAL_M_AND_E",
+                        "text": (
+                            "The analysis chatbot could not complete the AI request, "
+                            "but the dataset is loaded. Please use the selected "
+                            "indicator and analysis controls above for the current "
+                            "deterministic results."
+                        ),
+                        "error": f"{exc}; fallback: {fallback_exc}",
+                    }
+
+        # NEVER display the old generic API-error message.
+        answer = str((result or {}).get("text") or "").strip()
+        if not answer:
+            indicators = _chat_indicator_candidates(
+                question, df, chart_plan=chart_plan, limit=3
+            )
+            answer = _chat_local_mne_answer(
+                question=question,
+                df=df,
+                indicators=indicators,
+                chart_plan=chart_plan,
+                quality_issues=quality_issues,
+            )
+
+        st.markdown(
+            f'<div class="danip-chat-answer">{answer}</div>',
+            unsafe_allow_html=True,
+        )
+
+        if result and result.get("source") == "OPENAI":
+            st.caption(
+                "Numerical answers are grounded in deterministic Python evidence "
+                "from the current dataset."
+            )
+        elif result and result.get("source") in ("LOCAL", "LOCAL_M_AND_E"):
+            st.caption(
+                "M&E answer grounded in the currently loaded dataset and deterministic analysis evidence."
+            )
+
+    st.session_state["analysis_chat_messages"].append(
+        {
+            "role": "assistant",
+            "content": answer,
+        }
+    )
+
+
+
 # ============================================================
 # SIDEBAR
 # ============================================================
@@ -5948,6 +7867,10 @@ def guided_analysis_ui(df, user_question, initial_plan=None):
     st.caption(
         "Selected graph types: "
         + (", ".join(chart_selected) if chart_selected else "None")
+    )
+
+    st.info(
+        f"⚙️ Calculation: **{analysis_selected}** analysis using **{aggregation_selected}** aggregation."
     )
 
     # ----------------------------------------------------------
@@ -7166,7 +9089,11 @@ if automatic_analysis or st.session_state.get("data_loaded", False):
     )
 
     live_visual_plan = st.session_state.get("guided_preview_plan")
-    chart_plan = selected_plan or live_visual_plan
+
+    # Use the confirmed plan only on the button-click rerun. Otherwise use the
+    # live plan so changing Analysis Type or Aggregation immediately updates
+    # the calculation/visualization instead of leaving the previous Sum result.
+    chart_plan = selected_plan if selected_plan is not None else live_visual_plan
 
     if selected_plan is not None:
         st.success(
@@ -7216,6 +9143,20 @@ if automatic_analysis or st.session_state.get("data_loaded", False):
     )
 
     # ========================================================
+
+    # ========================================================
+    # CONVERSATIONAL ANALYSIS CHATBOT
+    # ========================================================
+    # New isolated module. It uses the same loaded dataframe/source and
+    # does not modify any existing analysis, chart or quality calculation.
+    render_analysis_chatbot(
+        df=df,
+        source_url=source_url,
+        chart_plan=chart_plan,
+        quality_issues=quality_issues,
+        quality_matrix=quality_matrix,
+        quality_summary=quality_summary,
+    )
 
 # ============================================================
 # END — USER-REQUESTED ANALYSIS + DATA QUALITY MATRIX ONLY
