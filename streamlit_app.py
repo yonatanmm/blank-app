@@ -22,15 +22,26 @@ from openai import OpenAI
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(BASE_DIR, ".env"), override=True)
 
-DHIS2_URL = os.getenv(
+def _get_secret(name, default=""):
+    """Read Streamlit Cloud Secrets first, then local environment variables."""
+    try:
+        value = st.secrets.get(name, None)
+        if value is not None:
+            return str(value).strip()
+    except Exception:
+        pass
+    return os.getenv(name, default).strip()
+
+
+DHIS2_URL = _get_secret(
     "DHIS2_URL",
     "https://dhis2.nutritionintl.org"
 ).rstrip("/")
 
-DHIS2_USERNAME = os.getenv("DHIS2_USERNAME", "data.ai").strip()
-DHIS2_PASSWORD = os.getenv("DHIS2_PASSWORD", "").strip()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5").strip()
+DHIS2_USERNAME = _get_secret("DHIS2_USERNAME")
+DHIS2_PASSWORD = _get_secret("DHIS2_PASSWORD")
+OPENAI_API_KEY = _get_secret("OPENAI_API_KEY")
+OPENAI_MODEL = _get_secret("OPENAI_MODEL", "gpt-5")
 
 
 # ============================================================
@@ -911,7 +922,7 @@ if not DHIS2_USERNAME:
     missing.append("data.ai")
 
 if not DHIS2_PASSWORD:
-    missing.append("DHIS2_PASSWORD")
+    missing.append("Data.ai@2025")
 
 if not OPENAI_API_KEY:
     missing.append("OPENAI_API_KEY")
@@ -1778,6 +1789,477 @@ def build_quality_matrix(df):
     return issues, matrix, summary
 
 
+
+def build_indicator_quality_matrix(df, indicator):
+    """
+    DHIS2-oriented, indicator-level data-quality assessment.
+
+    The existing overall quality engine remains unchanged. This focused engine
+    applies the same audit philosophy to the indicator selected by the user:
+    completeness, uniqueness, validity/correctness, plausibility, timeliness,
+    integrity and consistency. It never edits source values.
+    """
+    indicator = str(indicator)
+    if indicator not in df.columns:
+        return [], [], {
+            "score": 0.0,
+            "rating": "Unavailable",
+            "rows": len(df),
+            "columns": len(df.columns),
+            "issues": 0,
+            "indicator": indicator,
+            "matrix": [],
+        }
+
+    n = len(df)
+    issues = []
+    matrix = []
+
+    def add_matrix(domain, metric, value, status, detail, priority="LOW"):
+        matrix.append({
+            "Domain": domain,
+            "Metric": metric,
+            "Result": value,
+            "Status": status,
+            "Priority": priority,
+            "Details": detail,
+        })
+
+    def pct(count, denominator=None):
+        denominator = n if denominator is None else denominator
+        return (count / denominator * 100) if denominator else 0.0
+
+    # Selected indicator values only.
+    raw = df[indicator]
+    text_values = raw.astype("string")
+    blank_mask = raw.isna() | text_values.str.strip().eq("")
+    missing = int(blank_mask.sum())
+    nonblank = raw[~blank_mask]
+    numeric = pd.to_numeric(nonblank, errors="coerce")
+    parse_failures = int(numeric.isna().sum())
+    valid_numeric = numeric.dropna()
+
+    # ------------------------------------------------------------
+    # 1. COMPLETENESS — data-element level
+    # ------------------------------------------------------------
+    missing_pct = pct(missing)
+    comp_status = "PASS" if missing == 0 else "REVIEW" if missing_pct < 20 else "FAIL"
+    comp_priority = "LOW" if missing == 0 else _priority_from_pct(missing_pct)
+
+    add_matrix(
+        "Completeness",
+        "Indicator missing values",
+        f"{missing:,}",
+        comp_status,
+        f"{missing_pct:.2f}% of records have no value for the selected indicator.",
+        comp_priority,
+    )
+
+    if missing:
+        issues.append(_quality_issue(
+            comp_priority,
+            "Completeness",
+            "Missing indicator values",
+            indicator,
+            missing,
+            missing_pct,
+            "Missing indicator values reduce data-element completeness and can bias trends, comparisons or aggregates.",
+            "Review reporting completeness by organisation unit and period; verify whether blanks represent non-reporting or a legitimate absence of service.",
+        ))
+
+    # ------------------------------------------------------------
+    # 2. UNIQUENESS — OU + period reporting grain
+    # ------------------------------------------------------------
+    ou_col = find_ou_column(df)
+    period_col = find_period_column(df)
+
+    if ou_col and period_col:
+        key = df[[ou_col, period_col]].astype("string")
+        duplicate_key_rows = int(key.duplicated(keep=False).sum())
+        dup_pct = pct(duplicate_key_rows)
+        add_matrix(
+            "Uniqueness",
+            "OU-period duplicate records",
+            f"{duplicate_key_rows:,}",
+            "PASS" if duplicate_key_rows == 0 else "FAIL",
+            f"Reporting grain assessed using {ou_col} + {period_col} for {indicator}.",
+            "LOW" if duplicate_key_rows == 0 else "HIGH",
+        )
+        if duplicate_key_rows:
+            issues.append(_quality_issue(
+                "HIGH",
+                "Uniqueness",
+                "Possible repeated OU-period records",
+                f"{indicator} | {ou_col} + {period_col}",
+                duplicate_key_rows,
+                dup_pct,
+                "Repeated reporting records can double-count an indicator when records are aggregated.",
+                "Check extraction grain, duplicate submissions and whether multiple category/disaggregation dimensions were flattened into the returned data.",
+            ))
+    else:
+        add_matrix(
+            "Uniqueness",
+            "OU-period uniqueness",
+            "Not determinable",
+            "INFO",
+            "A standard organisation-unit and period pair was not available for this indicator.",
+            "LOW",
+        )
+
+    # ------------------------------------------------------------
+    # 3. VALIDITY / CORRECTNESS — numeric conversion and negatives
+    # ------------------------------------------------------------
+    add_matrix(
+        "Validity",
+        "Numeric parsing",
+        f"{parse_failures:,} invalid numeric cells",
+        "PASS" if parse_failures == 0 else "REVIEW",
+        "The selected indicator was tested using strict numeric conversion.",
+        "LOW" if parse_failures == 0 else "MEDIUM",
+    )
+    if parse_failures:
+        issues.append(_quality_issue(
+            "MEDIUM",
+            "Validity",
+            "Non-numeric values in numeric indicator",
+            indicator,
+            parse_failures,
+            pct(parse_failures, max(len(nonblank), 1)),
+            "Non-numeric entries can be excluded from calculations or create inconsistent reporting.",
+            "Standardize numeric values and investigate text labels such as N/A, unknown or suppressed values.",
+        ))
+
+    negative_count = int((valid_numeric < 0).sum())
+    add_matrix(
+        "Validity",
+        "Negative indicator values",
+        f"{negative_count:,}",
+        "PASS" if negative_count == 0 else "FAIL",
+        "Negative observations were checked for the selected indicator.",
+        "LOW" if negative_count == 0 else "HIGH",
+    )
+    if negative_count:
+        issues.append(_quality_issue(
+            "HIGH",
+            "Validity",
+            "Negative indicator values",
+            indicator,
+            negative_count,
+            pct(negative_count, max(len(valid_numeric), 1)),
+            "Negative values are generally implausible for service counts and many health programme indicators.",
+            "Validate against the indicator definition and source register; do not delete values without documented verification.",
+        ))
+
+    # ------------------------------------------------------------
+    # 4. PLAUSIBILITY — indicator type, zeros and outliers
+    # ------------------------------------------------------------
+    name_lower = indicator.lower()
+    percentage_like = any(
+        token in name_lower
+        for token in ["percent", "%", "percentage", "coverage", "rate", "proportion"]
+    )
+
+    if percentage_like:
+        over_100 = int((valid_numeric > 100).sum())
+        add_matrix(
+            "Plausibility",
+            "Percentage/rate > 100",
+            f"{over_100:,}",
+            "PASS" if over_100 == 0 else "FAIL",
+            "The selected indicator appears to be a percentage/rate/coverage measure; values above 100 were checked.",
+            "LOW" if over_100 == 0 else "HIGH",
+        )
+        if over_100:
+            issues.append(_quality_issue(
+                "HIGH",
+                "Plausibility",
+                "Percentage/rate above 100",
+                indicator,
+                over_100,
+                pct(over_100, max(len(valid_numeric), 1)),
+                "Values above 100 may indicate numerator/denominator, aggregation, definition or data-entry problems.",
+                "Verify indicator definition, numerator, denominator, aggregation method and reporting grain.",
+            ))
+    else:
+        add_matrix(
+            "Plausibility",
+            "Percentage/rate > 100",
+            "Not applicable",
+            "INFO",
+            "The selected indicator was not identified as a percentage/rate/coverage field by its name.",
+            "LOW",
+        )
+
+    zero_count = int((valid_numeric == 0).sum())
+    zero_pct = pct(zero_count, max(len(valid_numeric), 1))
+    zero_heavy = zero_pct >= 50 and len(valid_numeric) > 0
+    add_matrix(
+        "Plausibility",
+        "Zero concentration",
+        f"{zero_count:,} zero values",
+        "REVIEW" if zero_heavy else "PASS",
+        f"{zero_pct:.2f}% of observed values are zero.",
+        "MEDIUM" if zero_heavy else "LOW",
+    )
+    if zero_heavy:
+        issues.append(_quality_issue(
+            "MEDIUM",
+            "Plausibility",
+            "High zero concentration",
+            indicator,
+            zero_count,
+            zero_pct,
+            "A high concentration of zeros may represent true zero service delivery or systematic non-reporting.",
+            "Confirm the indicator definition and distinguish valid zero activity from blank/non-reporting records.",
+        ))
+
+    outlier_count = 0
+    if len(valid_numeric) >= 5:
+        q1 = valid_numeric.quantile(0.25)
+        q3 = valid_numeric.quantile(0.75)
+        iqr = q3 - q1
+        if iqr != 0:
+            low = q1 - 1.5 * iqr
+            high = q3 + 1.5 * iqr
+            outlier_count = int(((valid_numeric < low) | (valid_numeric > high)).sum())
+
+    add_matrix(
+        "Plausibility",
+        "IQR outliers",
+        f"{outlier_count:,}",
+        "REVIEW" if outlier_count else "PASS",
+        "Statistical outlier screening was applied where at least five observed numeric values were available.",
+        "LOW" if not outlier_count else "LOW",
+    )
+    if outlier_count:
+        issues.append(_quality_issue(
+            "LOW",
+            "Plausibility",
+            "Statistical outlier (IQR)",
+            indicator,
+            outlier_count,
+            pct(outlier_count, max(len(valid_numeric), 1)),
+            "Outliers may indicate data-entry problems, unusual service activity or genuine programme events.",
+            "Validate flagged values against source records and programme context before deciding whether they are erroneous.",
+        ))
+
+    # ------------------------------------------------------------
+    # 5. TIMELINESS — only assess when a period/date exists
+    # ------------------------------------------------------------
+    if period_col:
+        period_values = df[period_col].astype("string")
+        parsed = pd.to_datetime(period_values, errors="coerce")
+
+        if parsed.notna().sum() == 0:
+            extracted = period_values.str.extract(r"(20\d{2})[\-/]?(\d{1,2})", expand=True)
+            if not extracted.empty:
+                years = pd.to_numeric(extracted[0], errors="coerce")
+                months = pd.to_numeric(extracted[1], errors="coerce")
+                parsed = pd.to_datetime(
+                    dict(year=years, month=months.clip(1, 12), day=1),
+                    errors="coerce",
+                )
+
+        if parsed.notna().any():
+            future_count = int((parsed > pd.Timestamp.today()).sum())
+            add_matrix(
+                "Timeliness",
+                "Future reporting periods",
+                f"{future_count:,}",
+                "PASS" if future_count == 0 else "FAIL",
+                f"Indicator periods assessed using detected period column: {period_col}.",
+                "LOW" if future_count == 0 else "HIGH",
+            )
+            if future_count:
+                issues.append(_quality_issue(
+                    "HIGH",
+                    "Timeliness",
+                    "Future reporting period",
+                    f"{indicator} | {period_col}",
+                    future_count,
+                    pct(future_count),
+                    "Future-dated observations can distort current reporting and trend interpretation.",
+                    "Verify period selection, reporting calendar and extraction filters.",
+                ))
+        else:
+            add_matrix(
+                "Timeliness",
+                "Period parseability",
+                "Not determinable",
+                "INFO",
+                f"Period field {period_col} was detected but could not be parsed reliably.",
+                "LOW",
+            )
+    else:
+        add_matrix(
+            "Timeliness",
+            "Reporting period",
+            "Not detected",
+            "INFO",
+            "No standard period/date field was detected for the selected indicator.",
+            "LOW",
+        )
+
+    # ------------------------------------------------------------
+    # 6. INTEGRITY — organisation unit availability
+    # ------------------------------------------------------------
+    if ou_col:
+        ou_missing = int(df[ou_col].isna().sum() + df[ou_col].astype("string").str.strip().eq("").sum())
+        # Avoid double counting rows that are both NA and empty.
+        ou_missing = int((df[ou_col].isna() | df[ou_col].astype("string").str.strip().eq("")).sum())
+        add_matrix(
+            "Integrity",
+            "Organisation unit field",
+            f"{ou_missing:,} missing",
+            "PASS" if ou_missing == 0 else "REVIEW",
+            f"Organisation unit field detected as {ou_col}.",
+            "LOW" if ou_missing == 0 else "MEDIUM",
+        )
+        if ou_missing:
+            issues.append(_quality_issue(
+                "MEDIUM",
+                "Integrity",
+                "Missing organisation unit",
+                ou_col,
+                ou_missing,
+                pct(ou_missing),
+                "Missing organisation units prevent reliable geographic attribution and comparison.",
+                "Validate OU mapping and confirm that the extraction includes the intended reporting hierarchy.",
+            ))
+    else:
+        add_matrix(
+            "Integrity",
+            "Organisation unit field",
+            "Not detected",
+            "REVIEW",
+            "No standard organisation-unit field was detected for the selected indicator.",
+            "MEDIUM",
+        )
+        issues.append(_quality_issue(
+            "MEDIUM",
+            "Integrity",
+            "Organisation unit not available",
+            indicator,
+            0,
+            0,
+            "Without an organisation-unit field, OU-level completeness, duplication and comparison cannot be fully assessed.",
+            "Include a DHIS2 organisation-unit identifier/name in the extraction when OU-level audit is required.",
+        ))
+
+    # ------------------------------------------------------------
+    # 7. CONSISTENCY — explicit numerator/denominator fields
+    # ------------------------------------------------------------
+    numerator_cols = [
+        c for c in df.columns
+        if re.search(r"(^|[_\s-])num(erator)?($|[_\s-])", str(c), re.I)
+    ]
+    denominator_cols = [
+        c for c in df.columns
+        if re.search(r"(^|[_\s-])den(ominator)?($|[_\s-])", str(c), re.I)
+    ]
+
+    # Prefer pairs whose names share a meaningful base with the selected indicator.
+    def _base_name(value):
+        s = re.sub(r"[^a-z0-9]+", " ", str(value).lower())
+        s = re.sub(r"\b(numerator|denominator|num|den)\b", " ", s)
+        return " ".join(s.split())
+
+    selected_base = _base_name(indicator)
+    candidate_pairs = []
+    for num_col in numerator_cols:
+        for den_col in denominator_cols:
+            score = 1 if selected_base and (
+                selected_base in _base_name(num_col) or
+                selected_base in _base_name(den_col)
+            ) else 0
+            candidate_pairs.append((score, num_col, den_col))
+
+    candidate_pairs.sort(reverse=True, key=lambda x: x[0])
+    pair = candidate_pairs[0][1:] if candidate_pairs else None
+
+    if pair:
+        num_col, den_col = pair
+        num = pd.to_numeric(df[num_col], errors="coerce")
+        den = pd.to_numeric(df[den_col], errors="coerce")
+        invalid_den = int((den <= 0).sum())
+        num_gt_den = int(
+            ((num > den) & den.notna() & num.notna() & (den > 0)).sum()
+        )
+        total_consistency_issues = invalid_den + num_gt_den
+
+        status = "PASS" if total_consistency_issues == 0 else "FAIL"
+        priority = "LOW" if total_consistency_issues == 0 else "HIGH"
+        add_matrix(
+            "Consistency",
+            "Numerator / denominator validation",
+            f"{total_consistency_issues:,}",
+            status,
+            f"Pair assessed: {num_col} / {den_col}.",
+            priority,
+        )
+        if invalid_den:
+            issues.append(_quality_issue(
+                "MEDIUM",
+                "Consistency",
+                "Non-positive denominator",
+                den_col,
+                invalid_den,
+                pct(invalid_den),
+                "A zero or negative denominator prevents a valid rate calculation.",
+                "Validate denominator definition, reporting coverage and source values.",
+            ))
+        if num_gt_den:
+            issues.append(_quality_issue(
+                "HIGH",
+                "Consistency",
+                "Numerator greater than denominator",
+                f"{num_col} / {den_col}",
+                num_gt_den,
+                pct(num_gt_den),
+                "A numerator above its denominator produces an impossible rate above 100% for a conventional coverage ratio.",
+                "Check indicator formula, aggregation and reporting grain.",
+            ))
+    else:
+        add_matrix(
+            "Consistency",
+            "Numerator / denominator validation",
+            "Not available",
+            "INFO",
+            "No explicit numerator/denominator pair relevant to the selected indicator was detected.",
+            "LOW",
+        )
+
+    # ------------------------------------------------------------
+    # Score: use the same priority-weighted philosophy as the
+    # existing engine, but normalize to the selected indicator.
+    # ------------------------------------------------------------
+    order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+    issues.sort(key=lambda x: (order.get(str(x.get("Priority", "")).upper(), 9), x.get("Domain", "")))
+
+    weights = {"HIGH": 5, "MEDIUM": 2, "LOW": 0.5}
+    penalty = sum(weights.get(str(i.get("Priority", "")).upper(), 0) for i in issues)
+
+    # Indicator-level score is normalized against the number of controls,
+    # not the width of the complete dataset.
+    denominator = max(len(matrix) * 2, 1)
+    score = max(0.0, min(100.0, 100 - (penalty / denominator * 100)))
+
+    summary = {
+        "score": round(score, 1),
+        "rating": (
+            "Excellent" if score >= 90
+            else "Good" if score >= 75
+            else "Needs review" if score >= 50
+            else "Poor"
+        ),
+        "rows": n,
+        "columns": 1,
+        "issues": len(issues),
+        "indicator": indicator,
+        "matrix": matrix,
+    }
+    return issues, matrix, summary
+
 def check_data_quality(df):
     """Backward-compatible wrapper used by the rest of the app."""
     issues, _, _ = build_quality_matrix(df)
@@ -2100,17 +2582,117 @@ def render_ai_quality_interpretation(df, quality_issues, quality_matrix, quality
             st.warning(result.get("text", "AI quality interpretation is unavailable."))
 
 
-def render_quality_dashboard(df, quality_issues, quality_matrix, quality_summary):
-    """Manager/auditor-focused DHIS2 quality control register."""
 
+def render_quality_dashboard(
+    df,
+    quality_issues,
+    quality_matrix,
+    quality_summary,
+    selected_indicators=None,
+):
+    """
+    Manager/auditor-focused DHIS2 quality control register.
+
+    UI is intentionally unchanged. When the user has confirmed one or more
+    indicators, the same register is rendered separately for each selected
+    indicator using an indicator-level DHIS2-oriented assessment. When no
+    indicator is selected, the existing complete-dataset assessment is shown.
+    """
     st.subheader("📐 DHIS2 Quality Dimensions")
 
-    score = float(quality_summary.get("score", 0))
-    rating = str(quality_summary.get("rating", "Unknown"))
-    high_count = sum(i.get("Priority") == "HIGH" for i in quality_issues)
-    medium_count = sum(i.get("Priority") == "MEDIUM" for i in quality_issues)
-    low_count = sum(i.get("Priority") == "LOW" for i in quality_issues)
-    matrix_df = pd.DataFrame(quality_matrix)
+    selected_indicators = [
+        str(c) for c in (selected_indicators or [])
+        if str(c) in df.columns
+    ]
+
+    # ------------------------------------------------------------
+    # Build indicator-specific assessments only after user selection.
+    # ------------------------------------------------------------
+    indicator_assessments = []
+    if selected_indicators:
+        for indicator in selected_indicators:
+            ind_issues, ind_matrix, ind_summary = build_indicator_quality_matrix(
+                df, indicator
+            )
+            indicator_assessments.append(
+                {
+                    "indicator": indicator,
+                    "issues": ind_issues,
+                    "matrix": ind_matrix,
+                    "summary": ind_summary,
+                }
+            )
+
+        # Combined evidence is used for the existing summary cards and
+        # optional AI interpretation, without changing their interface.
+        combined_issues = []
+        combined_matrix = []
+        scores = []
+
+        for assessment in indicator_assessments:
+            indicator = assessment["indicator"]
+            scores.append(float(assessment["summary"].get("score", 0)))
+
+            for item in assessment["issues"]:
+                item_copy = dict(item)
+                item_copy["Column"] = (
+                    f"{indicator} | {item_copy.get('Column', '')}"
+                    if item_copy.get("Column")
+                    else indicator
+                )
+                combined_issues.append(item_copy)
+
+            for item in assessment["matrix"]:
+                item_copy = dict(item)
+                # Keep the existing table columns unchanged. The indicator
+                # context is placed in the audit-detail text rather than
+                # introducing a new visible column.
+                detail = str(item_copy.get("Details", ""))
+                item_copy["Details"] = (
+                    f"Indicator: {indicator}. {detail}"
+                )
+                combined_matrix.append(item_copy)
+
+        combined_score = round(float(np.mean(scores)), 1) if scores else 0.0
+        combined_rating = (
+            "Excellent" if combined_score >= 90
+            else "Good" if combined_score >= 75
+            else "Needs review" if combined_score >= 50
+            else "Poor"
+        )
+
+        quality_issues_for_dashboard = combined_issues
+        quality_matrix_for_dashboard = combined_matrix
+        quality_summary_for_dashboard = {
+            "score": combined_score,
+            "rating": combined_rating,
+            "rows": len(df),
+            "columns": len(selected_indicators),
+            "issues": len(combined_issues),
+            "matrix": combined_matrix,
+            "selected_indicators": selected_indicators,
+        }
+    else:
+        indicator_assessments = []
+        quality_issues_for_dashboard = quality_issues
+        quality_matrix_for_dashboard = quality_matrix
+        quality_summary_for_dashboard = quality_summary
+
+    score = float(quality_summary_for_dashboard.get("score", 0))
+    rating = str(quality_summary_for_dashboard.get("rating", "Unknown"))
+    high_count = sum(
+        str(i.get("Priority", "")).upper() == "HIGH"
+        for i in quality_issues_for_dashboard
+    )
+    medium_count = sum(
+        str(i.get("Priority", "")).upper() == "MEDIUM"
+        for i in quality_issues_for_dashboard
+    )
+    low_count = sum(
+        str(i.get("Priority", "")).upper() == "LOW"
+        for i in quality_issues_for_dashboard
+    )
+    matrix_df = pd.DataFrame(quality_matrix_for_dashboard)
 
     rating_class = (
         "dq-score-excellent" if score >= 90 else
@@ -2131,47 +2713,59 @@ def render_quality_dashboard(df, quality_issues, quality_matrix, quality_summary
             </div>
             <div class="dq-summary-card">
                 <div class="dq-summary-label">Control findings</div>
-                <div class="dq-summary-value">{len(quality_issues):,}</div>
+                <div class="dq-summary-value">{len(quality_issues_for_dashboard):,}</div>
             </div>
             <div class="dq-summary-card">
                 <div class="dq-summary-label">High priority</div>
                 <div class="dq-summary-value">{high_count:,}</div>
             </div>
         </div>
-        """
-        , unsafe_allow_html=True,
+        """,
+        unsafe_allow_html=True,
+    )
+
+    scope_text = (
+        f"selected indicator(s): <strong>{html.escape(', '.join(selected_indicators))}</strong>"
+        if selected_indicators
+        else f"<strong>{len(df):,}</strong> loaded records across <strong>{len(df.columns):,}</strong> fields"
     )
 
     st.markdown(
         f"""
         <div class="dq-audit-note">
-            <strong>Audit view:</strong> This register evaluates 
-            <strong>{len(df):,}</strong> loaded records across 
-            <strong>{len(df.columns):,}</strong> fields. 
-            <strong>FAIL</strong> findings require remediation, 
-            <strong>REVIEW</strong> findings require validation, 
-            and <strong>INFO</strong> findings document control limitations. 
+            <strong>Audit view:</strong> This register evaluates {scope_text}.
+            <strong>FAIL</strong> findings require remediation,
+            <strong>REVIEW</strong> findings require validation,
+            and <strong>INFO</strong> findings document control limitations.
             Source values are not silently deleted or corrected.
         </div>
-        """
-        , unsafe_allow_html=True,
+        """,
+        unsafe_allow_html=True,
     )
 
     def status_badge(status):
         value = str(status or "INFO").upper()
-        cls = {"PASS": "dq-badge-pass", "REVIEW": "dq-badge-review",
-               "FAIL": "dq-badge-fail", "INFO": "dq-badge-info"}.get(value, "dq-badge-info")
+        cls = {
+            "PASS": "dq-badge-pass",
+            "REVIEW": "dq-badge-review",
+            "FAIL": "dq-badge-fail",
+            "INFO": "dq-badge-info",
+        }.get(value, "dq-badge-info")
         return f'<span class="dq-badge {cls}">{html.escape(value)}</span>'
 
     def priority_badge(priority):
         value = str(priority or "LOW").upper()
-        cls = {"HIGH": "dq-priority-high", "MEDIUM": "dq-priority-medium",
-               "LOW": "dq-priority-low"}.get(value, "dq-priority-low")
+        cls = {
+            "HIGH": "dq-priority-high",
+            "MEDIUM": "dq-priority-medium",
+            "LOW": "dq-priority-low",
+        }.get(value, "dq-priority-low")
         return f'<span class="dq-badge {cls}">{html.escape(value)}</span>'
 
     def audit_action(row):
         status = str(row.get("Status", "")).upper()
         metric = str(row.get("Metric", "")).lower()
+
         if status == "FAIL":
             return "Remediate and re-run the control before reporting."
         if status == "REVIEW":
@@ -2188,9 +2782,153 @@ def render_quality_dashboard(df, quality_issues, quality_matrix, quality_summary
             return "Document limitation and confirm whether additional fields are required."
         return "No corrective action required; retain as audit evidence."
 
-    if not matrix_df.empty:
+    # ------------------------------------------------------------
+    # SAME REGISTER UI — rendered once per selected indicator.
+    # ------------------------------------------------------------
+    if indicator_assessments:
+        st.markdown(
+            "### 📐 DHIS2 Quality Dimensions"
+        )
+        st.caption(
+            "Indicator-level assessment aligned with DHIS2 data-quality practice: "
+            "data-element completeness, correctness/validity, consistency, timeliness, "
+            "plausibility and organisation-unit integrity."
+        )
+
+        for assessment in indicator_assessments:
+            indicator = assessment["indicator"]
+            matrix_df = pd.DataFrame(assessment["matrix"])
+
+            if matrix_df.empty:
+                continue
+
+            rows = []
+            for _, row in matrix_df.iterrows():
+                rows.append(
+                    f"""
+                    <tr>
+                        <td class="dq-domain">{html.escape(str(row.get("Domain", "")))}</td>
+                        <td class="dq-metric">{html.escape(str(row.get("Metric", "")))}</td>
+                        <td class="dq-result">{html.escape(str(row.get("Result", "")))}</td>
+                        <td>{status_badge(row.get("Status", ""))}</td>
+                        <td>{priority_badge(row.get("Priority", ""))}</td>
+                        <td>{html.escape(str(row.get("Details", "")))}</td>
+                        <td class="dq-action">{html.escape(audit_action(row))}</td>
+                    </tr>
+                    """
+                )
+
+            quality_register_html = f"""
+            <div class="dq-audit-shell">
+                <div class="dq-audit-toolbar">
+                    <div class="dq-audit-title">DHIS2 Quality Control Register</div>
+                    <div class="dq-audit-subtitle">
+                        Indicator: <strong>{html.escape(indicator)}</strong>
+                        · Indicator-level assessment for the selected user analysis.
+                    </div>
+                </div>
+                <div class="dq-table-wrap">
+                    <table class="dq-table">
+                        <thead>
+                            <tr>
+                                <th>Quality domain</th>
+                                <th>Control / metric</th>
+                                <th>Result</th>
+                                <th>Status</th>
+                                <th>Priority</th>
+                                <th>Audit evidence / details</th>
+                                <th>Management action</th>
+                            </tr>
+                        </thead>
+                        <tbody>{''.join(rows)}</tbody>
+                    </table>
+                </div>
+            </div>
+            """
+            st.html(textwrap.dedent(quality_register_html))
+
+            ind_issues = assessment["issues"]
+            ind_summary = assessment["summary"]
+
+            if ind_issues:
+                detail_rows = []
+                for row in ind_issues:
+                    priority = str(row.get("Priority", "LOW")).upper()
+                    percentage = row.get("Percentage", "")
+                    if percentage != "":
+                        try:
+                            percentage = f"{float(percentage):.2f}%"
+                        except Exception:
+                            percentage = str(percentage)
+
+                    detail_rows.append(
+                        f"""
+                        <tr>
+                            <td>{priority_badge(priority)}</td>
+                            <td class="dq-domain">{html.escape(str(row.get("Domain", "")))}</td>
+                            <td class="dq-metric">{html.escape(str(row.get("Issue", "")))}</td>
+                            <td>{html.escape(str(row.get("Column", indicator)))}</td>
+                            <td class="dq-result">{html.escape(str(row.get("Count", "")))}</td>
+                            <td>{html.escape(str(percentage))}</td>
+                            <td>{html.escape(str(row.get("Impact", "")))}</td>
+                            <td class="dq-action">{html.escape(str(row.get("Recommendation", "")))}</td>
+                        </tr>
+                        """
+                    )
+
+                issue_register_html = f"""
+                <div class="dq-audit-shell">
+                    <div class="dq-audit-toolbar">
+                        <div class="dq-audit-title">Data Quality Issue Register</div>
+                        <div class="dq-audit-subtitle">
+                            Indicator: <strong>{html.escape(indicator)}</strong>
+                            · Findings are prioritised for investigation, remediation and audit follow-up.
+                        </div>
+                    </div>
+                    <div class="dq-table-wrap">
+                        <table class="dq-table dq-detail-table">
+                            <thead>
+                                <tr>
+                                    <th>Priority</th>
+                                    <th>Domain</th>
+                                    <th>Issue</th>
+                                    <th>Field / column</th>
+                                    <th>Count</th>
+                                    <th>%</th>
+                                    <th>Impact</th>
+                                    <th>Recommended action</th>
+                                </tr>
+                            </thead>
+                            <tbody>{''.join(detail_rows)}</tbody>
+                        </table>
+                    </div>
+                </div>
+                """
+                st.html(textwrap.dedent(issue_register_html))
+
+                if any(
+                    str(i.get("Priority", "")).upper() == "HIGH"
+                    for i in ind_issues
+                ):
+                    st.error(
+                        f"High-priority quality issues were identified for {indicator}. "
+                        "Review and resolve these findings before using the indicator "
+                        "for high-stakes management decisions or formal reporting."
+                    )
+            else:
+                st.success(
+                    f"All implemented indicator-level DHIS2 quality checks passed for {indicator}."
+                )
+
+    elif not matrix_df.empty:
+        # --------------------------------------------------------
+        # Existing complete-dataset register — unchanged behavior.
+        # --------------------------------------------------------
         st.markdown("### 📐 DHIS2 Quality Dimensions")
-        st.caption("Advanced quality-control register designed for data managers, MEL teams and data-quality auditors.")
+        st.caption(
+            "Advanced quality-control register designed for data managers, MEL teams and data-quality auditors."
+        )
+
         rows = []
         for _, row in matrix_df.iterrows():
             rows.append(
@@ -2206,6 +2944,7 @@ def render_quality_dashboard(df, quality_issues, quality_matrix, quality_summary
                 </tr>
                 """
             )
+
         quality_register_html = f"""
         <div class="dq-audit-shell">
             <div class="dq-audit-toolbar">
@@ -2235,11 +2974,17 @@ def render_quality_dashboard(df, quality_issues, quality_matrix, quality_summary
         """
         st.html(textwrap.dedent(quality_register_html))
 
-    if quality_issues:
+    # ------------------------------------------------------------
+    # Detailed findings for the displayed scope.
+    # ------------------------------------------------------------
+    if quality_issues_for_dashboard and not indicator_assessments:
         st.markdown("### 🔍 Detailed Quality Findings")
-        st.caption("Prioritised issue register for investigation, remediation and audit follow-up.")
-        issues_df = pd.DataFrame(quality_issues).copy()
+        st.caption(
+            "Prioritised issue register for investigation, remediation and audit follow-up."
+        )
+        issues_df = pd.DataFrame(quality_issues_for_dashboard).copy()
         detail_rows = []
+
         for _, row in issues_df.iterrows():
             priority = str(row.get("Priority", "LOW")).upper()
             percentage = row.get("Percentage", "")
@@ -2248,6 +2993,7 @@ def render_quality_dashboard(df, quality_issues, quality_matrix, quality_summary
                     percentage = f"{float(percentage):.2f}%"
                 except Exception:
                     percentage = str(percentage)
+
             detail_rows.append(
                 f"""
                 <tr>
@@ -2262,6 +3008,7 @@ def render_quality_dashboard(df, quality_issues, quality_matrix, quality_summary
                 </tr>
                 """
             )
+
         issue_register_html = f"""
         <div class="dq-audit-shell">
             <div class="dq-audit-toolbar">
@@ -2290,42 +3037,51 @@ def render_quality_dashboard(df, quality_issues, quality_matrix, quality_summary
         </div>
         """
         st.html(textwrap.dedent(issue_register_html))
+
         if high_count:
             st.error(
                 "High-priority quality issues may materially affect the requested analysis. "
                 "Review and resolve these findings before using results for management decisions or formal reporting."
             )
-    else:
-        st.success("All implemented DHIS2 quality checks passed for the returned dataset.")
+    elif not indicator_assessments and not quality_issues_for_dashboard:
+        st.success(
+            "All implemented DHIS2 quality checks passed for the returned dataset."
+        )
 
     with st.expander("📚 Quality methodology", expanded=False):
         st.markdown("""
-        **Completeness** — missing cells, missing OU and missing period.
+        **DHIS2 alignment** — The assessment follows the DHIS2 data-quality approach by
+        considering completeness, correctness/validity, consistency and timeliness, with
+        additional integrity and plausibility controls useful for routine audit.
 
-        **Uniqueness** — exact duplicate rows and possible OU/period/indicator duplicate records.
+        **Completeness** — selected data-element missingness; this does not replace
+        DHIS2 reporting-rate completeness when expected reports are available.
 
-        **Validity** — numeric parsing failures, negative values and percentage/rate plausibility.
+        **Uniqueness** — organisation-unit/period reporting grain where those fields exist.
 
-        **Consistency** — numerator/denominator checks where explicit fields are available.
+        **Validity / correctness** — numeric parsing and negative-value checks.
+
+        **Consistency** — numerator/denominator validation when explicit related fields
+        can be identified.
 
         **Timeliness** — future reporting periods and period parseability.
 
-        **Integrity** — organisation-unit availability and structural/cardinality checks.
+        **Integrity** — organisation-unit availability for geographic attribution.
 
-        **Plausibility** — zero concentration and statistical IQR outliers.
+        **Plausibility** — percentage/rate limits, zero concentration and statistical
+        outlier screening.
 
-        **Important:** outliers and zeros are flagged for review; they are not automatically deleted or converted to missing values.
+        **Important:** outliers and zeros are flagged for review; they are not
+        automatically deleted or converted to missing values.
         """)
 
-
-    # ========================================================
-    # AI QUALITY INTERPRETATION — OPTIONAL, UI-PRESERVING
-    # ========================================================
+    # Existing AI quality interpretation UI remains unchanged. It receives the
+    # selected-indicator evidence when a user has selected indicators.
     render_ai_quality_interpretation(
         df=df,
-        quality_issues=quality_issues,
-        quality_matrix=quality_matrix,
-        quality_summary=quality_summary,
+        quality_issues=quality_issues_for_dashboard,
+        quality_matrix=quality_matrix_for_dashboard,
+        quality_summary=quality_summary_for_dashboard,
     )
 
 # ============================================================
@@ -6445,11 +7201,18 @@ if automatic_analysis or st.session_state.get("data_loaded", False):
 
     quality_issues, quality_matrix, quality_summary = (top_quality_issues, top_quality_matrix, top_quality_summary)
 
+    selected_quality_indicators = (
+        chart_plan.get("y_columns", [])
+        if chart_plan
+        else []
+    )
+
     render_quality_dashboard(
         df=df,
         quality_issues=quality_issues,
         quality_matrix=quality_matrix,
         quality_summary=quality_summary,
+        selected_indicators=selected_quality_indicators,
     )
 
     # ========================================================
