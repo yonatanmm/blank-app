@@ -28,8 +28,8 @@ DHIS2_URL = os.getenv(
 ).rstrip("/")
 
 DHIS2_USERNAME = os.getenv("DHIS2_USERNAME", "data.ai").strip()
-DHIS2_PASSWORD = os.getenv("DHIS2_PASSWORD", "Data.ai@2025").strip()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "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").strip()
+DHIS2_PASSWORD = os.getenv("DHIS2_PASSWORD", "").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5").strip()
 
 
