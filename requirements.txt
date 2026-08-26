@@ -1,0 +1,9 @@
+streamlit>=1.61.1
+numpy
+pandas
+requests
+python-dotenv
+openai
+plotly
+openpyxl
+xlrd

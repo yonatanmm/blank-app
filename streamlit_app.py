@@ -1,0 +1,6459 @@
+import os
+import html
+import re
+import json
+import time
+import textwrap
+from io import BytesIO, StringIO
+from urllib.parse import urlparse, urlunparse
+
+import numpy as np
+import pandas as pd
+import requests
+import streamlit as st
+from dotenv import load_dotenv
+from openai import OpenAI
+
+
+# ============================================================
+# ENVIRONMENT
+# ============================================================
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(BASE_DIR, ".env"), override=True)
+
+DHIS2_URL = os.getenv(
+    "DHIS2_URL",
+    "https://dhis2.nutritionintl.org"
+).rstrip("/")
+
+DHIS2_USERNAME = os.getenv("DHIS2_USERNAME", "data.ai")
+DHIS2_PASSWORD = os.getenv("DHIS2_PASSWORD", "")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
+
+
+# ============================================================
+# PAGE
+# ============================================================
+
+st.set_page_config(
+    page_title="DANIP-NI AI Data Intelligence",
+    page_icon="🧠",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+
+# ============================================================
+# CSS
+# ============================================================
+
+st.markdown(
+    """
+    <style>
+    html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {
+        background: #ffffff !important;
+        color: #1f2937 !important;
+    }
+
+    [data-testid="stHeader"] {
+        background: #ffffff !important;
+    }
+
+    .block-container {
+        max-width: 1500px;
+        padding: 1.1rem 2rem 3rem 2rem;
+    }
+
+    .app-hero {
+        padding: 1.2rem 1.35rem;
+        border-radius: 18px;
+        border: 1px solid rgba(148,163,184,.18);
+        background: #ffffff;
+        box-shadow: 0 1px 4px rgba(15,23,42,.06);
+        margin-bottom: 1rem;
+    }
+
+    .app-title {
+        font-size: clamp(1.6rem, 3vw, 2.35rem);
+        font-weight: 800;
+        letter-spacing: -.03em;
+        margin: 0;
+    }
+
+    .app-subtitle {
+        color: #64748b;
+        margin-top: .45rem;
+        font-size: .95rem;
+        line-height: 1.5;
+    }
+
+    .status-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: .45rem;
+        margin-top: .75rem;
+    }
+
+    .status-pill {
+        display: inline-block;
+        border-radius: 999px;
+        padding: .3rem .65rem;
+        font-size: .75rem;
+        font-weight: 700;
+        border: 1px solid rgba(148,163,184,.18);
+        background: rgba(30,41,59,.7);
+    }
+
+    .status-ok { color: #86efac; }
+    .status-info { color: #93c5fd; }
+
+    .section-card {
+        border: 1px solid rgba(148,163,184,.16);
+        border-radius: 15px;
+        padding: 1rem 1.05rem;
+        background: #ffffff;
+        margin-bottom: .75rem;
+    }
+
+    .section-kicker {
+        color: #60a5fa;
+        font-size: .72rem;
+        font-weight: 800;
+        letter-spacing: .08em;
+        text-transform: uppercase;
+    }
+
+    .section-title {
+        font-size: 1.08rem;
+        font-weight: 750;
+        margin: .15rem 0 .2rem 0;
+    }
+
+    .section-help {
+        color: #94a3b8;
+        font-size: .82rem;
+        line-height: 1.45;
+    }
+
+    div[data-testid="stMetric"] {
+        border: 1px solid rgba(148,163,184,.16);
+        border-radius: 14px;
+        padding: .6rem .75rem;
+        background: #ffffff;
+        min-height: 88px;
+    }
+
+    .ai-result {
+        padding: 1.2rem 1.25rem;
+        border-radius: 15px;
+        border: 1px solid rgba(96,165,250,.2);
+        background: #ffffff;
+        line-height: 1.7;
+    }
+
+    [data-testid="stSidebar"] {
+        background: #ffffff !important;
+        border-right: 1px solid #e5e7eb;
+    }
+
+    [data-testid="stDataFrame"] {
+        background: #ffffff !important;
+    }
+
+    .auto-analysis-card {
+        border: 1px solid #dbeafe;
+        background: linear-gradient(135deg, #ffffff 0%, #f8fbff 100%);
+        box-shadow: 0 2px 8px rgba(37, 99, 235, .05);
+    }
+
+    .auto-analysis-card .section-kicker {
+        color: #2563eb !important;
+    }
+
+
+    .guided-panel {
+        border: 1px solid #e5e7eb;
+        border-radius: 16px;
+        padding: 1rem;
+        background: #ffffff;
+        margin-bottom: 1rem;
+    }
+
+    .comparison-note {
+        border-left: 4px solid #2563eb;
+        padding: .75rem 1rem;
+        background: #eff6ff;
+        border-radius: 8px;
+        margin: .75rem 0;
+    }
+
+
+    /* =========================================================
+       KPI / METRIC CARDS
+       Fix invisible text on white background.
+       ========================================================= */
+
+    [data-testid="stMetric"] {
+        background: #ffffff !important;
+        border: 1px solid #e2e8f0 !important;
+        border-radius: 12px !important;
+        padding: 14px 16px !important;
+        box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04) !important;
+    }
+
+    [data-testid="stMetric"] label,
+    [data-testid="stMetric"] [data-testid="stMetricLabel"],
+    [data-testid="stMetric"] [data-testid="stMetricValue"],
+    [data-testid="stMetric"] [data-testid="stMetricDelta"],
+    [data-testid="stMetric"] div,
+    [data-testid="stMetric"] span {
+        color: #1f2937 !important;
+        -webkit-text-fill-color: #1f2937 !important;
+        opacity: 1 !important;
+    }
+
+    [data-testid="stMetric"] [data-testid="stMetricLabel"] {
+        color: #64748b !important;
+        -webkit-text-fill-color: #64748b !important;
+        font-size: 0.82rem !important;
+        font-weight: 600 !important;
+    }
+
+    [data-testid="stMetric"] [data-testid="stMetricValue"] {
+        color: #111827 !important;
+        -webkit-text-fill-color: #111827 !important;
+        font-size: 1.65rem !important;
+        font-weight: 700 !important;
+        line-height: 1.2 !important;
+    }
+
+    [data-testid="stMetric"] [data-testid="stMetricDelta"] {
+        color: #475569 !important;
+        -webkit-text-fill-color: #475569 !important;
+    }
+
+    /* Generic metric markup fallback for Streamlit versions */
+    div[data-testid="stMetricLabel"] p,
+    div[data-testid="stMetricValue"] div,
+    div[data-testid="stMetricValue"] {
+        color: #111827 !important;
+        -webkit-text-fill-color: #111827 !important;
+        opacity: 1 !important;
+    }
+
+    div[data-testid="stMetricLabel"] p {
+        color: #64748b !important;
+        -webkit-text-fill-color: #64748b !important;
+    }
+
+    .empty-state {
+        border: 1px dashed rgba(148,163,184,.28);
+        border-radius: 15px;
+        padding: 1.35rem;
+        text-align: center;
+        color: #94a3b8;
+        margin-top: .75rem;
+    }
+
+    .stButton > button,
+    .stDownloadButton > button {
+        border-radius: 10px;
+        font-weight: 700;
+        min-height: 42px;
+    }
+
+    /* =========================================================
+       FORM CONTROLS — FORCE LIGHT/WHITE INPUTS
+       ========================================================= */
+
+    textarea,
+    input,
+    [data-baseweb="textarea"] textarea,
+    [data-baseweb="input"] input {
+        background: #ffffff !important;
+        color: #111827 !important;
+        -webkit-text-fill-color: #111827 !important;
+        caret-color: #111827 !important;
+        border: 1px solid #cbd5e1 !important;
+        border-radius: 10px !important;
+        opacity: 1 !important;
+    }
+
+    textarea::placeholder,
+    input::placeholder {
+        color: #64748b !important;
+        -webkit-text-fill-color: #64748b !important;
+        opacity: 1 !important;
+    }
+
+    [data-testid="stTextArea"] textarea {
+        background: #ffffff !important;
+        color: #111827 !important;
+        -webkit-text-fill-color: #111827 !important;
+    }
+
+    [data-testid="stSelectbox"] [data-baseweb="select"] > div,
+    [data-testid="stMultiSelect"] [data-baseweb="select"] > div {
+        background: #ffffff !important;
+        color: #111827 !important;
+        border-color: #cbd5e1 !important;
+    }
+
+    [data-testid="stSelectbox"] input,
+    [data-testid="stMultiSelect"] input {
+        color: #111827 !important;
+        -webkit-text-fill-color: #111827 !important;
+    }
+
+    [data-baseweb="select"] span,
+    [data-baseweb="select"] div {
+        color: #111827 !important;
+    }
+
+    [data-baseweb="popover"],
+    [role="listbox"] {
+        background: #ffffff !important;
+        color: #111827 !important;
+    }
+
+    [role="option"] {
+        color: #111827 !important;
+        background: #ffffff !important;
+    }
+
+    [role="option"]:hover {
+        background: #f1f5f9 !important;
+    }
+
+    [data-testid="stBaseButton-secondary"] {
+        background: #ffffff !important;
+        color: #1f2937 !important;
+        -webkit-text-fill-color: #1f2937 !important;
+        border: 1px solid #cbd5e1 !important;
+    }
+
+    [data-testid="stBaseButton-secondary"]:hover {
+        background: #f8fafc !important;
+        color: #111827 !important;
+    }
+
+    [data-testid="stBaseButton-primary"] {
+        color: #ffffff !important;
+        -webkit-text-fill-color: #ffffff !important;
+    }
+
+    .stCaption,
+    [data-testid="stCaptionContainer"] {
+        color: #64748b !important;
+    }
+
+    @media (max-width: 900px) {
+        .block-container {
+            padding: .8rem .75rem 2rem .75rem;
+        }
+
+        .app-hero {
+            padding: 1rem;
+            border-radius: 14px;
+        }
+
+        div[data-testid="stMetric"] {
+            min-height: 76px;
+        }
+    }
+
+    @media (max-width: 640px) {
+        .block-container {
+            padding: .6rem .45rem 1.5rem .45rem;
+        }
+
+        .app-subtitle {
+            font-size: .86rem;
+        }
+
+        .stButton > button,
+        .stDownloadButton > button {
+            width: 100%;
+        }
+
+        .status-pill {
+            width: 100%;
+            text-align: center;
+        }
+    }
+    
+    .section-card,
+    .guided-panel,
+    .section-title,
+    .section-help,
+    .section-kicker {
+        color: #1f2937 !important;
+        -webkit-text-fill-color: #1f2937 !important;
+    }
+
+    .section-help,
+    .section-kicker {
+        color: #64748b !important;
+        -webkit-text-fill-color: #64748b !important;
+    }
+
+    h1, h2, h3, h4, h5, h6,
+    p, label, [data-testid="stMarkdownContainer"] {
+        color: #1f2937 !important;
+        -webkit-text-fill-color: #1f2937 !important;
+    }
+
+    [data-testid="stAlert"] {
+        color: #1f2937 !important;
+    }
+
+    /* =========================================================
+       REQUESTED VISUALIZATIONS — CLEAN WHITE / BLACK TEXT
+       ========================================================= */
+
+    .requested-viz-card {
+        background: #ffffff !important;
+        border: 1px solid #e2e8f0 !important;
+        border-radius: 12px !important;
+        padding: 1rem !important;
+        margin: .75rem 0 1rem 0 !important;
+        box-shadow: 0 1px 3px rgba(15, 23, 42, .04) !important;
+    }
+
+    .requested-viz-card,
+    .requested-viz-card * {
+        color: #111827 !important;
+        -webkit-text-fill-color: #111827 !important;
+    }
+
+    .viz-data-table-wrap {
+        width: 100%;
+        overflow-x: auto;
+        margin-top: .8rem;
+        border: 1px solid #dbe2ea;
+        border-radius: 9px;
+        background: #ffffff !important;
+    }
+
+    .viz-data-table {
+        width: 100%;
+        border-collapse: collapse;
+        background: #ffffff !important;
+        color: #111827 !important;
+        font-size: .84rem;
+    }
+
+    .viz-data-table th {
+        background: #ffffff !important;
+        color: #111827 !important;
+        font-weight: 800 !important;
+        text-align: left;
+        padding: .62rem .65rem;
+        border-bottom: 1px solid #cbd5e1;
+        white-space: nowrap;
+    }
+
+    .viz-data-table td {
+        background: #ffffff !important;
+        color: #111827 !important;
+        padding: .55rem .65rem;
+        border-bottom: 1px solid #e5e7eb;
+        vertical-align: top;
+    }
+
+    .viz-data-table tr:last-child td {
+        border-bottom: none;
+    }
+
+    .viz-data-table .total-row td {
+        font-weight: 800 !important;
+        border-top: 1px solid #cbd5e1;
+    }
+
+    .viz-notes {
+        margin-top: .7rem;
+        color: #334155 !important;
+        font-size: .78rem;
+        line-height: 1.5;
+    }
+
+    /* =========================================================
+       DHIS2 DATA QUALITY — MANAGER / AUDITOR TABLES
+       ========================================================= */
+
+    .dq-audit-shell {
+        background: #ffffff !important;
+        border: 1px solid #d7dee8 !important;
+        border-radius: 12px !important;
+        padding: 0 !important;
+        overflow: hidden !important;
+        box-shadow: 0 2px 8px rgba(15, 23, 42, .05) !important;
+        margin: .5rem 0 1rem 0 !important;
+    }
+
+    .dq-audit-toolbar {
+        background: #ffffff !important;
+        border-bottom: 1px solid #dbe2ea !important;
+        padding: .85rem 1rem !important;
+    }
+
+    .dq-audit-toolbar,
+    .dq-audit-toolbar * {
+        color: #111827 !important;
+        -webkit-text-fill-color: #111827 !important;
+    }
+
+    .dq-audit-title {
+        font-size: 1rem !important;
+        font-weight: 800 !important;
+        color: #111827 !important;
+        margin: 0 !important;
+    }
+
+    .dq-audit-subtitle {
+        font-size: .78rem !important;
+        color: #475569 !important;
+        margin-top: .25rem !important;
+        line-height: 1.45 !important;
+    }
+
+    .dq-table-wrap {
+        width: 100% !important;
+        overflow-x: auto !important;
+        background: #ffffff !important;
+    }
+
+    .dq-table {
+        width: 100% !important;
+        min-width: 1050px !important;
+        border-collapse: separate !important;
+        border-spacing: 0 !important;
+        background: #ffffff !important;
+        color: #111827 !important;
+        font-size: .80rem !important;
+    }
+
+    .dq-table th {
+        position: sticky !important;
+        top: 0 !important;
+        z-index: 2 !important;
+        background: #ffffff !important;
+        color: #111827 !important;
+        -webkit-text-fill-color: #111827 !important;
+        font-weight: 800 !important;
+        text-align: left !important;
+        padding: .72rem .70rem !important;
+        border-bottom: 2px solid #cbd5e1 !important;
+        border-right: 1px solid #eef2f7 !important;
+        white-space: nowrap !important;
+    }
+
+    .dq-table td {
+        background: #ffffff !important;
+        color: #111827 !important;
+        -webkit-text-fill-color: #111827 !important;
+        padding: .70rem .70rem !important;
+        border-bottom: 1px solid #e5e7eb !important;
+        border-right: 1px solid #f1f5f9 !important;
+        vertical-align: top !important;
+        line-height: 1.4 !important;
+    }
+
+    .dq-table tbody tr:hover td {
+        background: #f8fafc !important;
+        color: #111827 !important;
+    }
+
+    .dq-domain {
+        font-weight: 800 !important;
+        white-space: nowrap !important;
+    }
+
+    .dq-metric {
+        font-weight: 700 !important;
+    }
+
+    .dq-result {
+        font-weight: 800 !important;
+        white-space: nowrap !important;
+    }
+
+    .dq-badge {
+        display: inline-block !important;
+        border-radius: 999px !important;
+        padding: .20rem .52rem !important;
+        font-size: .68rem !important;
+        font-weight: 900 !important;
+        letter-spacing: .03em !important;
+        border: 1px solid #cbd5e1 !important;
+        background: #ffffff !important;
+        color: #111827 !important;
+        -webkit-text-fill-color: #111827 !important;
+        white-space: nowrap !important;
+    }
+
+    .dq-badge-pass {
+        border-color: #86efac !important;
+        background: #f0fdf4 !important;
+        color: #166534 !important;
+        -webkit-text-fill-color: #166534 !important;
+    }
+
+    .dq-badge-review {
+        border-color: #fbbf24 !important;
+        background: #fffbeb !important;
+        color: #92400e !important;
+        -webkit-text-fill-color: #92400e !important;
+    }
+
+    .dq-badge-fail {
+        border-color: #fca5a5 !important;
+        background: #fef2f2 !important;
+        color: #991b1b !important;
+        -webkit-text-fill-color: #991b1b !important;
+    }
+
+    .dq-badge-info {
+        border-color: #93c5fd !important;
+        background: #eff6ff !important;
+        color: #1e40af !important;
+        -webkit-text-fill-color: #1e40af !important;
+    }
+
+    .dq-priority-high {
+        border-color: #fca5a5 !important;
+        background: #fef2f2 !important;
+        color: #991b1b !important;
+        -webkit-text-fill-color: #991b1b !important;
+    }
+
+    .dq-priority-medium {
+        border-color: #fcd34d !important;
+        background: #fffbeb !important;
+        color: #92400e !important;
+        -webkit-text-fill-color: #92400e !important;
+    }
+
+    .dq-priority-low {
+        border-color: #cbd5e1 !important;
+        background: #f8fafc !important;
+        color: #334155 !important;
+        -webkit-text-fill-color: #334155 !important;
+    }
+
+    .dq-action {
+        font-weight: 650 !important;
+        color: #1f2937 !important;
+        -webkit-text-fill-color: #1f2937 !important;
+    }
+
+    .dq-audit-summary {
+        display: grid !important;
+        grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+        gap: .65rem !important;
+        margin: .65rem 0 .9rem 0 !important;
+    }
+
+    .dq-summary-card {
+        background: #ffffff !important;
+        border: 1px solid #dbe2ea !important;
+        border-radius: 10px !important;
+        padding: .72rem .8rem !important;
+    }
+
+    .dq-summary-label {
+        color: #64748b !important;
+        -webkit-text-fill-color: #64748b !important;
+        font-size: .70rem !important;
+        font-weight: 800 !important;
+        text-transform: uppercase !important;
+        letter-spacing: .05em !important;
+    }
+
+    .dq-summary-value {
+        color: #111827 !important;
+        -webkit-text-fill-color: #111827 !important;
+        font-size: 1.25rem !important;
+        font-weight: 850 !important;
+        margin-top: .18rem !important;
+    }
+
+    .dq-score-excellent { border-left: 4px solid #16a34a !important; }
+    .dq-score-good { border-left: 4px solid #2563eb !important; }
+    .dq-score-review { border-left: 4px solid #d97706 !important; }
+    .dq-score-poor { border-left: 4px solid #dc2626 !important; }
+
+    /* =========================================================
+       AI DATA QUALITY INTERPRETATION
+       ========================================================= */
+
+    .dq-ai-quality-card {
+        background: #ffffff !important;
+        border: 1px solid #dbe2ea !important;
+        border-left: 4px solid #2563eb !important;
+        border-radius: 12px !important;
+        padding: 1rem 1.05rem !important;
+        margin: .75rem 0 1rem 0 !important;
+        box-shadow: 0 2px 8px rgba(15, 23, 42, .04) !important;
+    }
+
+    .dq-ai-quality-card,
+    .dq-ai-quality-card * {
+        color: #111827 !important;
+        -webkit-text-fill-color: #111827 !important;
+    }
+
+    .dq-ai-quality-kicker {
+        color: #2563eb !important;
+        -webkit-text-fill-color: #2563eb !important;
+        font-size: .70rem !important;
+        font-weight: 900 !important;
+        letter-spacing: .08em !important;
+        text-transform: uppercase !important;
+        margin-bottom: .25rem !important;
+    }
+
+    .dq-ai-quality-title {
+        font-size: 1.05rem !important;
+        font-weight: 850 !important;
+        margin: 0 0 .35rem 0 !important;
+    }
+
+    .dq-ai-quality-body {
+        font-size: .86rem !important;
+        line-height: 1.65 !important;
+        color: #334155 !important;
+        -webkit-text-fill-color: #334155 !important;
+    }
+
+    .dq-ai-quality-body h1,
+    .dq-ai-quality-body h2,
+    .dq-ai-quality-body h3,
+    .dq-ai-quality-body h4,
+    .dq-ai-quality-body strong {
+        color: #111827 !important;
+        -webkit-text-fill-color: #111827 !important;
+    }
+
+    .dq-ai-quality-body ul,
+    .dq-ai-quality-body ol {
+        margin-top: .35rem !important;
+        margin-bottom: .55rem !important;
+    }
+
+    .dq-ai-quality-body li {
+        margin-bottom: .2rem !important;
+    }
+
+    .dq-ai-quality-meta {
+        display: flex !important;
+        flex-wrap: wrap !important;
+        gap: .45rem !important;
+        margin-top: .75rem !important;
+    }
+
+    .dq-ai-quality-chip {
+        display: inline-block !important;
+        padding: .25rem .55rem !important;
+        border: 1px solid #dbe2ea !important;
+        border-radius: 999px !important;
+        background: #f8fafc !important;
+        color: #334155 !important;
+        -webkit-text-fill-color: #334155 !important;
+        font-size: .70rem !important;
+        font-weight: 800 !important;
+    }
+
+    .dq-ai-quality-disclaimer {
+        margin-top: .7rem !important;
+        padding-top: .65rem !important;
+        border-top: 1px solid #e5e7eb !important;
+        font-size: .73rem !important;
+        line-height: 1.45 !important;
+        color: #64748b !important;
+        -webkit-text-fill-color: #64748b !important;
+    }
+
+    .dq-audit-note {
+        margin: .65rem 0 .9rem 0 !important;
+        padding: .75rem .9rem !important;
+        border: 1px solid #dbe2ea !important;
+        border-left: 4px solid #2563eb !important;
+        border-radius: 8px !important;
+        background: #ffffff !important;
+        color: #1f2937 !important;
+        -webkit-text-fill-color: #1f2937 !important;
+        font-size: .80rem !important;
+        line-height: 1.5 !important;
+    }
+
+    .dq-detail-table {
+        min-width: 1150px !important;
+    }
+
+    @media (max-width: 800px) {
+        .dq-audit-summary {
+            grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+        }
+    }
+
+    @media (max-width: 480px) {
+        .dq-audit-summary {
+            grid-template-columns: 1fr !important;
+        }
+    }
+
+    @media (max-width: 640px) {
+        .requested-viz-card {
+            padding: .7rem !important;
+        }
+
+        .viz-data-table {
+            min-width: 620px;
+        }
+    }
+
+
+
+    /* =========================================================
+       M&E PROGRAMME MANAGER INTERPRETATION
+       ========================================================= */
+    .me-programme-card {
+        background: #ffffff !important;
+        border: 1px solid #dbeafe !important;
+        border-left: 4px solid #2563eb !important;
+        border-radius: 12px !important;
+        padding: 1rem 1.1rem !important;
+        margin: .5rem 0 1rem 0 !important;
+        box-shadow: 0 1px 3px rgba(15,23,42,.04) !important;
+    }
+    .me-programme-kicker {
+        color: #2563eb !important;
+        font-size: .72rem !important;
+        font-weight: 800 !important;
+        letter-spacing: .08em !important;
+    }
+    .me-programme-title {
+        color: #111827 !important;
+        font-size: 1.05rem !important;
+        font-weight: 800 !important;
+        margin-top: .2rem !important;
+    }
+    .me-programme-meta {
+        color: #475569 !important;
+        font-size: .8rem !important;
+        margin-top: .35rem !important;
+    }
+    .me-ai-badge {
+        display: inline-block;
+        padding: .28rem .58rem;
+        border-radius: 999px;
+        background: #eff6ff !important;
+        color: #1d4ed8 !important;
+        border: 1px solid #bfdbfe !important;
+        font-size: .7rem;
+        font-weight: 800;
+        margin: .5rem 0;
+    }
+    .me-programme-result {
+        background: #ffffff !important;
+        color: #111827 !important;
+        border: 1px solid #dbe2ea !important;
+        border-radius: 12px !important;
+        padding: 1rem 1.15rem !important;
+        line-height: 1.65 !important;
+    }
+    .me-programme-result * {
+        color: #111827 !important;
+    }
+</style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ============================================================
+# HEADER
+# ============================================================
+
+st.markdown(
+    """
+    <div class="app-hero">
+        <div class="app-title">DANIP- AI Data Analyst</div>
+        <div class="app-subtitle">
+            Analyze DHIS2 and other tabular/API data using natural language.
+            User intent controls the analysis. Data quality has high priority.
+            All applicable rows are processed locally before AI interpretation.
+        </div>
+        <div class="status-row">
+            <span class="status-pill status-ok">● Complete Data Processing</span>
+            <span class="status-pill status-info">● User-Driven Analysis</span>
+            <span class="status-pill status-info">● Data Quality First</span>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+missing = []
+
+if not DHIS2_URL:
+    missing.append("https://dhis2.nutritionintl.org")
+
+if not DHIS2_USERNAME:
+    missing.append("data.ai")
+
+if not DHIS2_PASSWORD:
+    missing.append("DHIS2_PASSWORD")
+
+if not OPENAI_API_KEY:
+    missing.append("OPENAI_API_KEY")
+
+if missing:
+    st.warning(
+        "⚙️ Configuration is incomplete. The interface is still available. "
+        "Add the missing values to .env before connecting to a protected "
+        "DHIS2 server or using AI interpretation."
+    )
+
+    with st.expander("Configuration details", expanded=False):
+        st.write("Missing configuration:")
+        for item in missing:
+            st.code(item)
+
+        st.info(
+            "Create a .env file beside this Python file using .env.example. "
+            "The page will remain usable while configuration is incomplete."
+        )
+
+# Only create the OpenAI client when a key is actually available.
+client = (
+    OpenAI(api_key=OPENAI_API_KEY)
+    if OPENAI_API_KEY
+    else None
+)
+
+
+# ============================================================
+# DHIS2 SESSION
+# ============================================================
+
+session = requests.Session()
+session.auth = (DHIS2_USERNAME, DHIS2_PASSWORD)
+session.headers.update({
+    "User-Agent": "DANIP-DHIS2-AI/2.0"
+})
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
+def show_ai_error(error):
+    message = str(error)
+
+    if "credit_balance_exhausted" in message or "insufficient_quota" in message:
+        st.warning(
+            "💳 AI credits are currently unavailable. "
+            "The data-quality and deterministic analysis pipeline can still "
+            "process the loaded data, but AI interpretation requires API access."
+        )
+    elif "invalid_api_key" in message or "401" in message:
+        st.error("🔑 The OpenAI API key was rejected. Check OPENAI_API_KEY.")
+    elif "429" in message:
+        st.warning("⏳ The AI service is temporarily rate-limited.")
+    else:
+        st.error("🤖 AI analysis could not be completed.")
+
+    with st.expander("Technical details"):
+        st.code(message)
+
+
+def _safe_json_value(value):
+    if value is None:
+        return None
+
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            pass
+
+    return value
+
+
+def safe_json_dumps(value):
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        indent=2,
+        default=_safe_json_value,
+    )
+
+
+# ============================================================
+# DHIS2 REQUEST
+# ============================================================
+
+def dhis2_get(url, accept="application/json", timeout=180):
+    try:
+        response = session.get(
+            url,
+            headers={"Accept": accept},
+            timeout=timeout,
+        )
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"Unable to connect to DHIS2:\n\n{e}")
+
+    if response.status_code != 200:
+        raise Exception(
+            f"DHIS2 returned HTTP {response.status_code}\n\n"
+            f"URL:\n{response.url}\n\n"
+            f"Server response:\n{response.text[:5000]}"
+        )
+
+    return response
+
+
+def identify_url_type(url):
+    lower = url.lower()
+
+    if "/api/analytics" in lower:
+        return "analytics"
+    if "dhis-web-data-visualizer" in lower:
+        return "visualization"
+    if "/api/visualizations/" in lower:
+        return "visualization_api"
+    if "/api/events" in lower:
+        return "events"
+    if "/api/tracker" in lower:
+        return "tracker"
+    if "/api/datavaluesets" in lower:
+        return "data_value_sets"
+    if "/api/" in lower:
+        return "api"
+
+    return "unknown"
+
+
+def get_extension(url):
+    path = urlparse(url).path.lower()
+
+    if path.endswith(".xlsx"):
+        return "xlsx"
+    if path.endswith(".xls"):
+        return "xls"
+    if path.endswith(".csv"):
+        return "csv"
+    if path.endswith(".json"):
+        return "json"
+
+    return ""
+
+
+def change_extension(url, new_extension):
+    parsed = urlparse(url)
+
+    path = re.sub(
+        r"\.(xls|xlsx|csv|json)$",
+        "",
+        parsed.path,
+        flags=re.IGNORECASE,
+    )
+
+    path += "." + new_extension
+
+    return urlunparse(
+        (
+            parsed.scheme,
+            parsed.netloc,
+            path,
+            parsed.params,
+            parsed.query,
+            parsed.fragment,
+        )
+    )
+
+
+def get_csv_from_analytics_url(url):
+    csv_url = change_extension(url, "csv")
+
+    response = session.get(
+        csv_url,
+        headers={"Accept": "application/csv"},
+        timeout=180,
+    )
+
+    if response.status_code == 200:
+        return pd.read_csv(StringIO(response.text))
+
+    return None
+
+
+def read_xls_response(response):
+    try:
+        return pd.read_excel(
+            BytesIO(response.content),
+            engine="xlrd",
+        )
+    except Exception as e:
+        raise Exception(
+            "DHIS2 returned Excel data, but Python could not read the XLS file.\n\n"
+            f"{e}"
+        )
+
+
+def read_xlsx_response(response):
+    try:
+        return pd.read_excel(
+            BytesIO(response.content),
+            engine="openpyxl",
+        )
+    except Exception as e:
+        raise Exception(
+            "DHIS2 returned Excel data, but Python could not read the XLSX file.\n\n"
+            f"{e}"
+        )
+
+
+def read_csv_response(response):
+    try:
+        return pd.read_csv(StringIO(response.text))
+    except Exception as e:
+        raise Exception(
+            "DHIS2 returned CSV data, but Python could not read it.\n\n"
+            f"{e}"
+        )
+
+
+def read_json_response(response):
+    try:
+        return response.json()
+    except Exception as e:
+        raise Exception(
+            "DHIS2 returned JSON data, but it could not be parsed.\n\n"
+            f"{e}"
+        )
+
+
+def get_analytics_data(url):
+    extension = get_extension(url)
+
+    if extension in ["xls", "xlsx", "csv", ""]:
+        try:
+            csv_df = get_csv_from_analytics_url(url)
+            if csv_df is not None and not csv_df.empty:
+                return csv_df
+        except Exception:
+            pass
+
+    if extension == "xlsx":
+        return read_xlsx_response(
+            dhis2_get(
+                url,
+                accept="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        )
+
+    if extension == "xls":
+        return read_xls_response(
+            dhis2_get(
+                url,
+                accept="application/vnd.ms-excel",
+            )
+        )
+
+    if extension == "csv":
+        return read_csv_response(
+            dhis2_get(
+                url,
+                accept="application/csv",
+            )
+        )
+
+    return read_json_response(
+        dhis2_get(url, accept="application/json")
+    )
+
+
+def get_direct_api_data(url):
+    extension = get_extension(url)
+
+    if "/api/analytics" in url.lower():
+        return get_analytics_data(url)
+
+    if extension == "xlsx":
+        return read_xlsx_response(
+            dhis2_get(
+                url,
+                accept="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        )
+
+    if extension == "xls":
+        return read_xls_response(
+            dhis2_get(
+                url,
+                accept="application/vnd.ms-excel",
+            )
+        )
+
+    if extension == "csv":
+        return read_csv_response(
+            dhis2_get(url, accept="application/csv")
+        )
+
+    return read_json_response(
+        dhis2_get(url, accept="application/json")
+    )
+
+
+# ============================================================
+# VISUALIZATION
+# ============================================================
+
+def extract_visualization_uid(url):
+    patterns = [
+        r"dhis-web-data-visualizer/#/([A-Za-z0-9]{11})",
+        r"/api/visualizations/([A-Za-z0-9]{11})",
+        r"^([A-Za-z0-9]{11})$",
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+
+    return None
+
+
+def get_visualization(uid):
+    response = dhis2_get(
+        f"{DHIS2_URL}/api/visualizations/{uid}"
+    )
+    return response.json()
+
+
+# ============================================================
+# JSON -> DATAFRAME
+# ============================================================
+
+def json_to_dataframe(data):
+    if isinstance(data, list):
+        return pd.DataFrame(data)
+
+    if not isinstance(data, dict):
+        return pd.DataFrame()
+
+    headers = data.get("headers")
+    rows = data.get("rows")
+
+    if headers and rows:
+        columns = []
+
+        for header in headers:
+            if isinstance(header, dict):
+                column = (
+                    header.get("column")
+                    or header.get("name")
+                    or header.get("value")
+                    or "Unknown"
+                )
+            else:
+                column = str(header)
+
+            columns.append(column)
+
+        return pd.DataFrame(rows, columns=columns)
+
+    for key in ["data", "rows", "items", "records", "events"]:
+        value = data.get(key)
+
+        if isinstance(value, list):
+            return pd.DataFrame(value)
+
+    return pd.DataFrame()
+
+
+def normalize_dataframe(data):
+    if isinstance(data, pd.DataFrame):
+        df = data.copy()
+    else:
+        df = json_to_dataframe(data)
+
+    if df.empty:
+        return df
+
+    df = df.dropna(how="all")
+    df = df.dropna(axis=1, how="all")
+
+    df.columns = [
+        str(column).strip()
+        for column in df.columns
+    ]
+
+    return df
+
+
+# ============================================================
+# DATA TYPES / STATISTICS
+# ============================================================
+
+def get_numeric_columns(df):
+    numeric_columns = []
+
+    for column in df.columns:
+        converted = pd.to_numeric(
+            df[column],
+            errors="coerce",
+        )
+
+        if converted.notna().sum() >= 1:
+            numeric_columns.append(column)
+
+    return numeric_columns
+
+
+def convert_numeric_columns(df):
+    df = df.copy()
+    numeric_columns = get_numeric_columns(df)
+
+    for column in numeric_columns:
+        df[column] = pd.to_numeric(
+            df[column],
+            errors="coerce",
+        )
+
+    return df, numeric_columns
+
+
+def calculate_statistics(df):
+    """Complete deterministic statistical profile using ALL loaded rows."""
+    numeric_df, numeric_columns = convert_numeric_columns(df)
+    result = {
+        "records": int(len(df)),
+        "columns": int(len(df.columns)),
+        "column_names": [str(x) for x in df.columns],
+        "numeric_columns": numeric_columns,
+        "missing_values": {},
+        "numeric_summary": {},
+    }
+
+    result["missing_values"] = {
+        str(k): int(v) for k, v in df.isna().sum().to_dict().items()
+    }
+
+    for column in numeric_columns:
+        values = numeric_df[column].dropna()
+        if values.empty:
+            continue
+
+        q1 = values.quantile(0.25)
+        q3 = values.quantile(0.75)
+        iqr = q3 - q1
+        outlier_count = 0 if iqr == 0 else int(
+            ((values < q1 - 1.5 * iqr) | (values > q3 + 1.5 * iqr)).sum()
+        )
+        mean_value = values.mean()
+        std_value = values.std()
+        variance_value = values.var()
+
+        result["numeric_summary"][column] = {
+            "count": int(values.count()),
+            "missing": int(numeric_df[column].isna().sum()),
+            "minimum": float(values.min()),
+            "Q1": float(q1),
+            "average": float(mean_value),
+            "median": float(values.median()),
+            "Q3": float(q3),
+            "maximum": float(values.max()),
+            "range": float(values.max() - values.min()),
+            "standard_deviation": float(std_value) if pd.notna(std_value) else None,
+            "variance": float(variance_value) if pd.notna(variance_value) else None,
+            "IQR": float(iqr),
+            "total": float(values.sum()),
+            "zero_count": int((values == 0).sum()),
+            "negative_count": int((values < 0).sum()),
+            "outlier_count": outlier_count,
+            "coefficient_of_variation": (
+                float(std_value / mean_value * 100)
+                if mean_value != 0 and pd.notna(std_value) else None
+            ),
+        }
+
+    return result
+
+
+# ============================================================
+# DATA QUALITY - DHIS2 QUALITY MATRIX
+# ============================================================
+
+def find_period_column(df):
+    candidates = [
+        "pe", "period", "periodname", "period name",
+        "period code", "periodcode", "date", "event date"
+    ]
+    for candidate in candidates:
+        for column in df.columns:
+            if str(column).strip().lower() == candidate:
+                return column
+    for column in df.columns:
+        if "period" in str(column).lower() or "event date" in str(column).lower():
+            return column
+    return None
+
+
+def find_ou_column(df):
+    for column in df.columns:
+        name = str(column).strip().lower()
+        if (
+            name in {"ou", "orgunit", "organisation", "organization"}
+            or "organisation unit" in name
+            or "organization unit" in name
+            or "organisationunit" in name
+            or "organizationunit" in name
+            or "org unit" in name
+            or "orgunit" in name
+            or "facility" in name
+        ):
+            return column
+    return None
+
+
+def find_indicator_like_columns(df):
+    cols = []
+    for c in df.columns:
+        n = str(c).lower()
+        if any(k in n for k in ["indicator", "numerator", "denominator", "coverage", "rate", "percent", "%"]):
+            cols.append(c)
+    return cols
+
+
+def _quality_issue(priority, domain, issue, column="", count=0,
+                   percentage=None, impact="", recommendation=""):
+    item = {
+        "Priority": priority,
+        "Domain": domain,
+        "Issue": issue,
+        "Column": str(column) if column else "",
+        "Count": int(count) if count is not None else 0,
+        "Impact": impact,
+        "Recommendation": recommendation,
+    }
+    if percentage is not None:
+        item["Percentage"] = round(float(percentage), 2)
+    return item
+
+
+def _priority_from_pct(pct, high=20, medium=5):
+    if pct >= high:
+        return "HIGH"
+    if pct >= medium:
+        return "MEDIUM"
+    return "LOW"
+
+
+def build_quality_matrix(df):
+    """Return a DHIS2-oriented quality matrix and detailed issues.
+
+    Domains covered:
+      Completeness, Uniqueness, Validity, Consistency, Timeliness,
+      Integrity, Plausibility/Outliers and Zero/Negative checks.
+    """
+    issues = []
+    matrix = []
+    n = len(df)
+    numeric_df, numeric_columns = convert_numeric_columns(df)
+
+    def add_matrix(domain, metric, value, status, detail, priority="LOW"):
+        matrix.append({
+            "Domain": domain,
+            "Metric": metric,
+            "Result": value,
+            "Status": status,
+            "Priority": priority,
+            "Details": detail,
+        })
+
+    # ---------------- COMPLETENESS ----------------
+    missing_total = int(df.isna().sum().sum())
+    total_cells = max(n * max(len(df.columns), 1), 1)
+    missing_pct = missing_total / total_cells * 100
+    comp_status = "PASS" if missing_total == 0 else "REVIEW" if missing_pct < 20 else "FAIL"
+    comp_priority = "LOW" if missing_total == 0 else _priority_from_pct(missing_pct)
+    add_matrix("Completeness", "Missing cells", f"{missing_total:,}", comp_status,
+               f"{missing_pct:.2f}% of all cells are missing.", comp_priority)
+
+    for column in df.columns:
+        count = int(df[column].isna().sum())
+        if count:
+            pct = count / n * 100 if n else 0
+            priority = _priority_from_pct(pct)
+            issues.append(_quality_issue(
+                priority, "Completeness", "Missing values", column, count, pct,
+                "Missing observations can reduce completeness and affect calculations.",
+                "Review source forms, mandatory fields and data-entry completeness."
+            ))
+
+    # ---------------- UNIQUENESS ----------------
+    duplicate_rows = int(df.duplicated(keep=False).sum())
+    dup_pct = duplicate_rows / n * 100 if n else 0
+    add_matrix("Uniqueness", "Duplicate rows", f"{duplicate_rows:,}",
+               "PASS" if duplicate_rows == 0 else "FAIL",
+               f"{dup_pct:.2f}% of rows are part of an exact duplicate group.",
+               "LOW" if duplicate_rows == 0 else "HIGH")
+    if duplicate_rows:
+        issues.append(_quality_issue(
+            "HIGH", "Uniqueness", "Duplicate rows", "All columns", duplicate_rows, dup_pct,
+            "Duplicates may inflate DHIS2 totals and rankings.",
+            "Investigate duplicate import, repeated submission or extraction logic."
+        ))
+
+    # Natural-key duplicates: OU + period + indicator columns where available.
+    ou = find_ou_column(df)
+    period = find_period_column(df)
+    indicator_cols = find_indicator_like_columns(df)
+    key_cols = []
+    if ou: key_cols.append(ou)
+    if period: key_cols.append(period)
+    if len(indicator_cols) == 1: key_cols.append(indicator_cols[0])
+    if len(key_cols) >= 2:
+        keyed = df[key_cols].astype("string")
+        natural_dup = int(keyed.duplicated(keep=False).sum())
+        add_matrix("Uniqueness", "DHIS2 natural-key duplicates", f"{natural_dup:,}",
+                   "PASS" if natural_dup == 0 else "REVIEW",
+                   "Key: " + ", ".join(map(str, key_cols)),
+                   "LOW" if natural_dup == 0 else "HIGH")
+        if natural_dup:
+            issues.append(_quality_issue(
+                "HIGH", "Uniqueness", "Possible OU-period-indicator duplicates",
+                ", ".join(map(str, key_cols)), natural_dup,
+                natural_dup / n * 100 if n else 0,
+                "Multiple records can cause double counting for the same reporting grain.",
+                "Check dataset/reporting period, OU and indicator uniqueness."
+            ))
+
+    # ---------------- VALIDITY ----------------
+    parse_failures = 0
+    for column in numeric_columns:
+        original_nonblank = df[column].notna().sum()
+        converted_nonnull = numeric_df[column].notna().sum()
+        # get_numeric_columns only selects columns with >=1 numeric parse, so count mixed strings
+        if original_nonblank > converted_nonnull:
+            bad = int(original_nonblank - converted_nonnull)
+            parse_failures += bad
+            issues.append(_quality_issue(
+                "MEDIUM", "Validity", "Non-numeric values in numeric-like field", column, bad,
+                bad / n * 100 if n else 0,
+                "Text values can be excluded from numeric analysis.",
+                "Standardize numeric values and remove labels such as N/A or text suffixes."
+            ))
+    add_matrix("Validity", "Numeric parsing", f"{parse_failures:,} invalid numeric cells",
+               "PASS" if parse_failures == 0 else "REVIEW",
+               "Numeric fields were tested using strict numeric conversion.",
+               "LOW" if parse_failures == 0 else "MEDIUM")
+
+    # Negative values
+    negative_total = 0
+    for column in numeric_columns:
+        count = int((numeric_df[column] < 0).sum())
+        negative_total += count
+        if count:
+            issues.append(_quality_issue(
+                "HIGH", "Validity", "Negative value", column, count,
+                count / n * 100 if n else 0,
+                "Negative values may be invalid for counts, coverage or service-delivery indicators.",
+                "Review whether negative values are structurally valid or data-entry errors."
+            ))
+    add_matrix("Validity", "Negative numeric values", f"{negative_total:,}",
+               "PASS" if negative_total == 0 else "FAIL",
+               "Negative observations were checked across numeric fields.",
+               "LOW" if negative_total == 0 else "HIGH")
+
+    # Percentage/rate plausibility
+    pct_cols = []
+    for column in numeric_columns:
+        name = str(column).lower()
+        if any(k in name for k in ["percent", "%", "percentage", "coverage", "rate", "proportion"]):
+            pct_cols.append(column)
+    pct_over_100 = 0
+    for column in pct_cols:
+        values = numeric_df[column].dropna()
+        count = int((values > 100).sum())
+        pct_over_100 += count
+        if count:
+            issues.append(_quality_issue(
+                "HIGH", "Plausibility", "Percentage/rate above 100", column, count,
+                count / n * 100 if n else 0,
+                "Values above 100 may indicate numerator/denominator, aggregation or data-entry problems.",
+                "Verify indicator definition, denominator and aggregation method."
+            ))
+    add_matrix("Plausibility", "Percentage/rate > 100", f"{pct_over_100:,}",
+               "PASS" if pct_over_100 == 0 else "FAIL",
+               f"Detected {len(pct_cols)} percentage/rate-like columns.",
+               "LOW" if pct_over_100 == 0 else "HIGH")
+
+    # ---------------- ZERO / COMPLETENESS BEHAVIOUR ----------------
+    zero_cells = 0
+    zero_heavy_cols = 0
+    for column in numeric_columns:
+        values = numeric_df[column].dropna()
+        if values.empty:
+            continue
+        count = int((values == 0).sum())
+        zero_cells += count
+        zero_pct = count / len(values) * 100
+        if zero_pct >= 50:
+            zero_heavy_cols += 1
+            issues.append(_quality_issue(
+                "MEDIUM", "Plausibility", "High zero concentration", column, count, zero_pct,
+                "A high proportion of zeros may represent true zero performance or systematic non-reporting.",
+                "Confirm whether zero is a valid reported value or should be distinguished from missing."
+            ))
+    add_matrix("Plausibility", "Zero concentration", f"{zero_cells:,} zero values",
+               "PASS" if zero_heavy_cols == 0 else "REVIEW",
+               f"{zero_heavy_cols} numeric fields have >=50% zero among observed values.",
+               "LOW" if zero_heavy_cols == 0 else "MEDIUM")
+
+    # ---------------- OUTLIERS ----------------
+    outlier_total = 0
+    for column in numeric_columns:
+        values = numeric_df[column].dropna()
+        if len(values) < 5:
+            continue
+        q1 = values.quantile(0.25)
+        q3 = values.quantile(0.75)
+        iqr = q3 - q1
+        if iqr == 0:
+            continue
+        low = q1 - 1.5 * iqr
+        high = q3 + 1.5 * iqr
+        count = int(((values < low) | (values > high)).sum())
+        outlier_total += count
+        if count:
+            issues.append(_quality_issue(
+                "LOW", "Plausibility", "Statistical outlier (IQR)", column, count,
+                count / len(values) * 100,
+                "Outliers are not automatically errors, but may warrant review.",
+                "Check source records and contextual programme changes before removing values."
+            ))
+    add_matrix("Plausibility", "IQR outliers", f"{outlier_total:,}",
+               "PASS" if outlier_total == 0 else "REVIEW",
+               "IQR rule used only where at least five observed values exist.",
+               "LOW")
+
+    # ---------------- PERIOD / TIMELINESS ----------------
+    future_periods = 0
+    period_gaps = 0
+    if period:
+        p = df[period].astype("string")
+        parsed = pd.to_datetime(p, errors="coerce")
+        if parsed.notna().sum() == 0:
+            # DHIS2 YYYYMM/quarter codes are handled separately.
+            cleaned = p.str.extract(r"(20\d{2})[\-/]?(\d{1,2})", expand=True)
+            if not cleaned.empty:
+                years = pd.to_numeric(cleaned[0], errors="coerce")
+                months = pd.to_numeric(cleaned[1], errors="coerce")
+                parsed = pd.to_datetime(
+                    dict(year=years, month=months.clip(1,12), day=1),
+                    errors="coerce"
+                )
+        if parsed.notna().any():
+            future_periods = int((parsed > pd.Timestamp.today()).sum())
+            add_matrix("Timeliness", "Future reporting periods", f"{future_periods:,}",
+                       "PASS" if future_periods == 0 else "FAIL",
+                       f"Using detected period column: {period}",
+                       "LOW" if future_periods == 0 else "HIGH")
+            if future_periods:
+                issues.append(_quality_issue(
+                    "HIGH", "Timeliness", "Future reporting period", period, future_periods,
+                    future_periods / n * 100 if n else 0,
+                    "Future records can distort current reporting and trend analysis.",
+                    "Verify period selection and reporting calendar."
+                ))
+        else:
+            add_matrix("Timeliness", "Period parseability", "Not determinable", "REVIEW",
+                       f"Period column detected as {period}, but values were not parseable as dates.", "MEDIUM")
+    else:
+        add_matrix("Timeliness", "Period availability", "No period column detected", "REVIEW",
+                   "Trend and reporting-period validation cannot be fully performed.", "MEDIUM")
+
+    # ---------------- ORGANISATION UNIT ----------------
+    if ou:
+        missing_ou = int(df[ou].isna().sum())
+        blank_ou = int((df[ou].astype("string").str.strip() == "").sum())
+        ou_problem = missing_ou + blank_ou
+        add_matrix("Integrity", "Organisation unit completeness", f"{ou_problem:,}",
+                   "PASS" if ou_problem == 0 else "FAIL",
+                   f"Detected organisation-unit field: {ou}",
+                   "LOW" if ou_problem == 0 else "HIGH")
+        if ou_problem:
+            issues.append(_quality_issue(
+                "HIGH", "Integrity", "Missing/blank organisation unit", ou, ou_problem,
+                ou_problem / n * 100 if n else 0,
+                "Records cannot be reliably attributed to a DHIS2 organisation unit.",
+                "Review OU mapping and source extract completeness."
+            ))
+    else:
+        add_matrix("Integrity", "Organisation unit field", "Not detected", "REVIEW",
+                   "No standard OU field was detected in the returned data.", "MEDIUM")
+
+    # ---------------- NUMERATOR / DENOMINATOR ----------------
+    numerator_cols = [c for c in df.columns if re.search(r"(^|[_\s-])num(erator)?($|[_\s-])", str(c), re.I)]
+    denominator_cols = [c for c in df.columns if re.search(r"(^|[_\s-])den(ominator)?($|[_\s-])", str(c), re.I)]
+    ratio_issues = 0
+    if numerator_cols and denominator_cols:
+        pairs = min(len(numerator_cols), len(denominator_cols))
+        for num_col, den_col in zip(numerator_cols[:pairs], denominator_cols[:pairs]):
+            num = pd.to_numeric(df[num_col], errors="coerce")
+            den = pd.to_numeric(df[den_col], errors="coerce")
+            invalid_den = int((den <= 0).sum())
+            num_gt_den = int(((num > den) & den.notna() & num.notna() & (den > 0)).sum())
+            ratio_issues += num_gt_den
+            if invalid_den:
+                issues.append(_quality_issue(
+                    "MEDIUM", "Consistency", "Non-positive denominator", den_col, invalid_den,
+                    invalid_den / n * 100 if n else 0,
+                    "Rates cannot be reliably calculated when denominators are zero or negative.",
+                    "Validate denominator definition and source reporting."
+                ))
+            if num_gt_den:
+                issues.append(_quality_issue(
+                    "HIGH", "Consistency", "Numerator greater than denominator",
+                    f"{num_col} / {den_col}", num_gt_den,
+                    num_gt_den / n * 100 if n else 0,
+                    "A numerator above its denominator produces a rate above 100%.",
+                    "Check indicator formula, data aggregation and reporting grain."
+                ))
+        add_matrix("Consistency", "Numerator > denominator", f"{ratio_issues:,}",
+                   "PASS" if ratio_issues == 0 else "FAIL",
+                   f"Detected {len(numerator_cols)} numerator and {len(denominator_cols)} denominator fields.",
+                   "LOW" if ratio_issues == 0 else "HIGH")
+    else:
+        add_matrix("Consistency", "Numerator/denominator validation", "Not available", "INFO",
+                   "No explicit numerator/denominator column pair was detected.", "LOW")
+
+    # ---------------- STRUCTURAL / CARDINALITY ----------------
+    high_cardinality = []
+    for c in df.columns:
+        unique = int(df[c].nunique(dropna=True))
+        if n and unique / n > 0.95 and n >= 20:
+            high_cardinality.append(str(c))
+    add_matrix("Integrity", "High-cardinality fields", str(len(high_cardinality)),
+               "INFO",
+               ", ".join(high_cardinality[:10]) if high_cardinality else "No suspicious high-cardinality fields detected.",
+               "LOW")
+
+    # Sort issues
+    order = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
+    issues.sort(key=lambda x: (order.get(x.get("Priority"), 9), x.get("Domain", "")))
+
+    # Quality score: weighted issue prevalence, capped 0-100.
+    weights = {"HIGH": 5, "MEDIUM": 2, "LOW": 0.5}
+    penalty = sum(weights.get(i.get("Priority"), 0) for i in issues)
+    denominator = max(len(df.columns) * 2 + len(df) / 1000, 1)
+    score = max(0.0, min(100.0, 100 - (penalty / denominator * 100)))
+
+    summary = {
+        "score": round(score, 1),
+        "rating": "Excellent" if score >= 90 else "Good" if score >= 75 else "Needs review" if score >= 50 else "Poor",
+        "rows": n,
+        "columns": len(df.columns),
+        "issues": len(issues),
+        "matrix": matrix,
+    }
+    return issues, matrix, summary
+
+
+def check_data_quality(df):
+    """Backward-compatible wrapper used by the rest of the app."""
+    issues, _, _ = build_quality_matrix(df)
+    return issues
+
+
+
+def build_local_quality_interpretation(quality_issues, quality_matrix, quality_summary):
+    """Create an evidence-only audit interpretation when AI API is unavailable.
+
+    This fallback never invents findings or changes deterministic results.
+    It makes the dashboard useful even when OpenAI quota/rate limits are reached.
+    """
+    score = float((quality_summary or {}).get("score", 0))
+    rating = str((quality_summary or {}).get("rating", "Unknown"))
+    rows = int((quality_summary or {}).get("rows", 0))
+    high = [i for i in (quality_issues or []) if str(i.get("Priority", "")).upper() == "HIGH"]
+    medium = [i for i in (quality_issues or []) if str(i.get("Priority", "")).upper() == "MEDIUM"]
+
+    if score >= 90:
+        verdict = "The dataset demonstrates strong overall quality based on the implemented controls and is suitable for routine analysis."
+    elif score >= 75:
+        verdict = "The dataset is generally suitable for routine analysis, with targeted quality checks recommended for the findings listed below."
+    elif score >= 50:
+        verdict = "The dataset requires review before high-stakes reporting. Routine analysis may proceed only with appropriate caution and documented limitations."
+    else:
+        verdict = "The dataset requires remediation before it should be used for high-stakes reporting or management decisions."
+
+    lines = [
+        "## Overall Quality Verdict",
+        f"**Quality score:** {score:.1f}/100  \n**Rating:** {rating}  \n**Records assessed:** {rows:,}",
+        verdict,
+        "",
+        "## Quality Dimension Interpretation",
+    ]
+
+    for item in quality_matrix or []:
+        domain = str(item.get("Domain", "Unknown"))
+        metric = str(item.get("Metric", "Control"))
+        result = str(item.get("Result", ""))
+        status = str(item.get("Status", "INFO")).upper()
+        priority = str(item.get("Priority", "LOW")).upper()
+        detail = str(item.get("Details", "")).strip()
+        if status == "PASS":
+            interpretation = "No material issue was detected by this implemented control."
+        elif status == "INFO":
+            interpretation = "The control was informational or could not be fully assessed from the available fields; this is a limitation, not automatically a data-quality failure."
+        elif status == "REVIEW":
+            interpretation = "This result warrants targeted verification before relying on the affected data for important reporting."
+        else:
+            interpretation = "This result indicates a material quality exception that should be investigated before high-stakes use."
+        lines.append(f"### {domain} — {metric}")
+        lines.append(f"**Result:** {result} | **Status:** {status} | **Priority:** {priority}")
+        if detail:
+            lines.append(f"**Evidence:** {detail}")
+        lines.append(interpretation)
+
+    lines.append("")
+    lines.append("## Priority Risks")
+    if high or medium:
+        for item in high + medium:
+            issue = str(item.get("Issue", "Quality issue"))
+            domain = str(item.get("Domain", ""))
+            column = str(item.get("Column", ""))
+            count = item.get("Count", 0)
+            impact = str(item.get("Impact", "")).strip()
+            where = f" — {column}" if column else ""
+            lines.append(f"- **{item.get('Priority', 'MEDIUM')} | {domain}: {issue}{where}** — {count:,} affected observation(s). {impact}")
+    else:
+        lines.append("No HIGH or MEDIUM priority findings were identified by the implemented controls.")
+
+    lines.extend([
+        "",
+        "## Audit Interpretation",
+        "The interpretation below is limited to the evidence produced by the deterministic quality engine. Findings may affect reporting reliability, indicator calculations, trends, organisation-unit comparisons or management decisions only where the affected field/control is relevant to those outputs.",
+        "",
+        "## Recommended Data Quality Actions",
+    ])
+
+    actions = []
+    for item in high + medium:
+        rec = str(item.get("Recommendation", "")).strip()
+        if rec and rec not in actions:
+            actions.append(rec)
+    if actions:
+        for idx, action in enumerate(actions[:8], 1):
+            lines.append(f"{idx}. {action}")
+    else:
+        lines.append("1. Retain the quality assessment as audit evidence and continue routine monitoring.")
+
+    confidence = "High" if not high else "Medium"
+    reason = (
+        "The interpretation is based entirely on deterministic quality controls and supplied evidence."
+        if not high else
+        "The interpretation is evidence-based, but HIGH-priority findings require source-level verification."
+    )
+    lines.extend([
+        "",
+        "## Data Quality Confidence",
+        f"**{confidence} confidence.** {reason}",
+    ])
+    return "\n\n".join(lines)
+
+
+
+def ask_ai_quality_interpretation(df, quality_issues, quality_matrix, quality_summary):
+    """Generate an AI interpretation of the deterministic DHIS2 quality matrix.
+
+    Important design rule:
+    - No row-level records are sent to the model.
+    - The deterministic quality engine remains authoritative for counts/statuses.
+    - AI explains the evidence, prioritises risks and proposes management actions.
+    """
+    if client is None:
+        return {
+            "status": "FALLBACK",
+            "source": "LOCAL_RULES",
+            "text": build_local_quality_interpretation(quality_issues, quality_matrix, quality_summary),
+        }
+
+    # Only quality evidence is sent to the model; never send the actual rows.
+    compact_matrix = []
+    for item in quality_matrix or []:
+        compact_matrix.append({
+            "domain": str(item.get("Domain", "")),
+            "metric": str(item.get("Metric", "")),
+            "result": str(item.get("Result", "")),
+            "status": str(item.get("Status", "")),
+            "priority": str(item.get("Priority", "")),
+            "details": str(item.get("Details", "")),
+        })
+
+    compact_issues = []
+    for item in (quality_issues or [])[:100]:
+        compact_issues.append({
+            "priority": str(item.get("Priority", "")),
+            "domain": str(item.get("Domain", "")),
+            "issue": str(item.get("Issue", "")),
+            "column": str(item.get("Column", "")),
+            "count": item.get("Count", 0),
+            "percentage": item.get("Percentage", None),
+            "impact": str(item.get("Impact", "")),
+            "recommendation": str(item.get("Recommendation", "")),
+        })
+
+    evidence = {
+        "dataset_rows": int(len(df)),
+        "dataset_columns": int(len(df.columns)),
+        "quality_summary": quality_summary or {},
+        "quality_dimensions": compact_matrix,
+        "priority_findings": compact_issues,
+    }
+
+    prompt = f"""
+You are the DANIP-NI AI Data Quality Auditor.
+
+Your task is to interpret a deterministic DHIS2 data-quality assessment for
+data managers, MEL managers, data-quality auditors and programme leads.
+
+IMPORTANT:
+- The Python quality engine is authoritative for all counts, statuses and scores.
+- Do not change, recalculate, cap or reinterpret the supplied numerical results.
+- Do not invent findings.
+- Do not claim causation.
+- Do not silently treat zero as missing.
+- Do not recommend deleting observations simply because they are outliers.
+- Distinguish a data-quality problem from a legitimate programme result.
+- Explain what the finding means operationally for DHIS2 reporting.
+- Prioritise HIGH issues first, then MEDIUM, then LOW.
+- If a dimension is PASS, explicitly say that no material issue was detected by
+  the implemented control.
+- If a dimension is INFO because a field/control could not be detected, explain
+  the limitation rather than calling it a failure.
+- Recommendations must be practical for data managers and auditors.
+- Use only the evidence below.
+
+DATA QUALITY EVIDENCE
+{safe_json_dumps(evidence)}
+
+Return a concise professional audit interpretation using exactly these sections:
+
+## Overall Quality Verdict
+State the quality score/rating and whether the dataset is suitable for
+routine analysis, suitable with caution, or requires remediation before
+high-stakes reporting. Base this only on the supplied evidence.
+
+## Quality Dimension Interpretation
+Interpret each quality domain present in the matrix:
+Completeness, Uniqueness, Validity, Plausibility, Timeliness, Integrity,
+Consistency, or any other supplied domain.
+
+For each important non-PASS result explain:
+1. what was detected,
+2. why it matters,
+3. what a data manager should verify.
+
+## Priority Risks
+List the most important HIGH and MEDIUM findings, ordered by urgency.
+If none exist, state that clearly.
+
+## Audit Interpretation
+Explain the implications for:
+- DHIS2 reporting reliability
+- indicator calculations
+- trend analysis
+- organisation-unit comparisons
+- management decisions
+
+Only discuss implications supported by the evidence.
+
+## Recommended Data Quality Actions
+Give practical actions in priority order:
+1. immediate remediation,
+2. validation/reconciliation,
+3. preventive controls,
+4. audit documentation.
+
+## Data Quality Confidence
+Give High, Medium or Low confidence and one short reason.
+
+Keep the answer professional, concise and useful to a data-quality auditor.
+"""
+
+    try:
+        response = client.responses.create(
+            model=OPENAI_MODEL,
+            input=prompt,
+        )
+        return {
+            "status": "SUCCESS",
+            "text": response.output_text or "No AI interpretation was returned.",
+        }
+    except Exception as e:
+        # Graceful degradation: quota/rate-limit/API errors must never break the
+        # data-quality dashboard. Return an evidence-only interpretation instead.
+        message = str(e).lower()
+        quota_error = any(token in message for token in (
+            "insufficient_quota", "exceeded your current quota", "429",
+            "rate limit", "rate_limit", "quota"
+        ))
+        return {
+            "status": "FALLBACK",
+            "source": "LOCAL_RULES",
+            "api_error": "quota" if quota_error else "unavailable",
+            "text": build_local_quality_interpretation(quality_issues, quality_matrix, quality_summary),
+        }
+
+
+def render_ai_quality_interpretation(df, quality_issues, quality_matrix, quality_summary):
+    """Render an optional AI interpretation without changing the existing matrix UI."""
+    st.markdown("### 🤖 AI Quality Interpretation")
+    st.caption(
+        "AI interprets the deterministic DHIS2 Quality Dimensions. "
+        "The underlying score, findings and statuses remain controlled by the quality engine."
+    )
+
+    score = float(quality_summary.get("score", 0))
+    rating = str(quality_summary.get("rating", "Unknown"))
+    high = sum(str(i.get("Priority", "")).upper() == "HIGH" for i in quality_issues)
+    medium = sum(str(i.get("Priority", "")).upper() == "MEDIUM" for i in quality_issues)
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.metric("AI audit evidence", f"{len(quality_matrix):,} controls")
+    with c2:
+        st.metric("Priority risks", f"{high + medium:,}")
+    with c3:
+        st.metric("Quality rating", rating)
+
+    if "dq_ai_interpretation" not in st.session_state:
+        st.session_state["dq_ai_interpretation"] = None
+
+    if st.button(
+        "🤖 Generate AI Quality Interpretation",
+        key="generate_dq_ai_interpretation",
+        use_container_width=True,
+    ):
+        with st.spinner("🤖 AI is interpreting the DHIS2 quality evidence..."):
+            st.session_state["dq_ai_interpretation"] = ask_ai_quality_interpretation(
+                df=df,
+                quality_issues=quality_issues,
+                quality_matrix=quality_matrix,
+                quality_summary=quality_summary,
+            )
+
+    result = st.session_state.get("dq_ai_interpretation")
+
+    if result:
+        if result.get("status") in ("SUCCESS", "FALLBACK"):
+            body = result.get("text", "")
+            source = result.get("source", "OPENAI")
+            st.markdown(
+                f"""
+                <div class="dq-ai-quality-card">
+                    <div class="dq-ai-quality-kicker">AI DATA QUALITY AUDITOR</div>
+                    <div class="dq-ai-quality-title">
+                        Quality interpretation for {len(df):,} loaded records
+                    </div>
+                    <div class="dq-ai-quality-body">
+                        {body}
+                    </div>
+                    <div class="dq-ai-quality-meta">
+                        <span class="dq-ai-quality-chip">Score: {score:.1f}/100</span>
+                        <span class="dq-ai-quality-chip">Rating: {html.escape(rating)}</span>
+                        <span class="dq-ai-quality-chip">Controls: {len(quality_matrix):,}</span>
+                        <span class="dq-ai-quality-chip">High: {high:,}</span>
+                        <span class="dq-ai-quality-chip">Medium: {medium:,}</span>
+                        <span class="dq-ai-quality-chip">Source: {html.escape('AI' if source == 'OPENAI' else 'Evidence-only fallback')}</span>
+                    </div>
+                    <div class="dq-ai-quality-disclaimer">
+                        Numerical results, control statuses and quality findings
+                        remain based on the deterministic Python quality engine.
+                        {'The AI service was unavailable for this run, so the dashboard generated an evidence-only audit interpretation from the same verified controls. No quality calculation was changed.' if source != 'OPENAI' else 'AI provides interpretation and prioritisation only.'}
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        else:
+            st.warning(result.get("text", "AI quality interpretation is unavailable."))
+
+
+def render_quality_dashboard(df, quality_issues, quality_matrix, quality_summary):
+    """Manager/auditor-focused DHIS2 quality control register."""
+
+    st.subheader("📐 DHIS2 Quality Dimensions")
+
+    score = float(quality_summary.get("score", 0))
+    rating = str(quality_summary.get("rating", "Unknown"))
+    high_count = sum(i.get("Priority") == "HIGH" for i in quality_issues)
+    medium_count = sum(i.get("Priority") == "MEDIUM" for i in quality_issues)
+    low_count = sum(i.get("Priority") == "LOW" for i in quality_issues)
+    matrix_df = pd.DataFrame(quality_matrix)
+
+    rating_class = (
+        "dq-score-excellent" if score >= 90 else
+        "dq-score-good" if score >= 75 else
+        "dq-score-review" if score >= 50 else "dq-score-poor"
+    )
+
+    st.markdown(
+        f"""
+        <div class="dq-audit-summary">
+            <div class="dq-summary-card {rating_class}">
+                <div class="dq-summary-label">Quality score</div>
+                <div class="dq-summary-value">{score:.1f}/100</div>
+            </div>
+            <div class="dq-summary-card">
+                <div class="dq-summary-label">Overall rating</div>
+                <div class="dq-summary-value">{html.escape(rating)}</div>
+            </div>
+            <div class="dq-summary-card">
+                <div class="dq-summary-label">Control findings</div>
+                <div class="dq-summary-value">{len(quality_issues):,}</div>
+            </div>
+            <div class="dq-summary-card">
+                <div class="dq-summary-label">High priority</div>
+                <div class="dq-summary-value">{high_count:,}</div>
+            </div>
+        </div>
+        """
+        , unsafe_allow_html=True,
+    )
+
+    st.markdown(
+        f"""
+        <div class="dq-audit-note">
+            <strong>Audit view:</strong> This register evaluates 
+            <strong>{len(df):,}</strong> loaded records across 
+            <strong>{len(df.columns):,}</strong> fields. 
+            <strong>FAIL</strong> findings require remediation, 
+            <strong>REVIEW</strong> findings require validation, 
+            and <strong>INFO</strong> findings document control limitations. 
+            Source values are not silently deleted or corrected.
+        </div>
+        """
+        , unsafe_allow_html=True,
+    )
+
+    def status_badge(status):
+        value = str(status or "INFO").upper()
+        cls = {"PASS": "dq-badge-pass", "REVIEW": "dq-badge-review",
+               "FAIL": "dq-badge-fail", "INFO": "dq-badge-info"}.get(value, "dq-badge-info")
+        return f'<span class="dq-badge {cls}">{html.escape(value)}</span>'
+
+    def priority_badge(priority):
+        value = str(priority or "LOW").upper()
+        cls = {"HIGH": "dq-priority-high", "MEDIUM": "dq-priority-medium",
+               "LOW": "dq-priority-low"}.get(value, "dq-priority-low")
+        return f'<span class="dq-badge {cls}">{html.escape(value)}</span>'
+
+    def audit_action(row):
+        status = str(row.get("Status", "")).upper()
+        metric = str(row.get("Metric", "")).lower()
+        if status == "FAIL":
+            return "Remediate and re-run the control before reporting."
+        if status == "REVIEW":
+            if "missing" in metric or "completeness" in metric:
+                return "Validate source completeness and mandatory fields."
+            if "duplicate" in metric:
+                return "Investigate reporting grain and duplicate submissions."
+            if "outlier" in metric:
+                return "Validate against source records and programme context."
+            if "zero" in metric:
+                return "Confirm zero is valid and not non-reporting."
+            return "Investigate evidence and document the management decision."
+        if status == "INFO":
+            return "Document limitation and confirm whether additional fields are required."
+        return "No corrective action required; retain as audit evidence."
+
+    if not matrix_df.empty:
+        st.markdown("### 📐 DHIS2 Quality Dimensions")
+        st.caption("Advanced quality-control register designed for data managers, MEL teams and data-quality auditors.")
+        rows = []
+        for _, row in matrix_df.iterrows():
+            rows.append(
+                f"""
+                <tr>
+                    <td class="dq-domain">{html.escape(str(row.get("Domain", "")))}</td>
+                    <td class="dq-metric">{html.escape(str(row.get("Metric", "")))}</td>
+                    <td class="dq-result">{html.escape(str(row.get("Result", "")))}</td>
+                    <td>{status_badge(row.get("Status", ""))}</td>
+                    <td>{priority_badge(row.get("Priority", ""))}</td>
+                    <td>{html.escape(str(row.get("Details", "")))}</td>
+                    <td class="dq-action">{html.escape(audit_action(row))}</td>
+                </tr>
+                """
+            )
+        quality_register_html = f"""
+        <div class="dq-audit-shell">
+            <div class="dq-audit-toolbar">
+                <div class="dq-audit-title">DHIS2 Quality Control Register</div>
+                <div class="dq-audit-subtitle">
+                    Evidence-based assessment of completeness, uniqueness, validity,
+                    plausibility, timeliness, integrity and consistency.
+                </div>
+            </div>
+            <div class="dq-table-wrap">
+                <table class="dq-table">
+                    <thead>
+                        <tr>
+                            <th>Quality domain</th>
+                            <th>Control / metric</th>
+                            <th>Result</th>
+                            <th>Status</th>
+                            <th>Priority</th>
+                            <th>Audit evidence / details</th>
+                            <th>Management action</th>
+                        </tr>
+                    </thead>
+                    <tbody>{''.join(rows)}</tbody>
+                </table>
+            </div>
+        </div>
+        """
+        st.html(textwrap.dedent(quality_register_html))
+
+    if quality_issues:
+        st.markdown("### 🔍 Detailed Quality Findings")
+        st.caption("Prioritised issue register for investigation, remediation and audit follow-up.")
+        issues_df = pd.DataFrame(quality_issues).copy()
+        detail_rows = []
+        for _, row in issues_df.iterrows():
+            priority = str(row.get("Priority", "LOW")).upper()
+            percentage = row.get("Percentage", "")
+            if percentage != "":
+                try:
+                    percentage = f"{float(percentage):.2f}%"
+                except Exception:
+                    percentage = str(percentage)
+            detail_rows.append(
+                f"""
+                <tr>
+                    <td>{priority_badge(priority)}</td>
+                    <td class="dq-domain">{html.escape(str(row.get("Domain", "")))}</td>
+                    <td class="dq-metric">{html.escape(str(row.get("Issue", "")))}</td>
+                    <td>{html.escape(str(row.get("Column", "")))}</td>
+                    <td class="dq-result">{html.escape(str(row.get("Count", "")))}</td>
+                    <td>{html.escape(str(percentage))}</td>
+                    <td>{html.escape(str(row.get("Impact", "")))}</td>
+                    <td class="dq-action">{html.escape(str(row.get("Recommendation", "")))}</td>
+                </tr>
+                """
+            )
+        issue_register_html = f"""
+        <div class="dq-audit-shell">
+            <div class="dq-audit-toolbar">
+                <div class="dq-audit-title">Data Quality Issue Register</div>
+                <div class="dq-audit-subtitle">
+                    Findings are prioritised for investigation, remediation and audit follow-up.
+                </div>
+            </div>
+            <div class="dq-table-wrap">
+                <table class="dq-table dq-detail-table">
+                    <thead>
+                        <tr>
+                            <th>Priority</th>
+                            <th>Domain</th>
+                            <th>Issue</th>
+                            <th>Field / column</th>
+                            <th>Count</th>
+                            <th>%</th>
+                            <th>Impact</th>
+                            <th>Recommended action</th>
+                        </tr>
+                    </thead>
+                    <tbody>{''.join(detail_rows)}</tbody>
+                </table>
+            </div>
+        </div>
+        """
+        st.html(textwrap.dedent(issue_register_html))
+        if high_count:
+            st.error(
+                "High-priority quality issues may materially affect the requested analysis. "
+                "Review and resolve these findings before using results for management decisions or formal reporting."
+            )
+    else:
+        st.success("All implemented DHIS2 quality checks passed for the returned dataset.")
+
+    with st.expander("📚 Quality methodology", expanded=False):
+        st.markdown("""
+        **Completeness** — missing cells, missing OU and missing period.
+
+        **Uniqueness** — exact duplicate rows and possible OU/period/indicator duplicate records.
+
+        **Validity** — numeric parsing failures, negative values and percentage/rate plausibility.
+
+        **Consistency** — numerator/denominator checks where explicit fields are available.
+
+        **Timeliness** — future reporting periods and period parseability.
+
+        **Integrity** — organisation-unit availability and structural/cardinality checks.
+
+        **Plausibility** — zero concentration and statistical IQR outliers.
+
+        **Important:** outliers and zeros are flagged for review; they are not automatically deleted or converted to missing values.
+        """)
+
+
+    # ========================================================
+    # AI QUALITY INTERPRETATION — OPTIONAL, UI-PRESERVING
+    # ========================================================
+    render_ai_quality_interpretation(
+        df=df,
+        quality_issues=quality_issues,
+        quality_matrix=quality_matrix,
+        quality_summary=quality_summary,
+    )
+
+# ============================================================
+# GUIDED ANALYSIS CONFIGURATION
+# ============================================================
+# AI ANALYSIS PLANNER
+# ============================================================
+# AGGREGATION
+# ============================================================
+
+def aggregate_series(series, aggregation):
+    if aggregation == "mean":
+        return series.mean()
+
+    if aggregation == "median":
+        return series.median()
+
+    if aggregation == "min":
+        return series.min()
+
+    if aggregation == "max":
+        return series.max()
+
+    if aggregation == "count":
+        return series.count()
+
+    return series.sum()
+
+
+# ============================================================
+# APPLY FILTERS
+# ============================================================
+
+def apply_plan_filters(
+    work,
+    filters,
+):
+    applied = []
+
+    for filter_item in filters or []:
+
+        if not isinstance(
+            filter_item,
+            dict,
+        ):
+            continue
+
+        column = filter_item.get(
+            "column"
+        )
+
+        operator = filter_item.get(
+            "operator",
+            "equals",
+        )
+
+        value = filter_item.get(
+            "value"
+        )
+
+        if column not in work.columns:
+            continue
+
+        before = len(work)
+
+        series = work[column]
+
+        if operator == "equals":
+
+            work = work[
+                series.astype(str)
+                .str.lower()
+                ==
+                str(value).lower()
+            ]
+
+        elif operator == "not_equals":
+
+            work = work[
+                series.astype(str)
+                .str.lower()
+                !=
+                str(value).lower()
+            ]
+
+        elif operator == "contains":
+
+            work = work[
+                series.astype(str)
+                .str.contains(
+                    str(value),
+                    case=False,
+                    na=False,
+                )
+            ]
+
+        elif operator == "starts_with":
+
+            work = work[
+                series.astype(str)
+                .str.lower()
+                .str.startswith(
+                    str(value).lower()
+                )
+            ]
+
+        elif operator == "ends_with":
+
+            work = work[
+                series.astype(str)
+                .str.lower()
+                .str.endswith(
+                    str(value).lower()
+                )
+            ]
+
+        else:
+            continue
+
+        applied.append({
+            "column": column,
+            "operator": operator,
+            "value": value,
+            "rows_before": int(before),
+            "rows_after": int(len(work)),
+        })
+
+    return work, applied
+
+
+# ============================================================
+# REQUEST-SPECIFIC CALCULATION ENGINE
+# ============================================================
+
+
+def build_multi_indicator_comparison_evidence(df, chart_plan):
+    """
+    Build an explicit comparison matrix for multiple indicators.
+
+    This is supplementary evidence for the AI narrative. It never replaces
+    the main requested-analysis calculation.
+    """
+    indicators = [
+        c for c in (chart_plan.get("y_columns") or [])
+        if c in df.columns
+    ]
+    x_column = chart_plan.get("x_column")
+
+    if len(indicators) < 2:
+        return {
+            "comparison_mode": False,
+            "message": "Fewer than two indicators were selected."
+        }
+
+    work = df.copy()
+
+    for col in indicators:
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+
+    group_cols = [x_column] if x_column and x_column in work.columns else []
+
+    if group_cols:
+        grouped = (
+            work.groupby(group_cols, dropna=False)[indicators]
+            .agg(chart_plan.get("aggregation", "sum"))
+            .reset_index()
+        )
+    else:
+        grouped = pd.DataFrame(
+            [work[indicators].agg(chart_plan.get("aggregation", "sum"))]
+        )
+
+    summary = {}
+    for indicator in indicators:
+        values = pd.to_numeric(grouped[indicator], errors="coerce").dropna()
+        if values.empty:
+            summary[indicator] = {
+                "value_count": 0,
+                "mean": None,
+                "min": None,
+                "max": None,
+                "total": None,
+            }
+        else:
+            summary[indicator] = {
+                "value_count": int(values.count()),
+                "mean": float(values.mean()),
+                "min": float(values.min()),
+                "max": float(values.max()),
+                "total": float(values.sum()),
+            }
+
+    return {
+        "comparison_mode": True,
+        "x_column": x_column,
+        "indicators": indicators,
+        "aggregation": chart_plan.get("aggregation", "sum"),
+        "rows_compared": int(len(grouped)),
+        "indicator_summary": summary,
+        "comparison_data": grouped.head(500).to_dict(orient="records"),
+    }
+
+
+def build_requested_analysis_evidence(
+    df,
+    user_question,
+    chart_plan,
+):
+    """
+    THIS IS THE CORE FIX.
+
+    Python executes the requested analysis against ALL rows.
+    GPT does not have to guess or calculate from a sample.
+    """
+
+    evidence = {
+        "status": "SUCCESS",
+        "user_request": user_question,
+        "analysis_population": "ALL_ROWS",
+        "source_rows": int(len(df)),
+        "columns_used": [],
+        "filters_applied": [],
+        "result": {},
+    }
+
+    if not chart_plan:
+        return {
+            "status": "NO_ANALYSIS_PLAN",
+            "message": "No analysis plan was produced.",
+        }
+
+    try:
+        work = df.copy()
+
+        x_column = chart_plan.get(
+            "x_column"
+        )
+
+        y_columns = list(
+            chart_plan.get(
+                "y_columns",
+                [],
+            )
+        )
+
+        indicator_columns = list(
+            chart_plan.get(
+                "indicator_columns",
+                [],
+            )
+        )
+
+        # Combine indicator and Y fields
+        requested_numeric = []
+
+        for col in (
+            indicator_columns
+            + y_columns
+        ):
+            if (
+                col in work.columns
+                and col not in requested_numeric
+            ):
+                requested_numeric.append(col)
+
+        group_column = chart_plan.get(
+            "group_column"
+        )
+
+        dimension_column = chart_plan.get(
+            "dimension_column"
+        )
+
+        if (
+            not x_column
+            and dimension_column
+            and dimension_column in work.columns
+        ):
+            x_column = dimension_column
+
+        aggregation = chart_plan.get(
+            "aggregation",
+            "sum",
+        )
+
+        analysis_type = chart_plan.get(
+            "analysis_type",
+            "custom",
+        )
+
+        ranking_limit = chart_plan.get(
+            "ranking_limit"
+        )
+
+        # ----------------------------------------------------
+        # Validate requested fields
+        # ----------------------------------------------------
+
+        missing_columns = []
+
+        for col in (
+            [x_column, group_column]
+            + requested_numeric
+        ):
+            if (
+                col
+                and col not in work.columns
+            ):
+                missing_columns.append(col)
+
+        if missing_columns:
+            return {
+                "status": "ERROR",
+                "error": (
+                    "Requested columns do not exist: "
+                    + ", ".join(
+                        map(
+                            str,
+                            missing_columns,
+                        )
+                    )
+                ),
+            }
+
+        evidence["columns_used"] = [
+            c
+            for c in (
+                [x_column, group_column]
+                + requested_numeric
+            )
+            if c
+        ]
+
+        # ----------------------------------------------------
+        # Convert numeric fields
+        # ----------------------------------------------------
+
+        for column in requested_numeric:
+            work[column] = pd.to_numeric(
+                work[column],
+                errors="coerce",
+            )
+
+        # ----------------------------------------------------
+        # Filters
+        # ----------------------------------------------------
+
+        work, applied_filters = apply_plan_filters(
+            work,
+            chart_plan.get(
+                "filters",
+                [],
+            ),
+        )
+
+        evidence["filters_applied"] = applied_filters
+
+        # ----------------------------------------------------
+        # DEFAULT STATISTICAL ANALYSIS
+        # ----------------------------------------------------
+        if analysis_type == "statistical":
+            statistical_summary = {}
+            for column in requested_numeric:
+                values = work[column].dropna()
+                if values.empty:
+                    continue
+
+                q1 = values.quantile(0.25)
+                q3 = values.quantile(0.75)
+                iqr = q3 - q1
+                outlier_count = 0 if iqr == 0 else int(
+                    ((values < q1 - 1.5 * iqr) | (values > q3 + 1.5 * iqr)).sum()
+                )
+                mean_value = values.mean()
+                std_value = values.std()
+
+                statistical_summary[column] = {
+                    "count": int(values.count()),
+                    "missing": int(work[column].isna().sum()),
+                    "sum": float(values.sum()),
+                    "mean": float(mean_value),
+                    "median": float(values.median()),
+                    "minimum": float(values.min()),
+                    "maximum": float(values.max()),
+                    "range": float(values.max() - values.min()),
+                    "standard_deviation": float(std_value) if pd.notna(std_value) else None,
+                    "variance": float(values.var()) if pd.notna(values.var()) else None,
+                    "Q1": float(q1),
+                    "Q3": float(q3),
+                    "IQR": float(iqr),
+                    "zero_count": int((values == 0).sum()),
+                    "negative_count": int((values < 0).sum()),
+                    "outlier_count": outlier_count,
+                }
+
+            evidence["result"] = {
+                "analysis_type": "statistical",
+                "rows_after_filters": int(len(work)),
+                "data": statistical_summary,
+            }
+            return evidence
+
+        # ----------------------------------------------------
+        # Remove missing X
+        # ----------------------------------------------------
+
+        if x_column:
+            work = work.dropna(
+                subset=[x_column]
+            )
+
+        # ----------------------------------------------------
+        # No explicit numeric field
+        # ----------------------------------------------------
+
+        if not requested_numeric:
+
+            evidence["result"] = {
+                "rows_after_filters": int(len(work)),
+                "analysis_type": analysis_type,
+                "message": (
+                    "The request did not resolve to a "
+                    "numeric indicator. The AI should interpret "
+                    "the available dimensions and explain "
+                    "any missing requested measure."
+                ),
+            }
+
+            return evidence
+
+        # ----------------------------------------------------
+        # Determine grouping
+        # ----------------------------------------------------
+
+        group_columns = []
+
+        if x_column:
+            group_columns.append(
+                x_column
+            )
+
+        if (
+            group_column
+            and group_column not in group_columns
+        ):
+            group_columns.append(
+                group_column
+            )
+
+        # If no grouping but user asks for total/average
+        if not group_columns:
+
+            overall = []
+
+            for y in requested_numeric:
+
+                valid = work[y].dropna()
+
+                if valid.empty:
+                    value = None
+                else:
+                    value = aggregate_series(
+                        valid,
+                        aggregation,
+                    )
+
+                overall.append({
+                    "indicator": y,
+                    "value": _safe_json_value(
+                        value
+                    ),
+                    "valid_observations": int(
+                        valid.notna().sum()
+                    ),
+                })
+
+            evidence["result"] = {
+                "analysis_type": analysis_type,
+                "aggregation": aggregation,
+                "rows_after_filters": int(len(work)),
+                "data": overall,
+            }
+
+            return evidence
+
+        # ----------------------------------------------------
+        # Grouped calculation
+        # ----------------------------------------------------
+
+        result_frames = []
+
+        for y in requested_numeric:
+
+            temp = work[
+                group_columns + [y]
+            ].copy()
+
+            # Missing numeric values are NOT zero.
+            temp = temp.dropna(
+                subset=[y]
+            )
+
+            if temp.empty:
+                continue
+
+            grouped = (
+                temp
+                .groupby(
+                    group_columns,
+                    dropna=False,
+                )[y]
+                .agg(
+                    aggregation
+                )
+                .reset_index()
+            )
+
+            grouped["indicator"] = y
+            grouped["value"] = grouped[y]
+
+            grouped["valid_observations"] = (
+                temp
+                .groupby(
+                    group_columns,
+                    dropna=False,
+                )[y]
+                .count()
+                .values
+            )
+
+            result_frames.append(
+                grouped[
+                    group_columns
+                    + [
+                        "indicator",
+                        "value",
+                        "valid_observations",
+                    ]
+                ]
+            )
+
+        if not result_frames:
+
+            return {
+                "status": "NO_DATA",
+                "error": (
+                    "No valid observations were available "
+                    "for the requested calculation."
+                ),
+            }
+
+        result_df = pd.concat(
+            result_frames,
+            ignore_index=True,
+        )
+
+        # ----------------------------------------------------
+        # Ranking
+        # ----------------------------------------------------
+
+        if (
+            analysis_type == "ranking"
+            and ranking_limit
+            and "value" in result_df.columns
+        ):
+            result_df = (
+                result_df
+                .sort_values(
+                    "value",
+                    ascending=False,
+                )
+                .head(
+                    int(ranking_limit)
+                )
+            )
+
+        # ----------------------------------------------------
+        # Change / difference when two groups exist
+        # ----------------------------------------------------
+
+        comparison_summary = None
+
+        if (
+            analysis_type
+            in {
+                "comparison",
+                "difference",
+                "change",
+            }
+            and x_column
+            and len(requested_numeric) == 1
+        ):
+            y = requested_numeric[0]
+
+            values = result_df[
+                [x_column, "value"]
+            ].dropna()
+
+            if len(values) >= 2:
+                comparison_summary = {
+                    "lowest": safe_json_dumps(
+                        values.loc[
+                            values["value"].idxmin()
+                        ].to_dict()
+                    ),
+                    "highest": safe_json_dumps(
+                        values.loc[
+                            values["value"].idxmax()
+                        ].to_dict()
+                    ),
+                }
+
+        # ----------------------------------------------------
+        # Exact evidence
+        # ----------------------------------------------------
+
+        clean_records = []
+
+        for record in result_df.to_dict(
+            orient="records"
+        ):
+            clean_records.append({
+                str(k): _safe_json_value(v)
+                for k, v in record.items()
+            })
+
+        evidence["result"] = {
+            "analysis_type": analysis_type,
+            "aggregation": aggregation,
+            "rows_after_filters": int(len(work)),
+            "rows_used_in_calculation": int(
+                len(result_df)
+            ),
+            "grouping": group_columns,
+            "data": clean_records,
+            "comparison_summary": comparison_summary,
+        }
+
+        return evidence
+
+    except Exception as e:
+        return {
+            "status": "ERROR",
+            "error": str(e),
+        }
+
+
+# ============================================================
+# CHART DATAFRAME
+# ============================================================
+
+def build_chart_data_dataframe(
+    df,
+    plan,
+):
+    chart_type = plan.get(
+        "chart_type"
+    )
+
+    x_column = plan.get(
+        "x_column"
+    )
+
+    y_columns = plan.get(
+        "y_columns",
+        [],
+    )
+
+    group_column = plan.get(
+        "group_column"
+    )
+
+    aggregation = plan.get(
+        "aggregation",
+        "sum",
+    )
+
+    if chart_type == "none":
+        return None, None
+
+    if (
+        not x_column
+        or not y_columns
+    ):
+        return (
+            None,
+            "The requested chart needs "
+            "a valid X and Y field.",
+        )
+
+    if x_column not in df.columns:
+        return (
+            None,
+            f"X column '{x_column}' is not available.",
+        )
+
+    for y in y_columns:
+        if y not in df.columns:
+            return (
+                None,
+                f"Y column '{y}' is not available.",
+            )
+
+    work = df.copy()
+
+    for y in y_columns:
+        work[y] = pd.to_numeric(
+            work[y],
+            errors="coerce",
+        )
+
+    work = work.dropna(
+        subset=[x_column]
+    )
+
+    # Scatter = row-level observations
+    if chart_type == "scatter":
+
+        y = y_columns[0]
+
+        work = work.dropna(
+            subset=[y]
+        )
+
+        work[x_column] = pd.to_numeric(
+            work[x_column],
+            errors="coerce",
+        )
+
+        work = work.dropna(
+            subset=[x_column, y]
+        )
+
+        return (
+            work[
+                [x_column, y]
+            ],
+            None,
+        )
+
+    group_cols = [x_column]
+
+    if (
+        group_column
+        and group_column != x_column
+    ):
+        group_cols.append(
+            group_column
+        )
+
+    pieces = []
+
+    for y in y_columns:
+
+        temp = work[
+            group_cols + [y]
+        ].copy()
+
+        temp = temp.dropna(
+            subset=[y]
+        )
+
+        if temp.empty:
+            continue
+
+        grouped = (
+            temp
+            .groupby(
+                group_cols,
+                dropna=False,
+            )[y]
+            .agg(
+                aggregation
+            )
+            .reset_index()
+        )
+
+        grouped["__series__"] = y
+        grouped["__value__"] = grouped[y]
+
+        pieces.append(
+            grouped[
+                group_cols
+                + [
+                    "__series__",
+                    "__value__",
+                ]
+            ]
+        )
+
+    if not pieces:
+        return (
+            None,
+            "No usable numeric values were available.",
+        )
+
+    chart = pd.concat(
+        pieces,
+        ignore_index=True,
+    )
+
+    if not group_column:
+
+        wide = chart.pivot_table(
+            index=x_column,
+            columns="__series__",
+            values="__value__",
+            aggfunc="first",
+        ).reset_index()
+
+        wide.columns.name = None
+
+        return wide, None
+
+    return chart, None
+
+
+# ============================================================
+# CHART RENDERING
+# ============================================================
+
+def _format_viz_value(value):
+    """Format chart/table values consistently."""
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+
+    if isinstance(value, (int, np.integer)):
+        return f"{int(value):,}"
+
+    if isinstance(value, (float, np.floating)):
+        if np.isfinite(value):
+            if float(value).is_integer():
+                return f"{int(value):,}"
+            return f"{float(value):,.2f}".rstrip("0").rstrip(".")
+
+    return str(value)
+
+
+def _render_visualization_data_table(chart_df, plan, x_column, y_columns):
+    """
+    Render the exact aggregated data used by the visualization.
+    Uses HTML so the table is always white with black text.
+    """
+    if chart_df is None or chart_df.empty or not x_column:
+        return
+
+    aggregation = str(plan.get("aggregation", "sum")).lower()
+
+    if "__series__" in chart_df.columns and "__value__" in chart_df.columns:
+        table_df = chart_df.pivot_table(
+            index=x_column,
+            columns="__series__",
+            values="__value__",
+            aggfunc="first",
+        ).reset_index()
+        table_df.columns.name = None
+    else:
+        cols = [x_column] + [c for c in y_columns if c in chart_df.columns]
+        table_df = chart_df[cols].copy()
+
+    if table_df.empty:
+        return
+
+    max_rows = 100
+    truncated = len(table_df) > max_rows
+    display_df = table_df.head(max_rows).copy()
+
+    headers = list(display_df.columns)
+    header_html = "".join(
+        f"<th>{html.escape(str(col))}</th>" for col in headers
+    )
+
+    rows_html = []
+    for _, row in display_df.iterrows():
+        cells = "".join(
+            f"<td>{html.escape(_format_viz_value(row[col]))}</td>"
+            for col in headers
+        )
+        rows_html.append(f"<tr>{cells}</tr>")
+
+    summary_cells = ["<td><strong>Total</strong></td>"]
+
+    for col in headers[1:]:
+        numeric = pd.to_numeric(table_df[col], errors="coerce").dropna()
+
+        if numeric.empty:
+            summary_value = ""
+        elif aggregation == "mean":
+            summary_value = _format_viz_value(numeric.mean())
+        elif aggregation == "median":
+            summary_value = _format_viz_value(numeric.median())
+        elif aggregation == "min":
+            summary_value = _format_viz_value(numeric.min())
+        elif aggregation == "max":
+            summary_value = _format_viz_value(numeric.max())
+        elif aggregation == "count":
+            summary_value = _format_viz_value(numeric.count())
+        else:
+            summary_value = _format_viz_value(numeric.sum())
+
+        summary_cells.append(
+            f"<td><strong>{html.escape(summary_value)}</strong></td>"
+        )
+
+    total_row = f'<tr class="total-row">{"".join(summary_cells)}</tr>'
+
+    extra_note = (
+        f"<br>• Showing first {max_rows:,} grouped rows of "
+        f"{len(table_df):,}."
+        if truncated
+        else ""
+    )
+
+    st.markdown(
+        f"""
+        <div class="viz-data-table-wrap">
+            <table class="viz-data-table">
+                <thead><tr>{header_html}</tr></thead>
+                <tbody>
+                    {''.join(rows_html)}
+                    {total_row}
+                </tbody>
+            </table>
+        </div>
+        <div class="viz-notes">
+            <strong>Notes:</strong><br>
+            • All values are calculated using the complete loaded dataset.<br>
+            • X-axis: {html.escape(str(x_column))} |
+              Aggregation: {html.escape(str(plan.get("aggregation", "sum")).title())}
+            {extra_note}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_single_chart(df, plan, title=None):
+    """Render one requested chart with a clean white background and black text."""
+    chart_type = str(plan.get("chart_type", "none")).strip().lower()
+
+    if chart_type == "none":
+        return False
+
+    chart_df, error = build_chart_data_dataframe(df, plan)
+
+    if error:
+        st.warning(error)
+        return False
+
+    if chart_df is None or chart_df.empty:
+        st.warning("No usable data is available for this visualization.")
+        return False
+
+    title = title or plan.get("title") or "Requested Visualization"
+    x = plan.get("x_column")
+    ys = [c for c in plan.get("y_columns", []) if c in chart_df.columns]
+
+    try:
+        import plotly.express as px
+
+        if chart_type in {"bar", "line"}:
+
+            if "__series__" in chart_df.columns and "__value__" in chart_df.columns:
+
+                plot_df = chart_df[
+                    [x, "__series__", "__value__"]
+                ].copy()
+
+                plot_df["__value__"] = pd.to_numeric(
+                    plot_df["__value__"],
+                    errors="coerce",
+                )
+
+                plot_df = plot_df.dropna(
+                    subset=[x, "__value__"]
+                )
+
+                if plot_df.empty:
+                    st.warning(
+                        "The selected indicator has no numeric values to graph."
+                    )
+                    return False
+
+                if chart_type == "bar":
+                    fig = px.bar(
+                        plot_df,
+                        x=x,
+                        y="__value__",
+                        color="__series__",
+                        barmode="group",
+                        title=title,
+                        text="__value__",
+                        labels={
+                            x: str(x),
+                            "__value__": "Value",
+                            "__series__": "Indicator",
+                        },
+                    )
+
+                    fig.update_traces(
+                        texttemplate="%{text:,.0f}",
+                        textposition="outside",
+                        cliponaxis=False,
+                    )
+
+                else:
+                    fig = px.line(
+                        plot_df,
+                        x=x,
+                        y="__value__",
+                        color="__series__",
+                        markers=True,
+                        title=title,
+                        text="__value__",
+                        labels={
+                            x: str(x),
+                            "__value__": "Value",
+                            "__series__": "Indicator",
+                        },
+                    )
+
+                    fig.update_traces(
+                        texttemplate="%{text:,.0f}",
+                        textposition="top center",
+                    )
+
+            else:
+
+                if not x or not ys:
+                    st.warning(
+                        "A valid X-axis and numeric indicator are required."
+                    )
+                    return False
+
+                plot_df = chart_df[
+                    [x] + ys
+                ].copy()
+
+                for col in ys:
+                    plot_df[col] = pd.to_numeric(
+                        plot_df[col],
+                        errors="coerce",
+                    )
+
+                plot_df = plot_df.dropna(
+                    subset=[x]
+                )
+
+                if chart_type == "bar":
+                    fig = px.bar(
+                        plot_df,
+                        x=x,
+                        y=ys,
+                        barmode="group",
+                        title=title,
+                    )
+
+                    fig.update_traces(
+                        texttemplate="%{y:,.0f}",
+                        textposition="outside",
+                        cliponaxis=False,
+                    )
+
+                else:
+                    fig = px.line(
+                        plot_df,
+                        x=x,
+                        y=ys,
+                        markers=True,
+                        title=title,
+                    )
+
+        elif chart_type == "pie":
+
+            if not x or not ys:
+                st.warning(
+                    "Pie chart requires an X-axis and one numeric indicator."
+                )
+                return False
+
+            y = ys[0]
+
+            plot_df = chart_df[
+                [x, y]
+            ].copy()
+
+            plot_df[y] = pd.to_numeric(
+                plot_df[y],
+                errors="coerce",
+            )
+
+            plot_df = plot_df.dropna(
+                subset=[x, y]
+            )
+
+            if plot_df.empty:
+                st.warning(
+                    "The selected indicator has no numeric values to graph."
+                )
+                return False
+
+            fig = px.pie(
+                plot_df,
+                names=x,
+                values=y,
+                title=title,
+            )
+
+            fig.update_traces(
+                textinfo="label+value",
+                textfont=dict(
+                    color="#111827",
+                    size=12,
+                ),
+            )
+
+        elif chart_type == "scatter":
+
+            if not x or not ys:
+                st.warning(
+                    "Scatter chart requires an X-axis and one numeric indicator."
+                )
+                return False
+
+            y = ys[0]
+
+            plot_df = chart_df[
+                [x, y]
+            ].copy()
+
+            plot_df[y] = pd.to_numeric(
+                plot_df[y],
+                errors="coerce",
+            )
+
+            plot_df = plot_df.dropna(
+                subset=[x, y]
+            )
+
+            if plot_df.empty:
+                st.warning(
+                    "The selected indicator has no numeric values to graph."
+                )
+                return False
+
+            fig = px.scatter(
+                plot_df,
+                x=x,
+                y=y,
+                title=title,
+            )
+
+        else:
+            st.warning(
+                f"Unsupported graph type: {chart_type}"
+            )
+            return False
+
+        # =====================================================
+        # FORCE WHITE BACKGROUND + BLACK TEXT EVERYWHERE
+        # =====================================================
+
+        black = "#111827"
+        grid = "#e5e7eb"
+
+        fig.update_layout(
+            template="plotly_white",
+            paper_bgcolor="#ffffff",
+            plot_bgcolor="#ffffff",
+
+            font=dict(
+                family="Arial, Helvetica, sans-serif",
+                color=black,
+                size=12,
+            ),
+
+            title=dict(
+                text=title,
+                font=dict(
+                    family="Arial, Helvetica, sans-serif",
+                    color=black,
+                    size=16,
+                ),
+                x=0,
+                xanchor="left",
+            ),
+
+            legend=dict(
+                title=dict(
+                    text="Indicator",
+                    font=dict(color=black),
+                ),
+                font=dict(color=black),
+                bgcolor="#ffffff",
+            ),
+
+            margin=dict(
+                l=60,
+                r=30,
+                t=70,
+                b=65,
+            ),
+
+            hoverlabel=dict(
+                bgcolor="#ffffff",
+                bordercolor="#cbd5e1",
+                font=dict(
+                    color=black,
+                    size=12,
+                ),
+            ),
+        )
+
+        fig.update_xaxes(
+            title_font=dict(color=black),
+            tickfont=dict(color=black),
+            showgrid=True,
+            gridcolor=grid,
+            zeroline=False,
+            linecolor=black,
+        )
+
+        fig.update_yaxes(
+            title_font=dict(color=black),
+            tickfont=dict(color=black),
+            showgrid=True,
+            gridcolor=grid,
+            zeroline=True,
+            zerolinecolor=black,
+            linecolor=black,
+        )
+
+        for trace in fig.data:
+            try:
+                trace.textfont = dict(
+                    color=black
+                )
+            except Exception:
+                pass
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+            config={
+                "displayModeBar": False,
+                "responsive": True,
+            },
+        )
+
+        # Exact data represented by this visualization.
+        _render_visualization_data_table(
+            chart_df,
+            plan,
+            x,
+            ys,
+        )
+
+        return True
+
+    except Exception:
+        # Never expose Plotly/Streamlit's dark technical error block.
+        st.warning(
+            "The selected visualization could not be rendered. "
+            "Please verify the selected X-axis and numeric indicator."
+        )
+        return False
+
+
+def render_user_chart(
+    df,
+    plan,
+    section_title=True,
+    title_override=None,
+):
+    """Render a single requested visualization with clean output."""
+
+    chart_type = str(
+        plan.get("chart_type", "none")
+    ).strip().lower()
+
+    if chart_type == "none":
+        return
+
+    title = (
+        title_override
+        or plan.get("title")
+        or "Requested Visualization"
+    )
+
+    if section_title:
+        st.subheader(
+            "📊 Requested Visualization"
+        )
+
+    st.caption(
+        f"{title} • "
+        f"{plan.get('aggregation', 'sum')} aggregation"
+    )
+
+    _render_single_chart(
+        df,
+        plan,
+        title=title,
+    )
+
+
+def render_requested_visualizations(
+    df,
+    plan,
+):
+    """
+    Render exactly the graph types selected by the user.
+
+    The user's X-axis, indicators and aggregation remain
+    the source of truth.
+    """
+
+    if not plan or not plan.get(
+        "chart_requested"
+    ):
+        return
+
+    x = plan.get("x_column")
+
+    ys = [
+        c
+        for c in plan.get(
+            "y_columns",
+            [],
+        )
+        if c in df.columns
+    ]
+
+    chart_types = list(
+        plan.get(
+            "chart_types",
+            [],
+        )
+        or []
+    )
+
+    if not chart_types:
+
+        legacy_chart = plan.get(
+            "chart_type"
+        )
+
+        if (
+            legacy_chart
+            and legacy_chart != "none"
+        ):
+            chart_types = [
+                legacy_chart
+            ]
+
+    if (
+        not x
+        or not ys
+        or x not in df.columns
+        or not chart_types
+    ):
+        return
+
+    st.subheader(
+        "📊 Requested Visualizations"
+    )
+
+    st.caption(
+        "Showing only the graph types selected by the user. "
+        "All selected visualizations use the same X-axis, "
+        "indicators and aggregation."
+    )
+
+    label_by_type = {
+        "bar": "Bar",
+        "line": "Line",
+        "pie": "Pie",
+        "scatter": "Scatter",
+    }
+
+    seen = set()
+    selected_types = []
+
+    chart_aliases = {
+        "Grouped Bar": "bar",
+        "grouped bar": "bar",
+        "Bar": "bar",
+        "bar": "bar",
+        "Line": "line",
+        "line": "line",
+        "Pie": "pie",
+        "pie": "pie",
+        "Scatter": "scatter",
+        "scatter": "scatter",
+    }
+
+    for chart_type in chart_types:
+
+        normalized = chart_aliases.get(
+            str(chart_type).strip(),
+            str(chart_type).strip().lower(),
+        )
+
+        if (
+            normalized in {
+                "bar",
+                "line",
+                "pie",
+                "scatter",
+            }
+            and normalized not in seen
+        ):
+            seen.add(
+                normalized
+            )
+            selected_types.append(
+                normalized
+            )
+
+    for index, chart_type in enumerate(
+        selected_types,
+        start=1,
+    ):
+
+        chart = dict(plan)
+
+        chart["chart_type"] = chart_type
+        chart["chart_requested"] = True
+        chart["y_columns"] = ys
+
+        if chart_type == "bar":
+            chart["group_column"] = None
+
+        if chart_type == "scatter":
+
+            chart["y_columns"] = ys[:1]
+
+            if len(ys) > 1:
+                st.info(
+                    "💡 Scatter uses the first selected indicator "
+                    "because a scatter plot requires one Y measure."
+                )
+
+        if chart_type == "pie":
+
+            chart["y_columns"] = ys[:1]
+
+            if len(ys) > 1:
+                st.info(
+                    "🥧 Pie uses the first selected indicator "
+                    "because a pie chart represents one measure at a time."
+                )
+
+        chart["title"] = (
+            f"{label_by_type.get(chart_type, chart_type.title())} — "
+            f"{plan.get('title') or 'Requested Analysis'}"
+        )
+
+        st.markdown(
+            f"### {index}. "
+            f"{label_by_type.get(chart_type, chart_type.title())}"
+        )
+
+        render_user_chart(
+            df=df,
+            plan=chart,
+            section_title=False,
+            title_override=chart.get("title"),
+        )
+
+
+# ============================================================
+# AI DATA PREPARATION
+# ============================================================
+# ============================================================
+
+def prepare_ai_data(
+    df,
+    chart_plan=None,
+    requested_evidence=None,
+):
+    """
+    Prepare a compact, deterministic evidence package for the AI.
+
+    IMPORTANT:
+    - Python performs the calculations.
+    - AI receives evidence rather than calculating from a sample.
+    - The complete dataframe remains available locally.
+    - Only a compact preview is sent to the AI to avoid huge prompts.
+    """
+
+    if not isinstance(df, pd.DataFrame):
+        raise TypeError("prepare_ai_data expects a pandas DataFrame.")
+
+    working = df.copy()
+
+    # --------------------------------------------------------
+    # Column metadata
+    # --------------------------------------------------------
+    column_metadata = []
+
+    for column in working.columns:
+        series = working[column]
+
+        column_metadata.append({
+            "column": str(column),
+            "dtype": str(series.dtype),
+            "non_null": int(series.notna().sum()),
+            "missing": int(series.isna().sum()),
+            "unique": int(series.nunique(dropna=True)),
+        })
+
+    # --------------------------------------------------------
+    # Numeric evidence
+    # --------------------------------------------------------
+    numeric_columns = get_numeric_columns(working)
+    numeric_evidence = {}
+
+    for column in numeric_columns:
+        values = pd.to_numeric(
+            working[column],
+            errors="coerce",
+        ).dropna()
+
+        if values.empty:
+            continue
+
+        q1 = values.quantile(0.25)
+        q3 = values.quantile(0.75)
+        iqr = q3 - q1
+
+        if iqr != 0:
+            outlier_count = int(
+                (
+                    (values < q1 - 1.5 * iqr)
+                    | (values > q3 + 1.5 * iqr)
+                ).sum()
+            )
+        else:
+            outlier_count = 0
+
+        mean_value = values.mean()
+
+        numeric_evidence[str(column)] = {
+            "count": int(values.count()),
+            "missing": int(working[column].isna().sum()),
+            "sum": float(values.sum()),
+            "mean": float(mean_value),
+            "median": float(values.median()),
+            "minimum": float(values.min()),
+            "maximum": float(values.max()),
+            "range": float(values.max() - values.min()),
+            "standard_deviation": (
+                float(values.std())
+                if pd.notna(values.std())
+                else None
+            ),
+            "Q1": float(q1),
+            "Q3": float(q3),
+            "IQR": float(iqr),
+            "zero_count": int((values == 0).sum()),
+            "negative_count": int((values < 0).sum()),
+            "outlier_count": outlier_count,
+        }
+
+    # --------------------------------------------------------
+    # Key dimensions
+    # --------------------------------------------------------
+    period_column = find_period_column(working)
+    ou_column = find_ou_column(working)
+
+    dimension_evidence = {
+        "period_column": (
+            str(period_column)
+            if period_column is not None
+            else None
+        ),
+        "organisation_unit_column": (
+            str(ou_column)
+            if ou_column is not None
+            else None
+        ),
+        "period_count": (
+            int(working[period_column].nunique(dropna=True))
+            if period_column is not None
+            else 0
+        ),
+        "organisation_unit_count": (
+            int(working[ou_column].nunique(dropna=True))
+            if ou_column is not None
+            else 0
+        ),
+    }
+
+    # --------------------------------------------------------
+    # Compact categorical/dimension summaries
+    # --------------------------------------------------------
+    categorical_evidence = {}
+
+    for column in working.columns:
+        if column in numeric_columns:
+            continue
+
+        series = working[column].dropna()
+
+        if series.empty:
+            continue
+
+        unique_count = int(series.nunique())
+
+        # Only summarize dimensions with manageable cardinality.
+        if unique_count <= 50:
+            counts = (
+                series.astype(str)
+                .value_counts()
+                .head(25)
+            )
+
+            categorical_evidence[str(column)] = {
+                "unique_values": unique_count,
+                "top_values": [
+                    {
+                        "value": str(index),
+                        "count": int(value),
+                    }
+                    for index, value in counts.items()
+                ],
+            }
+
+    # --------------------------------------------------------
+    # Compact data preview
+    # --------------------------------------------------------
+    # This is explicitly a preview only. Numerical conclusions
+    # must come from deterministic evidence.
+    preview_df = working.head(25).copy()
+
+    preview_records = (
+        preview_df
+        .replace({np.nan: None})
+        .to_dict(orient="records")
+    )
+
+    # --------------------------------------------------------
+    # Requested-analysis evidence
+    # --------------------------------------------------------
+    requested_result = {}
+
+    if isinstance(requested_evidence, dict):
+        requested_result = requested_evidence.get(
+            "result",
+            {},
+        )
+
+    # --------------------------------------------------------
+    # Automatic analysis evidence
+    # --------------------------------------------------------
+    automatic_analysis = {}
+
+    if isinstance(requested_evidence, dict):
+        automatic_analysis = requested_evidence.get(
+            "automatic_analysis",
+            {},
+        )
+
+    # --------------------------------------------------------
+    # Final evidence package
+    # --------------------------------------------------------
+    full_data_evidence = {
+        "dataset": {
+            "rows": int(len(working)),
+            "columns": int(len(working.columns)),
+            "column_names": [
+                str(column)
+                for column in working.columns
+            ],
+        },
+
+        "column_metadata": column_metadata,
+
+        "numeric_columns": [
+            str(column)
+            for column in numeric_columns
+        ],
+
+        "numeric_statistics": numeric_evidence,
+
+        "dimensions": dimension_evidence,
+
+        "categorical_dimensions": categorical_evidence,
+
+        "requested_analysis_result": requested_result,
+
+        "automatic_analysis": automatic_analysis,
+
+        "analysis_plan": chart_plan or {},
+
+        "schema_preview": {
+            "rows_in_preview": int(len(preview_df)),
+            "records": preview_records,
+        },
+    }
+
+    return {
+        "full_data_evidence": full_data_evidence,
+    }
+
+
+
+# ============================================================
+# AI INTERPRETATION
+# ============================================================
+
+def ask_ai(
+    df,
+    user_question,
+    statistics,
+    quality_issues,
+    quality_matrix=None,
+    quality_summary=None,
+    chart_plan=None,
+    requested_evidence=None,
+    external_context=None,
+):
+    # AI is optional. Deterministic analysis and data-quality processing
+    # can run without an OpenAI API key.
+    if client is None:
+        return (
+            "## AI Interpretation\n\n"
+            "AI interpretation is currently unavailable because "
+            "`OPENAI_API_KEY` is not configured.\n\n"
+            "The deterministic analysis, requested chart and DHIS2 "
+            "data-quality assessment can still be generated. Add "
+            "`OPENAI_API_KEY` to `.env` and restart the application "
+            "to enable the AI narrative."
+        )
+    data_text = prepare_ai_data(
+        df=df,
+        chart_plan=chart_plan,
+        requested_evidence=requested_evidence,
+    )
+
+    prompt = f"""
+You are an expert DHIS2 data analyst, public-health
+monitoring and evaluation specialist, nutrition programme
+analyst, and data-quality specialist.
+
+============================================================
+PRIORITY 1 — DATA QUALITY
+============================================================
+
+Data quality has HIGH PRIORITY.
+
+Before interpreting the result, assess:
+
+1. Missing values
+2. Duplicate records
+3. Zero values
+4. Negative values
+5. Suspicious percentages
+6. Missing organisation units
+7. Missing periods
+8. Any issue that affects the requested calculation
+
+Classify relevant issues as HIGH, MEDIUM, or LOW.
+
+Never hide an important quality problem.
+
+BUT data quality must NOT replace the user's request.
+
+============================================================
+PRIORITY 2 — USER REQUEST
+============================================================
+
+The USER REQUEST defines the analysis.
+
+If the user asks for a comparison, answer the comparison.
+
+If the user asks for a ranking, rank all applicable rows.
+
+If the user asks for a trend, analyse periods.
+
+If the user asks for a total, calculate totals.
+
+If the user asks for an average, analyse averages.
+
+If the user asks for a percentage, analyse the percentage.
+
+Do NOT automatically make a trend.
+
+Do NOT automatically choose a different aggregation.
+
+Do NOT answer a different question simply because
+another analysis seems more interesting.
+
+============================================================
+PRIORITY 3 — COMPLETE DATA
+============================================================
+
+The dataset contains {len(df):,} rows.
+
+All applicable rows have been processed locally.
+
+The first 25 rows are ONLY a schema preview.
+
+Never treat the top-row matrix as the complete dataset.
+
+============================================================
+EXTERNAL INDICATOR CONTEXT
+============================================================
+
+External context below comes from a separate web-research step limited to trusted UN/INGO/public-health domains. Use it only as contextual evidence. Do not use it to change the user's numerical results or definitions.
+
+{safe_json_dumps(external_context or {})}
+
+Clearly label external evidence in the report. Distinguish EXACT MATCH, RELATED MATCH and NO VERIFIED MATCH. Never imply that a related indicator is identical to the user's indicator.
+
+============================================================
+PRIORITY 4 — PYTHON CALCULATION
+============================================================
+
+Python has executed the requested calculation.
+
+The REQUESTED_ANALYSIS_EVIDENCE is authoritative
+for numerical results.
+
+Do not reconstruct numerical results from a sample.
+
+Do not invent values.
+
+Do not silently change the aggregation.
+
+============================================================
+USER REQUEST
+============================================================
+
+{user_question}
+
+============================================================
+ANALYSIS PLAN
+============================================================
+
+{safe_json_dumps(chart_plan or {})}
+
+============================================================
+REQUESTED ANALYSIS EVIDENCE
+============================================================
+
+{safe_json_dumps(requested_evidence or {})}
+
+============================================================
+MULTI-INDICATOR COMPARISON EVIDENCE
+============================================================
+
+{safe_json_dumps((requested_evidence or {}).get("multi_indicator_comparison", {}))}
+
+If multiple indicators were selected, use this evidence to produce
+a detailed comparison and a professional narrative.
+
+============================================================
+DATA QUALITY MATRIX
+============================================================
+
+QUALITY SCORE / RATING:
+{safe_json_dumps(quality_summary or {})}
+
+QUALITY DIMENSIONS:
+{safe_json_dumps(quality_matrix or [])}
+
+DETAILED FINDINGS:
+{safe_json_dumps(quality_issues)}
+
+============================================================
+FULL DATA PROFILE
+============================================================
+
+{safe_json_dumps(data_text["full_data_evidence"])}
+
+============================================================
+AUTOMATIC DANIP-NI REPORTING MODE
+============================================================
+
+The user did not provide a manual analysis configuration.
+
+DANIP-NI is responsible for deciding which valid analyses are
+supported by the actual dataset.
+
+Do not ask the user to choose X, Y, aggregation or chart type.
+
+The report must automatically synthesize:
+- data quality
+- complete-data profile
+- indicator statistics
+- organisation-unit rankings
+- period analysis when available
+- indicator comparisons
+- important exceptions and outliers
+- programme-monitoring interpretation
+- practical recommendations
+- confidence
+
+Numerical values must come from the supplied deterministic evidence.
+
+============================================================
+RESPONSE FORMAT
+============================================================
+
+## User Request
+
+Restate exactly what the user asked.
+
+## Data Quality Priority
+
+Identify the most important quality issue affecting
+the requested analysis.
+
+If none materially affects it, say so.
+
+## Executive Summary
+
+Answer the user's request directly.
+
+Do not give a generic dataset summary.
+
+If more than one indicator is selected, make the executive summary
+a true comparison of the selected indicators rather than separate
+descriptions of each one.
+
+## Requested Analysis
+
+Present the exact requested comparison,
+ranking, calculation, trend, or interpretation.
+
+Use the Python-calculated evidence.
+
+If multiple indicators were selected, compare EVERY selected indicator.
+Do not discuss only the first indicator.
+
+For multi-indicator comparisons, explicitly describe:
+- highest and lowest indicator
+- absolute differences where available
+- relative differences or percentage-point differences where valid
+- which organisation units or periods drive the differences
+- whether the indicators move in the same or opposite direction
+- notable gaps, exceptions and outliers
+- important changes over time when the X-axis is temporal
+- any indicator that is consistently stronger or weaker
+- whether apparent differences may be affected by data quality
+
+Do not invent calculations that are not present in the evidence.
+
+## Comparison Table / Structured Findings
+
+When multiple indicators are selected, provide a concise comparison table
+using the calculated evidence where possible.
+
+## Narrative Interpretation
+
+Write a professional programme-monitoring narrative that explains
+what the comparison means in plain language.
+
+The narrative should connect the numerical findings to the requested
+DHIS2 reporting dimension without claiming causation.
+
+## External Indicator Context
+
+If verified external indicator evidence is available, summarize the matched UN/INGO/public-health definition or programme context here. Clearly label the organization and distinguish exact matches from related indicators. Do not use external sources to calculate or alter the user's data.
+
+## Key Findings
+
+Give findings directly relevant to the request.
+
+## Data Quality Impact
+
+Explain whether quality issues:
+
+- do not affect the result
+- partially affect the result
+- substantially affect the result
+- make the result unreliable
+
+## Interpretation
+
+Explain what the observed data shows.
+
+Do not claim causation without evidence.
+
+## Areas Requiring Attention
+
+Identify important programme/data-management issues.
+
+## Recommendations
+
+Give practical evidence-based actions.
+
+## Confidence
+
+High, Medium, or Low, with a short reason.
+
+FINAL RULE:
+The answer must be driven by:
+
+1. Data quality
+2. User request
+3. Request-specific calculation
+4. Complete data
+
+Never reverse this priority.
+"""
+
+    response = client.responses.create(
+        model=OPENAI_MODEL,
+        input=prompt,
+    )
+
+    return response.output_text
+
+
+# ============================================================
+# EXTERNAL INDICATOR CONTEXT / NARRATIVE ENGINE
+# ============================================================
+
+EXTERNAL_EVIDENCE_DOMAINS = [
+    "who.int", "data.who.int", "data.unicef.org", "unicef.org",
+    "un.org", "unstats.un.org", "worldbank.org", "wfp.org",
+    "nutritionintl.org", "reliefweb.int", "savethechildren.net",
+    "care.org", "rescue.org", "actionagainsthunger.org", "worldvision.org",
+]
+
+
+def _extract_response_urls(response):
+    """Extract URLs from Responses API web-search annotations safely."""
+    urls, seen = [], set()
+    def walk(value):
+        if value is None:
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in {"url", "source_url"} and isinstance(item, str) and item.startswith("http"):
+                    if item not in seen:
+                        seen.add(item); urls.append(item)
+                walk(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value: walk(item)
+        else:
+            for attr in ("annotations", "url", "output", "content"):
+                try: item = getattr(value, attr, None)
+                except Exception: item = None
+                if attr == "url" and isinstance(item, str) and item.startswith("http"):
+                    if item not in seen:
+                        seen.add(item); urls.append(item)
+                elif item is not None: walk(item)
+    try: walk(response)
+    except Exception: pass
+    return urls[:20]
+
+
+def _indicator_candidates(df, limit=15):
+    """Return indicator-like numeric column names; never send row-level data."""
+    names=[]
+    for column in get_numeric_columns(df):
+        name=str(column).strip(); low=name.lower()
+        if not name or low in {"id","uid","code","value","count","year","month"}:
+            continue
+        if any(x in low for x in ["latitude","longitude","coordinate","geometry","timestamp"]):
+            continue
+        if name not in names: names.append(name)
+    return names[:limit]
+
+
+def build_data_quality_narrative(quality_summary, quality_issues):
+    score=quality_summary.get("score", 0); rating=quality_summary.get("rating", "Unknown")
+    high=sum(i.get("Priority")=="HIGH" for i in quality_issues)
+    medium=sum(i.get("Priority")=="MEDIUM" for i in quality_issues)
+    low=sum(i.get("Priority")=="LOW" for i in quality_issues)
+    if not quality_issues:
+        return (f"The dataset currently has a quality score of {score}/100 ({rating}). "
+                "No implemented high-, medium-, or low-priority data-quality findings were detected. "
+                "DANIP-NI can proceed with interpretation while keeping observed evidence separate from external context.")
+    top=[]
+    for issue in quality_issues[:5]:
+        suffix=f" in {issue.get('Column')}" if issue.get("Column") else ""
+        top.append(f"{issue.get('Domain','Quality')}: {issue.get('Issue','Issue')}{suffix} ({issue.get('Count',0):,})")
+    return (f"The dataset has a quality score of {score}/100 ({rating}) with {high} high-, {medium} medium-, "
+            f"and {low} low-priority findings. The most important findings are " + "; ".join(top) + ". "
+            "DANIP-NI uses these checks to qualify interpretation rather than silently removing observations "
+            "or changing the user's requested calculation.")
+
+
+def research_indicator_context(df, quality_summary=None, quality_issues=None):
+    """Find verified UN/INGO context for matching indicators using Responses web search."""
+    if client is None:
+        return {"status":"DISABLED","message":"External indicator context requires OPENAI_API_KEY.","indicators":[],"sources":[],"narrative":""}
+    indicators=_indicator_candidates(df)
+    if not indicators:
+        return {"status":"NO_INDICATORS","message":"No suitable numeric indicator names were detected for external matching.","indicators":[],"sources":[],"narrative":""}
+    quality_text=build_data_quality_narrative(quality_summary or {}, quality_issues or [])
+    prompt=f"""
+You are DANIP-NI's external indicator evidence researcher.
+
+Enrich the programme-monitoring report with carefully verified context from authoritative UN agencies,
+INGOs and major public-health institutions.
+
+INDICATORS DETECTED IN USER DATA:
+{safe_json_dumps(indicators)}
+
+DATA-QUALITY CONTEXT:
+{quality_text}
+
+Rules:
+- Search each indicator or a close standardized name.
+- Prefer WHO, UNICEF, UN agencies, World Bank, WFP, Nutrition International, Save the Children, CARE,
+  IRC, World Vision, Action Against Hunger and ReliefWeb.
+- EXACT MATCH requires materially the same indicator meaning, population and numerator/denominator or definition.
+- RELATED MATCH means conceptually close but definition/population/denominator differs. Never call it the same indicator.
+- If no credible match exists, say NO VERIFIED MATCH.
+- Never invent definitions, targets, thresholds, prevalence, coverage or recommendations.
+- Never use external sources to change, cap, recalculate or replace user data.
+- Use external evidence only for definition, programme relevance and contextual narrative.
+- Clearly separate USER DATA findings from EXTERNAL CONTEXT.
+
+For every indicator provide: indicator, match status, matched title, organization, supported definition,
+programme relevance, source URL, date when available, confidence.
+Then write a concise External Context Narrative using only verified matches.
+
+Trusted domains: {", ".join(EXTERNAL_EVIDENCE_DOMAINS)}
+"""
+    try:
+        response=client.responses.create(
+            model=OPENAI_MODEL,
+            tools=[{"type":"web_search","filters":{"allowed_domains":EXTERNAL_EVIDENCE_DOMAINS},"search_context_size":"medium"}],
+            input=prompt,
+        )
+        return {"status":"SUCCESS","indicators":indicators,"sources":_extract_response_urls(response),"narrative":response.output_text or ""}
+    except Exception as e:
+        return {"status":"ERROR","message":str(e),"indicators":indicators,"sources":[],"narrative":""}
+
+
+def render_ai_methodology_and_external_context(df, quality_summary, quality_issues, external_context):
+    st.markdown("""
+    <div class="section-card auto-analysis-card">
+      <div class="section-kicker">DANIP-NI INTELLIGENCE LAYER</div>
+      <div class="section-title">🧠 How DANIP-NI is working with your data</div>
+      <div class="section-help">Python calculates deterministic evidence from the complete dataset. AI interprets that evidence, while verified UN/INGO/public-health sources provide indicator context without changing the user's calculations.</div>
+    </div>
+    """, unsafe_allow_html=True)
+    a1,a2,a3,a4=st.columns(4)
+    with a1: st.metric("Rows analysed", f"{len(df):,}")
+    with a2: st.metric("Data quality", f"{quality_summary.get('score',0)}/100")
+    with a3: st.metric("Quality findings", f"{len(quality_issues):,}")
+    with a4: st.metric("External context", "Available" if external_context.get("status")=="SUCCESS" else "Limited")
+    with st.expander("🔍 1. Data-quality narration", expanded=True):
+        st.markdown(build_data_quality_narrative(quality_summary, quality_issues))
+        st.caption("Quality checks qualify the interpretation. DANIP-NI does not silently delete outliers, convert zeros to missing, or change the requested aggregation.")
+    with st.expander("🤖 2. How the AI works", expanded=False):
+        st.markdown("""
+**Step 1 — Complete-data processing:** all returned rows are loaded locally.
+
+**Step 2 — Deterministic evidence:** Python calculates totals, averages, distributions, trends, rankings, missingness, duplicates, validity, numerator/denominator consistency and other quality checks.
+
+**Step 3 — User intent:** confirmed X-axis, indicators, graph, analysis type and aggregation control the requested analysis.
+
+**Step 4 — AI interpretation:** the model receives calculated evidence and is instructed not to invent or recalculate values.
+
+**Step 5 — External context:** matching indicators are researched against trusted UN/INGO/public-health sources.
+
+**Step 6 — Separation:** external context is labelled separately and never replaces the user's values.
+        """)
+    with st.expander("🌍 3. External indicator context & programme narrative", expanded=True):
+        if external_context.get("status")=="SUCCESS":
+            st.markdown(external_context.get("narrative") or "No external narrative was returned.")
+            for url in external_context.get("sources",[])[:12]: st.markdown(f"- {url}")
+            st.caption("External context is contextual evidence only. A similar indicator is not treated as an exact match unless its definition is materially aligned.")
+        elif external_context.get("status")=="DISABLED":
+            st.info("External indicator research is disabled until OPENAI_API_KEY is configured.")
+        else:
+            st.info(external_context.get("message","No verified external indicator context was found."))
+
+
+# ============================================================
+# EXCEL REPORT
+# ============================================================
+
+def create_excel_report(
+    df,
+    statistics,
+    quality_issues,
+    quality_matrix,
+    quality_summary,
+    ai_result,
+    requested_evidence,
+):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font
+    from openpyxl.utils.dataframe import dataframe_to_rows
+
+    workbook = Workbook()
+
+    # Data
+    ws_data = workbook.active
+    ws_data.title = "DHIS2 Data"
+
+    for row in dataframe_to_rows(
+        df,
+        index=False,
+        header=True,
+    ):
+        ws_data.append(row)
+
+    for cell in ws_data[1]:
+        cell.font = Font(bold=True)
+
+    # Summary
+    ws_summary = workbook.create_sheet(
+        "Summary"
+    )
+
+    ws_summary.append([
+        "Metric",
+        "Value",
+    ])
+
+    ws_summary["A1"].font = Font(
+        bold=True
+    )
+    ws_summary["B1"].font = Font(
+        bold=True
+    )
+
+    ws_summary.append([
+        "Records",
+        statistics["records"],
+    ])
+
+    ws_summary.append([
+        "Columns",
+        statistics["columns"],
+    ])
+
+    ws_summary.append([
+        "Numeric Fields",
+        len(
+            statistics["numeric_columns"]
+        ),
+    ])
+
+    ws_summary.append([
+        "Quality Issues",
+        len(quality_issues),
+    ])
+
+    # Quality matrix
+    ws_matrix = workbook.create_sheet("Quality Matrix")
+    ws_matrix.append(["Metric", "Value"])
+    ws_matrix.append(["Quality Score", quality_summary.get("score")])
+    ws_matrix.append(["Rating", quality_summary.get("rating")])
+    ws_matrix.append(["Rows", quality_summary.get("rows")])
+    ws_matrix.append(["Columns", quality_summary.get("columns")])
+    ws_matrix.append(["Issues", quality_summary.get("issues")])
+
+    matrix_df = pd.DataFrame(quality_matrix)
+    if not matrix_df.empty:
+        ws_matrix.append([])
+        for row in dataframe_to_rows(matrix_df, index=False, header=True):
+            ws_matrix.append(row)
+
+    # Quality details
+    ws_quality = workbook.create_sheet(
+        "Data Quality"
+    )
+
+    if quality_issues:
+
+        quality_df = pd.DataFrame(
+            quality_issues
+        )
+
+        for row in dataframe_to_rows(
+            quality_df,
+            index=False,
+            header=True,
+        ):
+            ws_quality.append(row)
+
+    else:
+        ws_quality.append([
+            "No basic quality issues detected."
+        ])
+
+    # Requested calculation
+    ws_request = workbook.create_sheet(
+        "Requested Analysis"
+    )
+
+    request_json = safe_json_dumps(
+        requested_evidence
+    )
+
+    for i, line in enumerate(
+        request_json.splitlines(),
+        start=1,
+    ):
+        ws_request.cell(
+            row=i,
+            column=1,
+            value=line,
+        )
+
+    # External indicator context
+    ws_external = workbook.create_sheet("External Context")
+    external_context = requested_evidence.get("external_indicator_context", {}) if isinstance(requested_evidence, dict) else {}
+    ws_external["A1"] = "External Indicator Context"
+    ws_external["A1"].font = Font(bold=True)
+    ws_external["A3"] = "Status"
+    ws_external["B3"] = external_context.get("status", "")
+    ws_external["A4"] = "Narrative"
+    ws_external["B4"] = external_context.get("narrative", "")
+    for idx, url in enumerate(external_context.get("sources", [])[:20], start=6):
+        ws_external.cell(row=idx, column=1, value="Source")
+        ws_external.cell(row=idx, column=2, value=url)
+
+    # AI
+    ws_ai = workbook.create_sheet(
+        "AI Interpretation"
+    )
+
+    ws_ai["A1"] = (
+        "DHIS2 AI Interpretation"
+    )
+
+    ws_ai["A1"].font = Font(
+        bold=True
+    )
+
+    for index, line in enumerate(
+        ai_result.splitlines(),
+        start=3,
+    ):
+        ws_ai.cell(
+            row=index,
+            column=1,
+            value=line,
+        )
+
+    output = BytesIO()
+    workbook.save(output)
+    output.seek(0)
+
+    return output
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
+with st.sidebar:
+
+    st.markdown("### ⚙️ Workspace")
+
+    if DHIS2_USERNAME and DHIS2_PASSWORD:
+        st.success("DHIS2 credentials configured")
+    else:
+        st.warning("DHIS2 credentials not configured")
+    if OPENAI_API_KEY:
+        st.success("AI connection configured")
+    else:
+        st.warning("AI key not configured")
+
+    st.divider()
+
+    with st.expander(
+        "🔐 Connection details",
+        expanded=False,
+    ):
+        st.caption("DHIS2 server")
+        st.code(DHIS2_URL)
+
+        st.caption("Account")
+        st.write(DHIS2_USERNAME)
+
+    with st.expander(
+        "💡 How to ask",
+        expanded=True,
+    ):
+        st.markdown(
+            """
+            **Ask naturally:**
+
+            • Compare indicators  
+            • Compare countries / OUs  
+            • Compare periods  
+            • Show top / bottom performers  
+            • Specify X and Y  
+            • Choose a chart  
+            • Ask for statistics  
+            • Ask for interpretation only  
+            • Ask for data-quality problems  
+            • Ask for percentage / difference / change
+            """
+        )
+
+    st.caption(
+        "DANIP AI • Data Intelligence • Data Quality First"
+    )
+
+
+# ============================================================
+# CONNECTION STATUS
+# ============================================================
+
+status_items = []
+
+if DHIS2_USERNAME and DHIS2_PASSWORD:
+    status_items.append("🟢 DHIS2 credentials ready")
+else:
+    status_items.append("🟠 DHIS2 credentials required for protected APIs")
+
+if OPENAI_API_KEY:
+    status_items.append("🟢 DANIP-NI automatic intelligence ready")
+else:
+    status_items.append("🟠 AI narrative disabled until OPENAI_API_KEY is added")
+
+st.info("  •  ".join(status_items))
+
+
+# ============================================================
+# USER INPUT
+# ============================================================
+
+st.markdown(
+    """
+    <div class="section-card">
+        <div class="section-kicker">Step 1</div>
+        <div class="section-title">📡 Connect your data</div>
+        <div class="section-help">
+            Paste a DHIS2 Analytics, CSV, XLS, XLSX or JSON API URL.
+            Every row returned by the source is loaded and processed.
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+user_url = st.text_area(
+    "Data URL",
+    placeholder="Paste your data/API URL here...",
+    height=90,
+    label_visibility="collapsed",
+    key="data_url_input",
+)
+
+st.markdown(
+    """
+    <div class="section-card auto-analysis-card">
+        <div class="section-kicker">AUTOMATIC ANALYSIS</div>
+        <div class="section-title">🤖 DANIP-NI will analyze the complete dataset automatically</div>
+        <div class="section-help">
+            DANIP-NI automatically generates the baseline report and data-quality assessment.
+            You can optionally select indicators, dimensions, graph type, analysis type and
+            aggregation below to run a focused user-requested analysis.
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Automatic mode: entering a data URL is the only trigger required.
+automatic_analysis = bool(user_url.strip())
+
+
+if not user_url.strip():
+    st.markdown(
+        """
+        <div class="empty-state">
+            <div style="font-size:2rem;">📡</div>
+            <strong>Ready to analyze your data</strong>
+            <div style="margin-top:.35rem;">
+                Paste your data URL and DANIP-NI will automatically build the analysis,
+                data-quality assessment, dashboard and intelligence report.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+# ============================================================
+# FRESH URL
+# ============================================================
+
+def refresh_data_url(url):
+    url = str(url or "").strip()
+
+    if not url:
+        return url
+
+    separator = (
+        "&"
+        if "?" in url
+        else "?"
+    )
+
+    return (
+        f"{url}"
+        f"{separator}"
+        f"_ai_refresh={int(time.time())}"
+    )
+
+
+
+# ============================================================
+# GUIDED ANALYSIS CONFIGURATION
+# ============================================================
+
+def guided_analysis_ui(df, user_question, initial_plan=None):
+    """
+    Guided analysis configuration.
+
+    Important behaviour:
+      - X axis is a single dimension.
+      - Y axis supports MULTIPLE indicators.
+      - Multiple indicators can be compared in the same analysis.
+      - AI may suggest selections, but the user confirms them.
+      - The confirmed configuration is the only configuration sent
+        to the calculation engine.
+    """
+    options = get_analysis_options(df)
+    numeric_columns = options["numeric_columns"]
+    dimension_columns = options["dimension_columns"]
+
+    st.markdown(
+        """
+        <div class="guided-panel">
+            <div class="section-kicker">Analysis Guide</div>
+            <div class="section-title">🎯 Define exactly what you want to compare</div>
+            <div class="section-help">
+                Statistical Analysis is the default. Optionally select a dimension and one or more
+                indicators for comparisons, trends, rankings and other analyses.
+                The system will calculate the confirmed request using all applicable rows.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    suggested_x = None
+    suggested_ys = []
+    suggested_chart = None
+    suggested_analysis = None
+
+    if initial_plan:
+        sx = initial_plan.get("x_column")
+        if sx in dimension_columns:
+            suggested_x = sx
+
+        for y in initial_plan.get("y_columns", []) or []:
+            if y in numeric_columns and y not in suggested_ys:
+                suggested_ys.append(y)
+
+        if initial_plan.get("chart_type") in {"bar", "line", "pie", "scatter", "none"}:
+            suggested_chart = initial_plan.get("chart_type")
+
+        if initial_plan.get("analysis_type") in {
+            "statistical", "comparison", "total", "average", "trend", "ranking",
+            "percentage", "difference", "change", "distribution",
+            "interpretation"
+        }:
+            suggested_analysis = initial_plan.get("analysis_type")
+
+    if not suggested_ys and (not initial_plan or initial_plan.get("analysis_type") in {None, "custom", "statistical"}):
+        suggested_ys = list(numeric_columns[:30])
+
+    def idx(options, value):
+        return options.index(value) if value in options else 0
+
+    x_options = ["-- Select X-axis --"] + dimension_columns
+
+    c1, c2 = st.columns([1, 1.7])
+
+    with c1:
+        x_selected = st.selectbox(
+            "1️⃣ X-axis / comparison dimension",
+            x_options,
+            index=idx(x_options, suggested_x),
+            key="guided_x_axis",
+        )
+
+    with c2:
+        y_selected = st.multiselect(
+            "2️⃣ Y-axis / indicators — select one or more",
+            numeric_columns,
+            default=[y for y in suggested_ys if y in numeric_columns],
+            key="guided_y_axes",
+            help="Select multiple indicators when you want a direct comparison.",
+        )
+
+    # ----------------------------------------------------------
+    # 3️⃣ GRAPH TYPE — MULTI-SELECT
+    # ----------------------------------------------------------
+    # IMPORTANT:
+    #   - Nothing is selected by default.
+    #   - The user may select ONE, TWO, or MANY graph types.
+    #   - We never silently insert a graph into the user's selection.
+    # ----------------------------------------------------------
+    chart_options = [
+        "Grouped Bar",
+        "Bar",
+        "Line",
+        "Pie",
+        "Scatter",
+    ]
+
+    # Keep the AI suggestion only as information; do NOT use it
+    # as a default selection because this control is intentionally
+    # user-driven.
+    suggested_chart_label = {
+        "bar": "Bar",
+        "line": "Line",
+        "pie": "Pie",
+        "scatter": "Scatter",
+    }.get(suggested_chart)
+
+
+    analysis_options = [
+        "Statistical Analysis",
+        "Comparison",
+        "Total",
+        "Average",
+        "Trend",
+        "Ranking",
+        "Percentage",
+        "Difference",
+        "Change",
+        "Distribution",
+        "Interpretation",
+    ]
+
+    analysis_labels = {
+        k: k.title()
+        for k in [
+            "statistical", "comparison", "total", "average", "trend", "ranking",
+            "percentage", "difference", "change", "distribution",
+            "interpretation"
+        ]
+    }
+
+    c3, c4 = st.columns(2)
+
+    with c3:
+        chart_selected = st.multiselect(
+            "3️⃣ Graph type — select one or more",
+            options=chart_options,
+            default=[],
+            key="guided_chart_types",
+            help=(
+                "Optional. Select one or more visualization types. "
+                "Nothing is selected automatically."
+            ),
+        )
+
+        if chart_selected:
+            st.caption(
+                f"📊 {len(chart_selected)} graph type"
+                f"{'s' if len(chart_selected) != 1 else ''} selected: "
+                + ", ".join(chart_selected)
+            )
+        else:
+            st.caption(
+                "No graph selected. The analysis can still run without "
+                "a requested visualization when the analysis type allows it."
+            )
+
+    with c4:
+        analysis_default = analysis_labels.get(
+            suggested_analysis,
+            "Statistical Analysis",
+        )
+
+        analysis_selected = st.selectbox(
+            "4️⃣ Analysis type",
+            analysis_options,
+            index=idx(analysis_options, analysis_default),
+            key="guided_analysis_type",
+        )
+
+    aggregation_options = [
+        "Sum",
+        "Average",
+        "Median",
+        "Minimum",
+        "Maximum",
+        "Count",
+    ]
+
+    aggregation_default_index = 1 if suggested_analysis == "statistical" else 0
+
+    aggregation_selected = st.selectbox(
+        "5️⃣ Aggregation",
+        aggregation_options,
+        index=aggregation_default_index,
+        key="guided_aggregation",
+    )
+
+    x = None if x_selected.startswith("--") else x_selected
+
+    chart_map = {
+        "Grouped Bar": "bar",
+        "Bar": "bar",
+        "Line": "line",
+        "Pie": "pie",
+        "Scatter": "scatter",
+    }
+
+    # Convert every user selection to an internal chart type.
+    # Preserve the user's order and remove duplicates.
+    chart_types = []
+    for selected_graph in chart_selected:
+        internal_type = chart_map.get(selected_graph)
+        if internal_type and internal_type not in chart_types:
+            chart_types.append(internal_type)
+
+    # Backward-compatible primary chart.
+    chart = chart_types[0] if chart_types else "none"
+
+    analysis = analysis_selected.lower()
+    if analysis == "statistical analysis":
+        analysis = "statistical"
+
+    aggregation = {
+        "Sum": "sum",
+        "Average": "mean",
+        "Median": "median",
+        "Minimum": "min",
+        "Maximum": "max",
+        "Count": "count",
+    }[aggregation_selected]
+
+    # ----------------------------------------------------------
+    # LIVE VISUALIZATION PREVIEW
+    # ----------------------------------------------------------
+    # Streamlit reruns the script whenever the user changes a
+    # widget. Store the CURRENT widget values immediately so the
+    # dashboard can render Bar/Pie/Line/Scatter without waiting
+    # for the "Run detailed analysis" button.
+    #
+    # IMPORTANT:
+    # chart_types is the source of truth for the visualization.
+    # The automatic analysis plan is NOT allowed to replace it
+    # with its default Line chart.
+    # ----------------------------------------------------------
+    if x and y_selected and chart_types:
+        st.session_state["guided_preview_plan"] = {
+            "needs_clarification": False,
+            "analysis_requested": True,
+            "analysis_type": analysis,
+            "chart_requested": True,
+            "chart_type": chart_types[0],
+            "chart_types": list(chart_types),
+            "chart_labels": list(chart_selected),
+            "x_column": x,
+            "y_columns": list(y_selected),
+            "group_column": None,
+            "indicator_columns": list(y_selected),
+            "aggregation": aggregation,
+            "filters": [],
+            "ranking_limit": 10 if analysis == "ranking" else None,
+            "comparison_groups": [],
+            "title": (
+                f"{' vs '.join(map(str, y_selected))} by {x}"
+                if len(y_selected) > 1
+                else f"{y_selected[0]} by {x}"
+            ),
+            "reason": (
+                "Live visualization preview using the user's current "
+                "X-axis, indicators, graph types and aggregation."
+            ),
+            "comparison_mode": len(y_selected) > 1,
+        }
+    elif not chart_types:
+        # User explicitly removed all graph selections.
+        # Do not keep showing the previous graph.
+        st.session_state["guided_preview_plan"] = None
+
+    # ----------------------------------------------------------
+    # Guidance
+    # ----------------------------------------------------------
+    if len(y_selected) > 1:
+        st.markdown(
+            f"""
+            <div class="comparison-note">
+                <strong>📊 Multi-indicator comparison enabled</strong><br>
+                You selected <strong>{len(y_selected)} indicators</strong>.
+                The final analysis will compare them using the same X-axis:
+                <strong>{x or "not selected"}</strong>.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    if chart == "line" and x and "period" not in str(x).lower() and str(x).lower() not in {
+        "pe", "date", "month", "year"
+    }:
+        st.info(
+            "💡 Line charts are normally most useful for ordered time/period data. "
+            "Confirm that your X-axis is intentionally non-time-based."
+        )
+
+    elif chart == "pie" and len(y_selected) > 1:
+        st.warning(
+            "🥧 A pie chart represents one measure at a time. "
+            "For multiple indicators, a grouped bar chart is recommended."
+        )
+
+    elif chart == "scatter" and len(y_selected) > 1:
+        st.info(
+            "💡 Scatter comparison uses the first selected Y indicator. "
+            "Use grouped bars or lines when comparing several indicators."
+        )
+
+    # ----------------------------------------------------------
+    # Validation
+    # ----------------------------------------------------------
+    missing = []
+
+    if analysis != "statistical" and not x:
+        missing.append("X-axis")
+
+    if not y_selected:
+        missing.append("at least one Y-axis / indicator")
+
+    if analysis != "statistical" and not chart_types:
+        missing.append("at least one graph type")
+
+    if not analysis:
+        missing.append("analysis type")
+
+    if missing:
+        st.warning("Please select: " + ", ".join(missing) + ".")
+        return None
+
+    # ----------------------------------------------------------
+    # Comparison summary before running
+    # ----------------------------------------------------------
+    st.markdown("### 🔎 Confirm your analysis")
+
+    p1, p2, p3, p4 = st.columns(4)
+
+    p1.metric("X-axis", x)
+    p2.metric("Indicators", len(y_selected))
+    p3.metric(
+        "Graphs",
+        str(len(chart_types)) if chart_types else "None",
+    )
+    p4.metric("Analysis", "Statistical Analysis" if analysis == "statistical" else analysis_selected)
+
+    st.caption(
+        "Selected indicators: " + ", ".join(map(str, y_selected))
+    )
+
+    st.caption(
+        "Selected graph types: "
+        + (", ".join(chart_selected) if chart_selected else "None")
+    )
+
+    # ----------------------------------------------------------
+    # Run
+    # ----------------------------------------------------------
+    run = st.button(
+        "🚀 Run detailed analysis",
+        type="primary",
+        use_container_width=True,
+        key="run_guided_analysis",
+    )
+
+    if not run:
+        return None
+
+    return {
+        "needs_clarification": False,
+        "analysis_requested": True,
+        "analysis_type": analysis,
+        "chart_requested": len(chart_types) > 0,
+        "chart_type": chart,
+        "chart_types": chart_types,
+        "chart_labels": list(chart_selected),
+        "x_column": x,
+        "y_columns": list(y_selected),
+        "group_column": None,
+        "indicator_columns": list(y_selected),
+        "aggregation": aggregation,
+        "filters": [],
+        "ranking_limit": 10 if analysis == "ranking" else None,
+        "comparison_groups": [],
+        "title": (
+            f"{' vs '.join(map(str, y_selected))} by {x}"
+            if len(y_selected) > 1
+            else f"{y_selected[0]} by {x}"
+        ),
+        "reason": (
+            "The user explicitly selected the X-axis, multiple indicators, "
+            "graph, analysis type and aggregation."
+        ),
+        "comparison_mode": len(y_selected) > 1,
+    }
+
+
+def get_analysis_options(df):
+    columns = [str(c) for c in df.columns]
+    numeric_columns = get_numeric_columns(df)
+    dimension_columns = []
+    for col in columns:
+        lower = col.lower()
+        if (
+            "period" in lower or lower in {"pe", "date", "month", "year"}
+            or "organisation" in lower or "organization" in lower or "org unit" in lower or "orgunit" in lower
+            or "country" in lower or "region" in lower or "district" in lower or "province" in lower
+            or "facility" in lower or "location" in lower
+        ):
+            dimension_columns.append(col)
+    for col in columns:
+        if col not in numeric_columns and col not in dimension_columns:
+            dimension_columns.append(col)
+    return {"all_columns": columns, "numeric_columns": numeric_columns, "dimension_columns": dimension_columns}
+
+
+
+# ============================================================
+# DANIP-NI AUTOMATIC ANALYSIS
+# ============================================================
+
+def _safe_unique_count(df, column):
+    if not column or column not in df.columns:
+        return 0
+    try:
+        return int(df[column].nunique(dropna=True))
+    except Exception:
+        return 0
+
+
+def build_automatic_analysis_plan(df):
+    """
+    Build an analysis plan without asking the user to configure X/Y,
+    aggregation, chart type or analysis type.
+
+    Python determines the structure first. AI is used later for
+    narrative interpretation only.
+    """
+    columns = [str(c) for c in df.columns]
+    numeric_columns = get_numeric_columns(df)
+
+    period_column = find_period_column(df)
+    ou_column = find_ou_column(df)
+
+    plan = {
+        "needs_clarification": False,
+        "analysis_requested": True,
+        "analysis_type": "statistical",
+        "indicator_columns": list(numeric_columns),
+        "dimension_column": ou_column or period_column,
+        "x_column": None,
+        "y_columns": [],
+        "group_column": None,
+        "filters": [],
+        "aggregation": "sum",
+        "chart_requested": False,
+        "chart_type": "none",
+        "chart_types": [],
+        "chart_labels": [],
+        "ranking_limit": 10,
+        "comparison_groups": [],
+        "title": "DANIP-NI Automatic Data Intelligence",
+        "reason": (
+            "Automatically generated from the complete dataset. "
+            "No manual analysis configuration is required."
+        ),
+    }
+
+    if not numeric_columns:
+        return plan
+
+    # Prefer a time view when multiple valid periods exist.
+    # Otherwise use organisation-unit/category performance.
+    period_count = _safe_unique_count(df, period_column)
+    ou_count = _safe_unique_count(df, ou_column)
+
+    if period_column and period_count > 1:
+        plan["x_column"] = period_column
+        plan["chart_type"] = "line"
+        plan["chart_requested"] = True
+
+        # Keep the automatic chart readable.
+        plan["y_columns"] = list(numeric_columns[:8])
+
+        # Organisation unit can be used as a grouping dimension only
+        # when the number of OUs is small enough to remain readable.
+        if ou_column and 1 < ou_count <= 12:
+            plan["group_column"] = ou_column
+
+    elif ou_column and ou_count > 1:
+        plan["x_column"] = ou_column
+        plan["chart_type"] = "bar"
+        plan["chart_requested"] = True
+        plan["y_columns"] = list(numeric_columns[:8])
+
+    else:
+        # Fall back to the first useful categorical dimension.
+        candidate = None
+        for column in columns:
+            if column in numeric_columns:
+                continue
+            if column in {period_column, ou_column}:
+                continue
+
+            unique_count = _safe_unique_count(df, column)
+            if 1 < unique_count <= 25:
+                candidate = column
+                break
+
+        if candidate:
+            plan["x_column"] = candidate
+            plan["chart_type"] = "bar"
+            plan["chart_requested"] = True
+            plan["y_columns"] = list(numeric_columns[:8])
+
+    return plan
+
+
+def build_automatic_analysis_evidence(df, chart_plan):
+    """
+    Deterministic automatic analysis.
+
+    The complete dataframe is processed locally. This produces evidence
+    for totals, averages, distributions, rankings, temporal changes,
+    organisation-unit comparisons and indicator-level statistics.
+    """
+    evidence = {
+        "status": "SUCCESS",
+        "analysis_population": "ALL_ROWS",
+        "source_rows": int(len(df)),
+        "source_columns": int(len(df.columns)),
+        "numeric_indicators": [],
+        "dimensions": [],
+        "automatic_findings": {},
+    }
+
+    numeric_columns = get_numeric_columns(df)
+    period_column = find_period_column(df)
+    ou_column = find_ou_column(df)
+
+    evidence["numeric_indicators"] = list(map(str, numeric_columns))
+    evidence["dimensions"] = {
+        "period_column": str(period_column) if period_column else None,
+        "organisation_unit_column": str(ou_column) if ou_column else None,
+    }
+
+    # --------------------------------------------------------
+    # Indicator-level statistics
+    # --------------------------------------------------------
+    indicator_stats = {}
+
+    for column in numeric_columns:
+        values = pd.to_numeric(df[column], errors="coerce")
+        valid = values.dropna()
+
+        if valid.empty:
+            continue
+
+        q1 = valid.quantile(0.25)
+        q3 = valid.quantile(0.75)
+        iqr = q3 - q1
+
+        if iqr == 0:
+            outliers = 0
+        else:
+            outliers = int(
+                (
+                    (valid < q1 - 1.5 * iqr)
+                    | (valid > q3 + 1.5 * iqr)
+                ).sum()
+            )
+
+        indicator_stats[str(column)] = {
+            "count": int(valid.count()),
+            "missing": int(values.isna().sum()),
+            "total": float(valid.sum()),
+            "mean": float(valid.mean()),
+            "median": float(valid.median()),
+            "minimum": float(valid.min()),
+            "maximum": float(valid.max()),
+            "range": float(valid.max() - valid.min()),
+            "zero_count": int((valid == 0).sum()),
+            "negative_count": int((valid < 0).sum()),
+            "outlier_count": outliers,
+        }
+
+    evidence["automatic_findings"]["indicator_statistics"] = indicator_stats
+
+    # --------------------------------------------------------
+    # Organisation-unit rankings
+    # --------------------------------------------------------
+    rankings = {}
+
+    if ou_column and ou_column in df.columns:
+        for indicator in numeric_columns[:20]:
+            temp = pd.DataFrame({
+                "__ou__": df[ou_column],
+                "__value__": pd.to_numeric(
+                    df[indicator],
+                    errors="coerce",
+                ),
+            }).dropna(subset=["__ou__", "__value__"])
+
+            if temp.empty:
+                continue
+
+            grouped = (
+                temp.groupby("__ou__", dropna=False)["__value__"]
+                .sum()
+                .sort_values(ascending=False)
+            )
+
+            rankings[str(indicator)] = {
+                "top_10": [
+                    {
+                        "organisation_unit": str(idx),
+                        "value": float(value),
+                    }
+                    for idx, value in grouped.head(10).items()
+                ],
+                "bottom_10": [
+                    {
+                        "organisation_unit": str(idx),
+                        "value": float(value),
+                    }
+                    for idx, value in grouped.tail(10).sort_values().items()
+                ],
+            }
+
+    evidence["automatic_findings"]["organisation_unit_rankings"] = rankings
+
+    # --------------------------------------------------------
+    # Period analysis
+    # --------------------------------------------------------
+    period_analysis = {}
+
+    if period_column and period_column in df.columns:
+        period_values = df[period_column].dropna().astype(str)
+
+        if not period_values.empty:
+            for indicator in numeric_columns[:20]:
+                temp = pd.DataFrame({
+                    "__period__": df[period_column].astype(str),
+                    "__value__": pd.to_numeric(
+                        df[indicator],
+                        errors="coerce",
+                    ),
+                }).dropna(subset=["__period__", "__value__"])
+
+                if temp.empty:
+                    continue
+
+                grouped = (
+                    temp.groupby("__period__", dropna=False)["__value__"]
+                    .sum()
+                )
+
+                period_analysis[str(indicator)] = [
+                    {
+                        "period": str(idx),
+                        "value": float(value),
+                    }
+                    for idx, value in grouped.items()
+                ]
+
+    evidence["automatic_findings"]["period_analysis"] = period_analysis
+
+    # --------------------------------------------------------
+    # Indicator comparison
+    # --------------------------------------------------------
+    comparison = []
+
+    totals = []
+    for indicator, stats in indicator_stats.items():
+        totals.append({
+            "indicator": indicator,
+            "total": stats["total"],
+            "mean": stats["mean"],
+            "valid_observations": stats["count"],
+        })
+
+    totals = sorted(
+        totals,
+        key=lambda x: abs(x["total"]),
+        reverse=True,
+    )
+
+    if totals:
+        comparison = totals[:20]
+
+    evidence["automatic_findings"]["indicator_comparison"] = comparison
+
+    # --------------------------------------------------------
+    # Complete-data profile
+    # --------------------------------------------------------
+    evidence["automatic_findings"]["dataset_profile"] = {
+        "rows": int(len(df)),
+        "columns": int(len(df.columns)),
+        "numeric_columns": int(len(numeric_columns)),
+        "missing_cells": int(df.isna().sum().sum()),
+        "duplicate_rows": int(df.duplicated().sum()),
+        "periods": _safe_unique_count(df, period_column),
+        "organisation_units": _safe_unique_count(df, ou_column),
+    }
+
+    return evidence
+
+
+# ============================================================
+# ADVANCED ANALYTICS — ADDITIVE / NON-DESTRUCTIVE
+# ============================================================
+
+def _advanced_period_series(df, period_column):
+    """Best-effort conversion of common DHIS2 period formats to dates."""
+    if not period_column or period_column not in df.columns:
+        return pd.Series(pd.NaT, index=df.index), False
+
+    raw = df[period_column].astype("string").str.strip()
+    parsed = pd.to_datetime(raw, errors="coerce")
+
+    # DHIS2 monthly code: YYYYMM
+    missing = parsed.isna()
+    if missing.any():
+        ym = raw.str.extract(r"^(20\\d{2})[-/]?(0[1-9]|1[0-2])$", expand=True)
+        ym_dates = pd.to_datetime(
+            ym[0].fillna("") + "-" + ym[1].fillna("") + "-01",
+            errors="coerce",
+        )
+        parsed = parsed.fillna(ym_dates)
+
+    # Quarter code: YYYYQ1 / YYYY-Q1
+    missing = parsed.isna()
+    if missing.any():
+        q = raw.str.extract(r"^(20\\d{2})[- ]?Q([1-4])$", expand=True)
+        q_year = pd.to_numeric(q[0], errors="coerce")
+        q_num = pd.to_numeric(q[1], errors="coerce")
+        q_month = ((q_num - 1) * 3 + 1).clip(1, 12)
+        q_dates = pd.to_datetime(
+            dict(year=q_year, month=q_month, day=1),
+            errors="coerce",
+        )
+        parsed = parsed.fillna(q_dates)
+
+    return parsed, bool(parsed.notna().sum() >= 3)
+
+
+def build_advanced_analytics(df, max_indicators=12, max_ous=30):
+    """Deterministic advanced analytics. Never modifies the source dataframe."""
+    result = {
+        "status": "SUCCESS",
+        "rows": int(len(df)),
+        "advanced": {},
+    }
+
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        result["status"] = "NO_DATA"
+        return result
+
+    numeric_columns = get_numeric_columns(df)
+    numeric_columns = numeric_columns[:max_indicators]
+    period_column = find_period_column(df)
+    ou_column = find_ou_column(df)
+
+    # ------------------------------------------------------------
+    # 1. Distribution / volatility profile
+    # ------------------------------------------------------------
+    volatility = {}
+    for col in numeric_columns:
+        values = pd.to_numeric(df[col], errors="coerce").dropna()
+        if len(values) < 2:
+            continue
+        mean = float(values.mean())
+        std = float(values.std()) if pd.notna(values.std()) else 0.0
+        volatility[str(col)] = {
+            "mean": mean,
+            "std": std,
+            "coefficient_of_variation_pct": (
+                round(abs(std / mean) * 100, 2) if mean != 0 else None
+            ),
+            "skewness": round(float(values.skew()), 4) if len(values) >= 3 else None,
+        }
+    result["advanced"]["volatility"] = volatility
+
+    # ------------------------------------------------------------
+    # 2. Correlation network / matrix
+    # ------------------------------------------------------------
+    correlation = {}
+    if len(numeric_columns) >= 2:
+        corr_df = df[numeric_columns].apply(pd.to_numeric, errors="coerce")
+        corr = corr_df.corr(method="pearson", min_periods=5)
+        correlation = {
+            str(row): {
+                str(col): (
+                    round(float(corr.loc[row, col]), 3)
+                    if pd.notna(corr.loc[row, col]) else None
+                )
+                for col in corr.columns
+            }
+            for row in corr.index
+        }
+
+        pairs = []
+        for i, a in enumerate(corr.columns):
+            for b in corr.columns[i + 1:]:
+                value = corr.loc[a, b]
+                if pd.notna(value):
+                    pairs.append({
+                        "indicator_1": str(a),
+                        "indicator_2": str(b),
+                        "correlation": round(float(value), 3),
+                        "strength": (
+                            "Very strong" if abs(value) >= .8 else
+                            "Strong" if abs(value) >= .6 else
+                            "Moderate" if abs(value) >= .4 else
+                            "Weak"
+                        ),
+                    })
+        pairs.sort(key=lambda x: abs(x["correlation"]), reverse=True)
+        result["advanced"]["correlation_pairs"] = pairs[:30]
+    result["advanced"]["correlation_matrix"] = correlation
+
+    # ------------------------------------------------------------
+    # 3. Period trend, growth, volatility and simple forecast
+    # ------------------------------------------------------------
+    trend_analysis = {}
+    forecast = {}
+    parsed_period, valid_period = _advanced_period_series(df, period_column)
+
+    if valid_period:
+        period_work = df.copy()
+        period_work["__advanced_period__"] = parsed_period
+        period_work = period_work.dropna(subset=["__advanced_period__"])
+
+        for col in numeric_columns:
+            period_work["__advanced_value__"] = pd.to_numeric(
+                period_work[col], errors="coerce"
+            )
+            grouped = (
+                period_work.dropna(subset=["__advanced_value__"])
+                .groupby("__advanced_period__")["__advanced_value__"]
+                .sum()
+                .sort_index()
+            )
+
+            if len(grouped) < 3:
+                continue
+
+            y = grouped.to_numpy(dtype=float)
+            x = np.arange(len(y), dtype=float)
+            slope, intercept = np.polyfit(x, y, 1)
+            predicted = intercept + slope * x
+            ss_res = float(np.sum((y - predicted) ** 2))
+            ss_tot = float(np.sum((y - y.mean()) ** 2))
+            r2 = 1.0 - ss_res / ss_tot if ss_tot != 0 else 0.0
+
+            first = float(y[0])
+            last = float(y[-1])
+            change_pct = ((last - first) / abs(first) * 100) if first != 0 else None
+            direction = "Increasing" if slope > 0 else "Decreasing" if slope < 0 else "Stable"
+
+            trend_analysis[str(col)] = {
+                "periods": int(len(grouped)),
+                "first_period": str(grouped.index[0].date()),
+                "last_period": str(grouped.index[-1].date()),
+                "first_value": first,
+                "last_value": last,
+                "absolute_change": last - first,
+                "change_pct": round(float(change_pct), 2) if change_pct is not None else None,
+                "slope_per_period": round(float(slope), 4),
+                "r_squared": round(float(r2), 4),
+                "direction": direction,
+            }
+
+            # Conservative short-horizon linear forecast: 3 future periods.
+            if len(grouped) >= 4:
+                future_x = np.arange(len(y), len(y) + 3, dtype=float)
+                future_y = intercept + slope * future_x
+                future_dates = pd.date_range(
+                    grouped.index[-1] + pd.offsets.MonthBegin(1),
+                    periods=3,
+                    freq="MS",
+                )
+                forecast[str(col)] = [
+                    {
+                        "period": str(date.date()),
+                        "forecast": round(float(value), 2),
+                    }
+                    for date, value in zip(future_dates, future_y)
+                ]
+
+    result["advanced"]["trend_analysis"] = trend_analysis
+    result["advanced"]["forecast"] = forecast
+
+    # ------------------------------------------------------------
+    # 4. Robust anomaly detection (IQR + MAD)
+    # ------------------------------------------------------------
+    anomalies = []
+    for col in numeric_columns:
+        values = pd.to_numeric(df[col], errors="coerce")
+        valid = values.dropna()
+        if len(valid) < 5:
+            continue
+
+        q1 = valid.quantile(.25)
+        q3 = valid.quantile(.75)
+        iqr = q3 - q1
+        low = q1 - 1.5 * iqr
+        high = q3 + 1.5 * iqr
+
+        median = valid.median()
+        mad = (valid - median).abs().median()
+        if mad and pd.notna(mad):
+            robust_z = (values - median).abs() / (1.4826 * mad)
+            anomaly_mask = robust_z > 3.5
+        else:
+            anomaly_mask = (values < low) | (values > high) if iqr != 0 else pd.Series(False, index=df.index)
+
+        indexes = df.index[anomaly_mask.fillna(False)]
+        for idx in indexes[:100]:
+            item = {
+                "row": int(idx) if isinstance(idx, (int, np.integer)) else str(idx),
+                "indicator": str(col),
+                "value": float(values.loc[idx]),
+                "method": "MAD" if mad and pd.notna(mad) else "IQR",
+            }
+            if ou_column and ou_column in df.columns:
+                item["organisation_unit"] = str(df.loc[idx, ou_column])
+            if period_column and period_column in df.columns:
+                item["period"] = str(df.loc[idx, period_column])
+            anomalies.append(item)
+
+    result["advanced"]["anomalies"] = anomalies[:200]
+    result["advanced"]["anomaly_count"] = int(len(anomalies))
+
+    # ------------------------------------------------------------
+    # 5. Organisation-unit benchmarking
+    # ------------------------------------------------------------
+    benchmarking = {}
+    if ou_column and ou_column in df.columns:
+        ou_counts = df[ou_column].nunique(dropna=True)
+        if 1 < ou_counts <= max_ous:
+            for col in numeric_columns[:8]:
+                temp = pd.DataFrame({
+                    "__ou__": df[ou_column],
+                    "__value__": pd.to_numeric(df[col], errors="coerce"),
+                }).dropna()
+                if temp.empty:
+                    continue
+                grouped = temp.groupby("__ou__")["__value__"].agg(["sum", "mean", "count"])
+                grouped["share_pct"] = grouped["sum"] / grouped["sum"].sum() * 100 if grouped["sum"].sum() != 0 else np.nan
+                grouped = grouped.sort_values("sum", ascending=False)
+                benchmarking[str(col)] = [
+                    {
+                        "organisation_unit": str(idx),
+                        "total": round(float(row["sum"]), 2),
+                        "average": round(float(row["mean"]), 2),
+                        "observations": int(row["count"]),
+                        "share_pct": round(float(row["share_pct"]), 2) if pd.notna(row["share_pct"]) else None,
+                    }
+                    for idx, row in grouped.head(30).iterrows()
+                ]
+    result["advanced"]["organisation_unit_benchmarking"] = benchmarking
+
+    return result
+
+
+def render_advanced_analytics(df):
+    """Optional advanced layer. It is isolated from the existing analysis pipeline."""
+    st.subheader("🧠 Advanced Analytics")
+    st.caption(
+        "Additional deterministic analytics. These calculations do not modify "
+        "the source data, current chart plan, aggregation, data-quality score, or AI result."
+    )
+
+    with st.expander("Open Advanced Analytics", expanded=False):
+        advanced = build_advanced_analytics(df).get("advanced", {})
+
+        volatility = advanced.get("volatility", {})
+        trends = advanced.get("trend_analysis", {})
+        correlations = advanced.get("correlation_pairs", [])
+        anomalies = advanced.get("anomalies", [])
+        forecasts = advanced.get("forecast", {})
+        benchmarking = advanced.get("organisation_unit_benchmarking", {})
+
+        t1, t2, t3, t4, t5 = st.tabs([
+            "📈 Trends", "🔮 Forecast", "🔗 Correlation", "🚨 Anomalies", "🏆 Benchmarking"
+        ])
+
+        with t1:
+            if trends:
+                trend_df = pd.DataFrame([
+                    {"Indicator": k, **v} for k, v in trends.items()
+                ])
+                st.dataframe(trend_df, use_container_width=True, hide_index=True)
+                try:
+                    import plotly.express as px
+                    chart_rows = []
+                    period_column = find_period_column(df)
+                    parsed, valid = _advanced_period_series(df, period_column)
+                    if valid:
+                        for col in list(trends.keys())[:6]:
+                            temp = pd.DataFrame({
+                                "Period": parsed,
+                                "Value": pd.to_numeric(df[col], errors="coerce"),
+                            }).dropna()
+                            grouped = temp.groupby("Period")["Value"].sum().reset_index()
+                            grouped["Indicator"] = str(col)
+                            chart_rows.append(grouped)
+                    if chart_rows:
+                        plot_df = pd.concat(chart_rows, ignore_index=True)
+                        fig = px.line(
+                            plot_df,
+                            x="Period",
+                            y="Value",
+                            color="Indicator",
+                            markers=True,
+                            title="Advanced Trend Analysis",
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                except Exception as e:
+                    st.info(f"Trend chart unavailable: {e}")
+            else:
+                st.info("A valid period dimension with at least three periods is required for trend analytics.")
+
+            if volatility:
+                st.markdown("#### Volatility & Distribution")
+                st.dataframe(
+                    pd.DataFrame([{ "Indicator": k, **v } for k, v in volatility.items()]),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+        with t2:
+            if forecasts:
+                forecast_rows = []
+                for indicator, rows in forecasts.items():
+                    for row in rows:
+                        forecast_rows.append({"Indicator": indicator, **row})
+                st.dataframe(pd.DataFrame(forecast_rows), use_container_width=True, hide_index=True)
+                st.caption("Forecasts use a simple deterministic linear trend and should be treated as directional, not causal predictions.")
+            else:
+                st.info("Forecasting requires at least four valid ordered periods.")
+
+        with t3:
+            if correlations:
+                corr_df = pd.DataFrame(correlations)
+                st.dataframe(corr_df, use_container_width=True, hide_index=True)
+                try:
+                    import plotly.express as px
+                    matrix = advanced.get("correlation_matrix", {})
+                    matrix_df = pd.DataFrame(matrix).T
+                    if not matrix_df.empty:
+                        fig = px.imshow(
+                            matrix_df,
+                            text_auto=True,
+                            aspect="auto",
+                            zmin=-1,
+                            zmax=1,
+                            title="Indicator Correlation Matrix",
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                except Exception as e:
+                    st.info(f"Correlation heatmap unavailable: {e}")
+            else:
+                st.info("At least two numeric indicators with five paired observations are required.")
+
+        with t4:
+            st.metric("Detected anomalies", f"{len(anomalies):,}")
+            if anomalies:
+                st.dataframe(pd.DataFrame(anomalies), use_container_width=True, hide_index=True)
+                st.warning("Anomalies are flagged for investigation; they are never automatically deleted or changed.")
+            else:
+                st.success("No advanced statistical anomalies were detected in the selected numeric fields.")
+
+        with t5:
+            if benchmarking:
+                for indicator, rows in list(benchmarking.items())[:8]:
+                    st.markdown(f"**{indicator} — organisation-unit benchmark**")
+                    bench_df = pd.DataFrame(rows)
+                    st.dataframe(bench_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("Organisation-unit benchmarking requires a detected OU field and a manageable number of OUs.")
+
+
+# ============================================================
+# M&E PROGRAMME MANAGER NARRATION
+# ============================================================
+
+def _me_numeric(value):
+    try:
+        return float(value)
+    except Exception:
+        return None
+
+
+def build_me_programme_narrative(df, plan, quality_issues, quality_matrix, quality_summary):
+    """Create a deterministic M&E interpretation from the exact requested analysis.
+
+    The narrative is evidence-led. It does not claim causation and never changes
+    the user's selected indicator, X-axis, aggregation or source data.
+    """
+    if not plan or not plan.get("chart_requested"):
+        return None
+
+    x = plan.get("x_column")
+    indicators = [c for c in (plan.get("y_columns") or []) if c in df.columns]
+    if not x or x not in df.columns or not indicators:
+        return None
+
+    chart_df, error = build_chart_data_dataframe(df, plan)
+    if error or chart_df is None or chart_df.empty:
+        return None
+
+    aggregation = str(plan.get("aggregation", "sum")).lower()
+    quality_score = float((quality_summary or {}).get("score", 0))
+    quality_rating = str((quality_summary or {}).get("rating", "Unknown"))
+
+    high = [i for i in (quality_issues or []) if str(i.get("Priority", "")).upper() == "HIGH"]
+    medium = [i for i in (quality_issues or []) if str(i.get("Priority", "")).upper() == "MEDIUM"]
+
+    # Build indicator-level evidence from the same dataframe used by the chart.
+    indicator_evidence = []
+    rows_for_table = []
+
+    if "__series__" in chart_df.columns and "__value__" in chart_df.columns:
+        working = chart_df.copy()
+        working["__value__"] = pd.to_numeric(working["__value__"], errors="coerce")
+        working = working.dropna(subset=["__value__"])
+
+        for indicator in indicators:
+            sub = working[working["__series__"].astype(str) == str(indicator)].copy()
+            if sub.empty:
+                continue
+            vals = sub["__value__"].astype(float)
+            max_idx = vals.idxmax()
+            min_idx = vals.idxmin()
+            max_row = sub.loc[max_idx]
+            min_row = sub.loc[min_idx]
+            evidence = {
+                "indicator": str(indicator),
+                "observations": int(len(sub)),
+                "total": float(vals.sum()),
+                "average": float(vals.mean()),
+                "minimum": float(vals.min()),
+                "maximum": float(vals.max()),
+                "highest_category": str(max_row[x]),
+                "lowest_category": str(min_row[x]),
+            }
+            if len(vals) >= 2:
+                first_value = float(vals.iloc[0])
+                last_value = float(vals.iloc[-1])
+                evidence["first_value"] = first_value
+                evidence["last_value"] = last_value
+                evidence["absolute_change"] = last_value - first_value
+                evidence["percent_change"] = (
+                    (last_value - first_value) / abs(first_value) * 100
+                    if first_value != 0 else None
+                )
+            indicator_evidence.append(evidence)
+
+    else:
+        for indicator in indicators:
+            if indicator not in chart_df.columns:
+                continue
+            vals = pd.to_numeric(chart_df[indicator], errors="coerce")
+            valid = vals.notna()
+            sub = chart_df.loc[valid, [x, indicator]].copy()
+            if sub.empty:
+                continue
+            nums = pd.to_numeric(sub[indicator], errors="coerce")
+            max_idx = nums.idxmax()
+            min_idx = nums.idxmin()
+            evidence = {
+                "indicator": str(indicator),
+                "observations": int(nums.count()),
+                "total": float(nums.sum()),
+                "average": float(nums.mean()),
+                "minimum": float(nums.min()),
+                "maximum": float(nums.max()),
+                "highest_category": str(sub.loc[max_idx, x]),
+                "lowest_category": str(sub.loc[min_idx, x]),
+            }
+            if len(nums) >= 2:
+                first_value = float(nums.iloc[0])
+                last_value = float(nums.iloc[-1])
+                evidence["first_value"] = first_value
+                evidence["last_value"] = last_value
+                evidence["absolute_change"] = last_value - first_value
+                evidence["percent_change"] = (
+                    (last_value - first_value) / abs(first_value) * 100
+                    if first_value != 0 else None
+                )
+            indicator_evidence.append(evidence)
+
+    if not indicator_evidence:
+        return None
+
+    # Programme-facing interpretation based on evidence only.
+    observations = []
+    actions = []
+
+    for item in indicator_evidence:
+        direction = ""
+        pct = item.get("percent_change")
+        if pct is not None:
+            if pct > 5:
+                direction = f"increased by {pct:.1f}%"
+            elif pct < -5:
+                direction = f"decreased by {abs(pct):.1f}%"
+            else:
+                direction = f"changed by {pct:.1f}%"
+
+        observations.append(
+            f"**{item['indicator']}** recorded {item['observations']:,} analysed observations, "
+            f"with an average of {_format_viz_value(item['average'])}, a minimum of "
+            f"{_format_viz_value(item['minimum'])}, and a maximum of {_format_viz_value(item['maximum'])}. "
+            f"The highest observed value was in **{item['highest_category']}** and the lowest was in "
+            f"**{item['lowest_category']}**."
+            + (f" Across the displayed sequence, the indicator {direction}." if direction else "")
+        )
+
+    if high:
+        actions.append("Resolve HIGH-priority data-quality findings before using the result for high-stakes programme decisions.")
+    if medium:
+        actions.append("Validate MEDIUM-priority findings with source registers, reporting units or responsible data owners.")
+    if not actions:
+        actions.append("Continue routine data-quality monitoring and document the current evidence as part of the reporting cycle.")
+    actions.append("Use the observed differences to target programme follow-up, verification and learning; do not infer causality from the descriptive data alone.")
+
+    if quality_score >= 90:
+        quality_implication = "The quality assessment indicates strong evidence for routine interpretation under the implemented controls."
+    elif quality_score >= 75:
+        quality_implication = "The results can support routine programme monitoring, but the identified quality findings should be considered when interpreting differences."
+    elif quality_score >= 50:
+        quality_implication = "The results should be interpreted cautiously because the quality assessment indicates areas requiring review."
+    else:
+        quality_implication = "The results should not be treated as fully reliable for high-stakes management decisions until material quality issues are addressed."
+
+    confidence = "High" if quality_score >= 90 and not high else "Medium" if quality_score >= 50 else "Low"
+
+    return {
+        "analysis": {
+            "x_axis": str(x),
+            "aggregation": aggregation,
+            "indicators": [str(i) for i in indicators],
+            "rows_analysed": int(len(df)),
+            "chart_types": plan.get("chart_labels") or plan.get("chart_types") or [],
+        },
+        "indicator_evidence": indicator_evidence,
+        "quality": {
+            "score": quality_score,
+            "rating": quality_rating,
+            "high_priority": len(high),
+            "medium_priority": len(medium),
+        },
+        "observations": observations,
+        "quality_implication": quality_implication,
+        "actions": actions,
+        "confidence": confidence,
+    }
+
+
+def ask_ai_me_programme_interpretation(evidence, quality_interpretation=None):
+    """Optional AI layer for programme-manager interpretation with local fallback."""
+    if not evidence:
+        return {"status": "FALLBACK", "source": "LOCAL_RULES", "text": "No valid requested-analysis evidence is available."}
+
+    if client is None:
+        return {"status": "FALLBACK", "source": "LOCAL_RULES", "text": build_local_me_programme_interpretation(evidence)}
+
+    prompt = f"""
+You are a senior Monitoring, Evaluation and Learning (M&E) advisor and programme
+manager supporting a DHIS2-based nutrition/public-health programme.
+
+Interpret ONLY the deterministic evidence supplied below. Do not recalculate it,
+do not invent values, and do not claim causation. The user's selected analysis,
+indicator(s), X-axis and aggregation are authoritative.
+
+Your purpose is to translate the result into a concise management narrative:
+- What does the result show?
+- What performance pattern, gap, change or exception matters most?
+- What does it mean for programme monitoring and implementation follow-up?
+- Which findings should a programme manager investigate?
+- What M&E actions should happen next?
+- How does data quality affect confidence in the interpretation?
+
+Use programme-management language, not technical statistical jargon. Distinguish
+observed patterns from possible explanations. Never state that a programme
+intervention caused a change unless the supplied evidence establishes causality.
+
+REQUESTED ANALYSIS EVIDENCE:
+{safe_json_dumps(evidence)}
+
+EXISTING DATA-QUALITY INTERPRETATION, IF AVAILABLE:
+{quality_interpretation or 'None'}
+
+Return exactly these sections:
+
+## Executive Programme Message
+A concise 2-4 sentence management summary.
+
+## What the Analysis Shows
+Describe the most important observed results, comparisons and changes.
+
+## M&E Interpretation
+Explain what the pattern means for programme monitoring, performance review,
+implementation follow-up and learning. Clearly distinguish observation from hypothesis.
+
+## Data Quality Implication
+Explain whether quality findings materially limit interpretation.
+
+## Programme Management Attention
+List the most important issues a programme manager should review.
+
+## Recommended M&E Actions
+Give 3-6 practical actions covering verification, performance follow-up, learning,
+and data-quality improvement where relevant.
+
+## Confidence
+Give High, Medium or Low confidence and one short evidence-based reason.
+"""
+
+    try:
+        response = client.responses.create(
+            model=OPENAI_MODEL,
+            input=prompt,
+        )
+        return {
+            "status": "SUCCESS",
+            "source": "OPENAI",
+            "text": response.output_text or build_local_me_programme_interpretation(evidence),
+        }
+    except Exception:
+        return {
+            "status": "FALLBACK",
+            "source": "LOCAL_RULES",
+            "text": build_local_me_programme_interpretation(evidence),
+        }
+
+
+def build_local_me_programme_interpretation(evidence):
+    """Evidence-only programme-manager narrative used when AI is unavailable."""
+    if not evidence:
+        return "No programme interpretation is available because the requested analysis produced no valid evidence."
+
+    lines = ["## Executive Programme Message"]
+    lines.append(
+        f"The requested analysis covers **{evidence['analysis']['rows_analysed']:,} records** using "
+        f"**{evidence['analysis']['aggregation']}** aggregation across **{evidence['analysis']['x_axis']}**. "
+        f"The interpretation is descriptive and should be used to guide programme review rather than establish causality."
+    )
+
+    lines.append("\n## What the Analysis Shows")
+    lines.extend(f"- {x}" for x in evidence.get("observations", []))
+
+    lines.append("\n## M&E Interpretation")
+    lines.append(
+        "The observed differences identify where programme performance, reporting patterns or implementation follow-up may warrant attention. "
+        "The strongest and weakest observed categories should be reviewed with programme context, service-delivery information and responsible reporting teams before drawing operational conclusions."
+    )
+
+    lines.append("\n## Data Quality Implication")
+    lines.append(evidence.get("quality_implication", "Data-quality implications should be reviewed alongside the result."))
+
+    lines.append("\n## Programme Management Attention")
+    for item in evidence.get("observations", [])[:5]:
+        lines.append(f"- Review the programme context behind: {item}")
+    if evidence["quality"]["high_priority"]:
+        lines.append(f"- Address {evidence['quality']['high_priority']} HIGH-priority data-quality finding(s).")
+    if evidence["quality"]["medium_priority"]:
+        lines.append(f"- Validate {evidence['quality']['medium_priority']} MEDIUM-priority data-quality finding(s).")
+
+    lines.append("\n## Recommended M&E Actions")
+    for idx, action in enumerate(evidence.get("actions", []), 1):
+        lines.append(f"{idx}. {action}")
+
+    lines.append("\n## Confidence")
+    lines.append(
+        f"**{evidence.get('confidence', 'Medium')} confidence.** "
+        "Confidence reflects the deterministic analysis and the current data-quality assessment."
+    )
+    return "\n\n".join(lines)
+
+
+def render_me_programme_narration(df, plan, quality_issues, quality_matrix, quality_summary):
+    """Render the M&E interpretation module immediately below Requested Visualizations."""
+    evidence = build_me_programme_narrative(
+        df,
+        plan,
+        quality_issues,
+        quality_matrix,
+        quality_summary,
+    )
+    if not evidence:
+        return
+
+    st.markdown("---")
+    st.subheader("🧭 M&E Programme Manager Interpretation")
+    st.caption(
+        "Translates the selected analysis, visualization evidence and DHIS2 quality findings into a programme-management narrative. "
+        "It describes observed patterns and does not claim causality."
+    )
+
+    a1, a2, a3, a4 = st.columns(4)
+    with a1:
+        st.metric("Indicators", f"{len(evidence['analysis']['indicators']):,}")
+    with a2:
+        st.metric("Records analysed", f"{evidence['analysis']['rows_analysed']:,}")
+    with a3:
+        st.metric("Quality", f"{evidence['quality']['score']:.1f}/100")
+    with a4:
+        st.metric("Confidence", evidence["confidence"])
+
+    st.markdown(
+        f"""
+        <div class="me-programme-card">
+            <div class="me-programme-kicker">PROGRAMME MANAGEMENT VIEW</div>
+            <div class="me-programme-title">Evidence-based interpretation of the selected result</div>
+            <div class="me-programme-meta">
+                X-axis: <strong>{html.escape(evidence['analysis']['x_axis'])}</strong> ·
+                Aggregation: <strong>{html.escape(evidence['analysis']['aggregation'])}</strong> ·
+                Indicators: <strong>{html.escape(', '.join(evidence['analysis']['indicators']))}</strong>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if st.button(
+        "🤖 Generate AI M&E Programme Interpretation",
+        key="generate_me_programme_interpretation",
+        use_container_width=True,
+    ):
+        quality_ai = st.session_state.get("dq_ai_interpretation")
+        quality_text = quality_ai.get("text", "") if isinstance(quality_ai, dict) else ""
+        with st.spinner("🤖 Interpreting the analysis for programme managers..."):
+            st.session_state["me_programme_interpretation"] = ask_ai_me_programme_interpretation(
+                evidence,
+                quality_interpretation=quality_text,
+            )
+
+    result = st.session_state.get("me_programme_interpretation")
+    if result:
+        source = result.get("source", "LOCAL_RULES")
+        badge = "AI-ASSISTED" if source == "OPENAI" else "EVIDENCE-BASED FALLBACK"
+        st.markdown(
+            f"""
+            <div class="me-ai-badge">{badge}</div>
+            """,
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            f'<div class="me-programme-result">{result.get("text", "")}</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        # Show the deterministic preview immediately; AI is an optional enhancement.
+        preview = build_local_me_programme_interpretation(evidence)
+        with st.expander("📋 Evidence-Based Programme Interpretation", expanded=True):
+            st.markdown(preview)
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+if automatic_analysis or st.session_state.get("data_loaded", False):
+
+    if not user_url.strip():
+        st.warning(
+            "Please paste a DHIS2 URL."
+        )
+        st.stop()
+
+    source_url = user_url.strip()
+
+    previous_url = st.session_state.get(
+        "last_analyzed_url"
+    )
+
+    url_changed = (
+        previous_url != source_url
+    )
+
+    st.session_state[
+        "last_analyzed_url"
+    ] = source_url
+
+    if url_changed:
+        st.session_state["last_chart_plan"] = None
+        st.session_state["data_loaded"] = False
+
+    source_type = identify_url_type(
+        source_url
+    )
+
+    st.info(
+        f"Detected source: **{source_type}**"
+    )
+
+    # ========================================================
+    # RETRIEVE / REUSE CURRENT DATASET
+    # ========================================================
+
+    if (
+        st.session_state.get("data_loaded", False)
+        and st.session_state.get("loaded_source_url") == source_url
+        and isinstance(st.session_state.get("loaded_df"), pd.DataFrame)
+    ):
+        df = st.session_state["loaded_df"].copy()
+        st.info("♻️ Using the already loaded dataset for automatic DANIP-NI analysis.")
+    else:
+        with st.spinner("📥 Retrieving the complete dataset..."):
+            try:
+                request_url = refresh_data_url(source_url)
+                raw_data = get_direct_api_data(request_url)
+            except Exception:
+                try:
+                    raw_data = get_direct_api_data(source_url)
+                except Exception as retry_error:
+                    st.error("Unable to retrieve DHIS2 data.")
+                    st.code(str(retry_error))
+                    st.stop()
+
+        df = normalize_dataframe(raw_data)
+
+        if df.empty:
+            st.error("DHIS2 returned data, but no tabular data could be identified.")
+            if isinstance(raw_data, dict):
+                st.json(raw_data)
+            st.stop()
+
+        st.session_state["loaded_df"] = df.copy()
+        st.session_state["loaded_source_url"] = source_url
+        st.session_state["data_loaded"] = True
+
+    # ========================================================
+    # DATA LOADED
+    # ========================================================
+
+    st.success(
+        f"Successfully retrieved {len(df):,} records. "
+        "ALL retrieved rows are available for analysis."
+    )
+
+    st.caption(
+        f"🔄 Current source: {source_url} • "
+        f"Complete dataset: "
+        f"{len(df):,} rows × {len(df.columns):,} columns"
+    )
+
+    # ========================================================
+    # DATA QUALITY — CALCULATE ON THE COMPLETE DATASET
+    # ========================================================
+
+    with st.spinner("🛡️ Running the Data Quality Matrix across the complete dataset..."):
+        top_quality_issues, top_quality_matrix, top_quality_summary = build_quality_matrix(df)
+
+    # ========================================================
+    # USER-REQUESTED ANALYSIS ONLY
+    # ========================================================
+
+    st.subheader("🎯 User-Requested Analysis")
+
+    selected_plan = guided_analysis_ui(
+        df=df,
+        user_question="User-requested analysis",
+        initial_plan=None,
+    )
+
+    live_visual_plan = st.session_state.get("guided_preview_plan")
+    chart_plan = selected_plan or live_visual_plan
+
+    if selected_plan is not None:
+        st.success(
+            "✅ User-selected analysis confirmed. The selected indicators, X-axis, "
+            "graph type, analysis type and aggregation will be used against the complete dataset."
+        )
+
+    # ========================================================
+    # REQUESTED VISUALIZATION — ONLY THE GRAPH SELECTED BY USER
+    # ========================================================
+
+    if chart_plan and chart_plan.get("chart_requested"):
+        render_requested_visualizations(
+            df=df,
+            plan=chart_plan,
+        )
+
+        # ====================================================
+        # M&E PROGRAMME MANAGER INTERPRETATION
+        # ====================================================
+        render_me_programme_narration(
+            df=df,
+            plan=chart_plan,
+            quality_issues=top_quality_issues,
+            quality_matrix=top_quality_matrix,
+            quality_summary=top_quality_summary,
+        )
+
+    # ========================================================
+    # DATA QUALITY MATRIX
+    # ========================================================
+
+    quality_issues, quality_matrix, quality_summary = (top_quality_issues, top_quality_matrix, top_quality_summary)
+
+    render_quality_dashboard(
+        df=df,
+        quality_issues=quality_issues,
+        quality_matrix=quality_matrix,
+        quality_summary=quality_summary,
+    )
+
+    # ========================================================
+
+# ============================================================
+# END — USER-REQUESTED ANALYSIS + DATA QUALITY MATRIX ONLY
+# ============================================================
