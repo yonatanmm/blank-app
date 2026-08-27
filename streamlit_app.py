@@ -9034,6 +9034,139 @@ def render_me_programme_narration(df, plan, quality_issues, quality_matrix, qual
             st.markdown(preview)
 
 
+
+
+# ============================================================
+# COMPLETE DATASET TABLE — ISOLATED MODULE
+# ============================================================
+
+def render_complete_dataset_table(df, source_url=None):
+    """
+    Display ALL rows and ALL columns from the currently loaded dataset.
+
+    This module does not modify the existing dataframe, charts,
+    aggregation, data-quality calculations, or AI analysis.
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        st.info("No loaded dataset is available to display.")
+        return
+
+    st.markdown("### 📋 Complete Loaded Dataset")
+    st.caption(
+        f"All data currently loaded from the source: "
+        f"{len(df):,} rows × {len(df.columns):,} columns"
+    )
+
+    c1, c2, c3 = st.columns([2, 1, 1])
+
+    with c1:
+        search_text = st.text_input(
+            "🔎 Search data",
+            value="",
+            placeholder="Search across all columns...",
+            key="complete_dataset_search",
+        )
+
+    with c2:
+        show_rows = st.selectbox(
+            "Rows displayed",
+            options=[100, 500, 1000, 5000, 10000, "All"],
+            index=2,
+            key="complete_dataset_rows",
+        )
+
+    with c3:
+        sort_column = st.selectbox(
+            "Sort by",
+            options=["None"] + [str(c) for c in df.columns],
+            index=0,
+            key="complete_dataset_sort",
+        )
+
+    display_df = df.copy()
+
+    if search_text.strip():
+        search_value = search_text.strip().lower()
+        mask = display_df.astype(str).apply(
+            lambda column: column.str.lower().str.contains(
+                search_value, na=False, regex=False
+            )
+        ).any(axis=1)
+        display_df = display_df.loc[mask].copy()
+
+    if sort_column != "None" and sort_column in display_df.columns:
+        try:
+            display_df = display_df.sort_values(by=sort_column, kind="stable")
+        except Exception:
+            pass
+
+    filtered_count = len(display_df)
+
+    csv_data = display_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="⬇️ Download Complete Data as CSV",
+        data=csv_data,
+        file_name="DANIP_complete_loaded_data.csv",
+        mime="text/csv",
+        use_container_width=True,
+        key="download_complete_dataset_csv",
+    )
+
+    if show_rows == "All":
+        table_df = display_df
+        limited = False
+    else:
+        table_df = display_df.head(int(show_rows))
+        limited = len(display_df) > int(show_rows)
+
+    if search_text.strip():
+        st.info(
+            f"🔎 Search result: {filtered_count:,} matching rows "
+            f"from {len(df):,} total loaded rows."
+        )
+    else:
+        st.success(
+            f"✅ Complete dataset loaded: {len(df):,} rows × "
+            f"{len(df.columns):,} columns."
+        )
+
+    if limited:
+        st.caption(
+            f"Displaying the first {len(table_df):,} rows of "
+            f"{filtered_count:,} matching rows. Select 'All' to display every matching row."
+        )
+    else:
+        st.caption(f"Displaying all {len(table_df):,} matching rows.")
+
+    st.dataframe(
+        table_df,
+        use_container_width=True,
+        hide_index=True,
+        height=600,
+    )
+
+    with st.expander("📊 Dataset Information", expanded=False):
+        info_col1, info_col2, info_col3, info_col4 = st.columns(4)
+
+        with info_col1:
+            st.metric("Total Loaded Rows", f"{len(df):,}")
+        with info_col2:
+            st.metric("Columns", f"{len(df.columns):,}")
+        with info_col3:
+            st.metric("Rows After Search", f"{filtered_count:,}")
+        with info_col4:
+            st.metric("Missing Cells", f"{int(df.isna().sum().sum()):,}")
+
+        st.markdown("#### Columns")
+        column_info = pd.DataFrame({
+            "Column": [str(c) for c in df.columns],
+            "Data Type": [str(df[c].dtype) for c in df.columns],
+            "Non-Missing": [int(df[c].notna().sum()) for c in df.columns],
+            "Missing": [int(df[c].isna().sum()) for c in df.columns],
+        })
+        st.dataframe(column_info, use_container_width=True, hide_index=True)
+
+
 # ============================================================
 # MAIN
 # ============================================================
@@ -9121,6 +9254,16 @@ if automatic_analysis or st.session_state.get("data_loaded", False):
         f"🔄 Current source: {source_url} • "
         f"Complete dataset: "
         f"{len(df):,} rows × {len(df.columns):,} columns"
+    )
+
+
+    # ========================================================
+    # COMPLETE DATASET TABLE
+    # ========================================================
+
+    render_complete_dataset_table(
+        df=df,
+        source_url=source_url,
     )
 
     # ========================================================
