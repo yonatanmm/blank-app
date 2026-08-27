@@ -40,10 +40,12 @@ DHIS2_URL = _get_secret(
     "https://dhis2.nutritionintl.org"
 ).rstrip("/")
 
-DHIS2_USERNAME = _get_secret("DHIS2_USERNAME")
-DHIS2_PASSWORD = _get_secret("DHIS2_PASSWORD")
-OPENAI_API_KEY = _get_secret("OPENAI_API_KEY")
-OPENAI_MODEL = _get_secret("OPENAI_MODEL", "gpt-5")
+# Read secrets from Streamlit Cloud first, then local environment/.env.
+# IMPORTANT: never hard-code API keys or passwords in this source file.
+DHIS2_USERNAME = os.getenv("DHIS2_USERNAME", "data.ai").strip()
+DHIS2_PASSWORD = os.getenv("DHIS2_PASSWORD", "Data.ai@2025").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "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").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5").strip()
 
 
 # ============================================================
@@ -1035,7 +1037,7 @@ if not DHIS2_USERNAME:
     missing.append("data.ai")
 
 if not DHIS2_PASSWORD:
-    missing.append("Data.ai@2025")
+    missing.append("DHIS2_PASSWORD")
 
 if not OPENAI_API_KEY:
     missing.append("OPENAI_API_KEY")
@@ -1058,12 +1060,25 @@ if missing:
         )
 
 # Only create the OpenAI client when a key is actually available.
-client = (
-    OpenAI(api_key=OPENAI_API_KEY)
-    if OPENAI_API_KEY
-    else None
-)
+client = None
+if OPENAI_API_KEY:
+    try:
+        client = OpenAI(api_key=OPENAI_API_KEY)
+    except Exception as e:
+        st.error("OpenAI client could not be initialized. Check OPENAI_API_KEY.")
+        with st.expander("Technical details", expanded=False):
+            st.code(str(e))
+else:
+    client = None
 
+
+# ============================================================
+# OPENAI CONFIGURATION SAFETY
+# ============================================================
+
+if OPENAI_API_KEY and OPENAI_API_KEY.startswith("sk-"):
+    # The key is intentionally not printed anywhere in the application.
+    pass
 
 # ============================================================
 # DHIS2 SESSION
@@ -1090,7 +1105,11 @@ def show_ai_error(error):
             "process the loaded data, but AI interpretation requires API access."
         )
     elif "invalid_api_key" in message or "401" in message:
-        st.error("🔑 The OpenAI API key was rejected. Check OPENAI_API_KEY.")
+        st.error(
+            "🔑 OpenAI rejected the API key. Create a new API key and update "
+            "OPENAI_API_KEY in Streamlit Cloud → App settings → Secrets. "
+            "Do not put the key inside streamlit_app.py."
+        )
     elif "429" in message:
         st.warning("⏳ The AI service is temporarily rate-limited.")
     else:
@@ -5538,7 +5557,7 @@ Trusted domains: {", ".join(EXTERNAL_EVIDENCE_DOMAINS)}
     try:
         response=client.responses.create(
             model=OPENAI_MODEL,
-            tools=[{"type":"web_search","filters":{"allowed_domains":EXTERNAL_EVIDENCE_DOMAINS},"search_context_size":"medium"}],
+            tools=[{"type":"web_search","search_context_size":"high"}],
             input=prompt,
         )
         return {"status":"SUCCESS","indicators":indicators,"sources":_extract_response_urls(response),"narrative":response.output_text or ""}
@@ -6663,17 +6682,19 @@ UN_EVIDENCE_DOMAINS = [
 ]
 
 
-def research_chat_external_question(question, indicators=None, current_evidence=None):
+def research_chat_external_question(
+    question,
+    indicators=None,
+    current_evidence=None,
+):
     """
-    Dedicated external UN/WHO evidence research engine.
+    DANIP-NI external evidence research engine.
 
     IMPORTANT:
-    - This function is used ONLY when the user explicitly asks for external
-      evidence, a UN/WHO report, guideline, study, publication, etc.
+    - Used only for explicit external/UN/WHO/report/guideline/study questions.
     - Dashboard values are context only and NEVER replace external evidence.
-    - The numerical dashboard/M&E calculation engine remains separate.
-    - The function retries compatible web-search configurations so a project
-      using a slightly different OpenAI SDK/API configuration can still work.
+    - Numerical dashboard/M&E calculations remain deterministic and local.
+    - Uses the OpenAI Responses API built-in web_search tool.
     """
 
     if client is None:
@@ -6698,8 +6719,6 @@ def research_chat_external_question(question, indicators=None, current_evidence=
 
     indicators = indicators or []
 
-    # Only send indicator names as context. Do NOT send the complete
-    # deterministic dashboard evidence to the external-research prompt.
     indicator_text = "\n".join(
         f"- {str(indicator)}" for indicator in indicators[:5]
     ) or "- No dashboard indicator was confidently identified."
@@ -6707,9 +6726,9 @@ def research_chat_external_question(question, indicators=None, current_evidence=
     prompt = f"""
 You are the DANIP-NI External Evidence Research Assistant.
 
-The user has explicitly requested external evidence.
-This request MUST be answered using authoritative external sources, not by
-substituting the loaded DHIS2/dashboard data.
+The user explicitly requested external evidence.
+You MUST use web search for this request.
+Do NOT answer this request from the dashboard data.
 
 USER QUESTION:
 {question}
@@ -6730,15 +6749,15 @@ RESEARCH PRIORITY:
 For maternal health / antenatal care questions, prioritize WHO, UNICEF,
 UNFPA and United Nations sources.
 
-SEARCH CONCEPTS:
 If the question concerns pregnant women attending ANC-1 within the first
-12 weeks of pregnancy, also search equivalent standardized concepts such as:
+12 weeks of pregnancy, search equivalent concepts including:
 - antenatal care in the first trimester
 - first antenatal care contact before 12 weeks
 - early antenatal care
 - ANC1 first trimester
 - first antenatal care visit within 12 weeks
 - early initiation of antenatal care
+- antenatal care before 12 weeks
 
 MATCHING RULES:
 
@@ -6746,12 +6765,13 @@ EXACT MATCH means the external source supports substantially the same:
 - population
 - indicator concept
 - timing
-- numerator/denominator or definition
+- measurement definition
+- numerator/denominator where available
 
 RELATED MATCH means the source is conceptually relevant but differs in
 population, timing, definition, numerator, denominator or measurement.
 
-Never describe a RELATED MATCH as an exact match.
+Never describe a RELATED MATCH as an EXACT MATCH.
 
 If no exact source can be verified, explicitly state:
 "No verified exact UN report found."
@@ -6764,19 +6784,35 @@ DO NOT:
 - invent indicator definitions
 - invent publication titles
 - invent URLs
-- change, cap, recalculate or replace dashboard values
+- change or cap dashboard values
+- recalculate or replace dashboard values
 - claim that a related indicator is identical to the dashboard indicator
 - claim programme causality from descriptive evidence
+
+SOURCE RULE:
+Prefer official domains such as:
+- un.org
+- who.int
+- data.who.int
+- unicef.org
+- data.unicef.org
+- unfpa.org
+- data.unfpa.org
+- unstats.un.org
+- worldbank.org
+- dhis2.org
+- docs.dhis2.org
+- nutritionintl.org
 
 ANSWER FORMAT:
 
 ## 🌐 External Evidence
 
-State that the answer is based on external research.
+State clearly that the answer is based on external web research.
 
 ## UN / WHO Evidence
 
-For each verified source provide:
+For each important source provide:
 
 **Organization:**
 **Report / publication:**
@@ -6792,56 +6828,31 @@ If the exact dashboard definition cannot be verified, say so explicitly.
 
 ## 🧭 M&E Relevance
 
-Explain the monitoring and programme-management relevance of the
-external evidence without inventing a target.
+Explain the relevance to monitoring, programme performance,
+service utilisation, programme management and indicator interpretation.
+Do not invent programme targets.
 
 ## 🔗 Sources
 
-Provide the official source URLs returned by the search.
-Only provide URLs that are actually available from the search response.
-
+Provide the official source URLs returned by web search.
 If no credible source is found, say so explicitly.
 """
 
-    api_errors = []
-
-    # Try the current Responses API web_search tool first, restricted to the
-    # trusted evidence domains used by DANIP-NI.
+    # ------------------------------------------------------------
+    # Use the current Responses API web_search tool first.
+    # Keep the first attempt deliberately simple. This avoids failures
+    # caused by unsupported filter syntax in older OpenAI SDK versions.
+    # ------------------------------------------------------------
     search_attempts = [
         (
-            "web_search_trusted_domains",
-            {
-                "type": "web_search",
-                "filters": {
-                    "allowed_domains": UN_EVIDENCE_DOMAINS,
-                },
-                "search_context_size": "high",
-            },
-        ),
-        # Fallback: remove the domain filter if the installed API/project does
-        # not accept the filter syntax. The prompt still requires authoritative
-        # UN/WHO sources and the answer must label evidence clearly.
-        (
-            "web_search_unfiltered",
+            "web_search",
             {
                 "type": "web_search",
                 "search_context_size": "high",
             },
         ),
-        # Compatibility fallback for environments still exposing the preview
-        # tool name.
         (
-            "web_search_preview_trusted_domains",
-            {
-                "type": "web_search_preview",
-                "filters": {
-                    "allowed_domains": UN_EVIDENCE_DOMAINS,
-                },
-                "search_context_size": "high",
-            },
-        ),
-        (
-            "web_search_preview_unfiltered",
+            "web_search_preview",
             {
                 "type": "web_search_preview",
                 "search_context_size": "high",
@@ -6849,24 +6860,65 @@ If no credible source is found, say so explicitly.
         ),
     ]
 
+    api_errors = []
+
     for attempt_name, search_tool in search_attempts:
         try:
             response = client.responses.create(
                 model=OPENAI_MODEL,
                 tools=[search_tool],
+                tool_choice="required",
                 input=prompt,
             )
 
-            answer = (response.output_text or "").strip()
+            answer = (
+                getattr(response, "output_text", None) or ""
+            ).strip()
 
             if not answer:
-                api_errors.append(f"{attempt_name}: empty response")
+                api_errors.append(
+                    f"{attempt_name}: empty response"
+                )
                 continue
 
+            # ----------------------------------------------------
+            # Extract URLs from the Responses API output.
+            # The answer itself is still returned even if URL
+            # extraction is not supported by the installed SDK.
+            # ----------------------------------------------------
+            urls = []
+
             try:
-                urls = _extract_response_urls(response)
+                output_items = getattr(response, "output", []) or []
+
+                for item in output_items:
+                    item_type = getattr(item, "type", "")
+
+                    if item_type == "web_search_call":
+                        action = getattr(item, "action", None)
+                        if action is not None:
+                            for src in (
+                                getattr(action, "sources", []) or []
+                            ):
+                                url = getattr(src, "url", None)
+                                if url and url not in urls:
+                                    urls.append(url)
+
+                    content_items = getattr(item, "content", []) or []
+
+                    for content_item in content_items:
+                        annotations = getattr(
+                            content_item,
+                            "annotations",
+                            [],
+                        ) or []
+
+                        for annotation in annotations:
+                            url = getattr(annotation, "url", None)
+                            if url and url not in urls:
+                                urls.append(url)
+
             except Exception as url_error:
-                urls = []
                 api_errors.append(
                     f"{attempt_name}: URL extraction warning: {url_error}"
                 )
@@ -6875,33 +6927,36 @@ If no credible source is found, say so explicitly.
                 "status": "SUCCESS",
                 "source": "UN_WHO_EXTERNAL_RESEARCH",
                 "text": answer,
-                "sources": urls,
+                "sources": urls[:15],
                 "search_method": attempt_name,
             }
 
         except Exception as exc:
             message = str(exc)
-            api_errors.append(f"{attempt_name}: {message}")
+            api_errors.append(
+                f"{attempt_name}: {message}"
+            )
 
             lower = message.lower()
 
-            # Authentication/quota errors will not be fixed by changing the
-            # search-tool configuration, so stop retrying in those cases.
-            if any(token in lower for token in (
-                "invalid_api_key",
-                "incorrect api key",
-                "authentication",
-                "unauthorized",
-                "401",
-                "insufficient_quota",
-                "credit_balance_exhausted",
-                "429",
-                "rate limit",
-            )):
+            # These failures will not be fixed by changing the search
+            # tool syntax, so stop immediately.
+            if any(
+                token in lower
+                for token in (
+                    "invalid_api_key",
+                    "incorrect api key",
+                    "authentication",
+                    "unauthorized",
+                    "401",
+                    "insufficient_quota",
+                    "credit_balance_exhausted",
+                    "429",
+                    "rate limit",
+                )
+            ):
                 break
 
-    # Keep the actual technical error visible while testing. This is much more
-    # useful than the old generic message that hid the reason for failure.
     error_text = "\n\n".join(api_errors)[-6000:]
 
     return {
@@ -6909,8 +6964,8 @@ If no credible source is found, say so explicitly.
         "source": "UN_WHO_EXTERNAL_RESEARCH",
         "text": (
             "### 🌐 External research could not be completed\n\n"
-            "DANIP-NI correctly detected this as an external UN/WHO research "
-            "question, but the external web-search request failed.\n\n"
+            "DANIP-NI detected this as an external UN/WHO research "
+            "question, but the OpenAI web-search request failed.\n\n"
             "**Technical details:**\n"
             f"```text\n{error_text}\n```\n\n"
             "The dashboard data was NOT substituted for the requested "
@@ -6919,7 +6974,6 @@ If no credible source is found, say so explicitly.
         "sources": [],
         "error": error_text,
     }
-
 
 def ask_analysis_chatbot(
     user_question,
