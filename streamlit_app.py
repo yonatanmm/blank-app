@@ -53,15 +53,14 @@ DHIS2_URL = _get_secret(
     "https://dhis2.nutritionintl.org"
 ).rstrip("/")
 
-# Read secrets from Streamlit Cloud first, then local environment/.env.
-# IMPORTANT: never hard-code API keys or passwords in this source file.
-# Read all credentials through the same secure helper.
-# This allows Streamlit Cloud Secrets and local .env/environment variables
-# to work consistently. No API key or password is hard-coded in the app.
-DHIS2_USERNAME = os.getenv("DHIS2_USERNAME", "data.ai").strip()
-DHIS2_PASSWORD = os.getenv("DHIS2_PASSWORD", "Data.ai@2025").strip()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "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").strip()
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5").strip()
+# Read credentials through the same secure helper.
+# Local: .env beside this file.
+# Streamlit Cloud: App settings -> Secrets.
+# Never hard-code passwords or API keys in source code.
+DHIS2_USERNAME = _get_secret("DHIS2_USERNAME", "data.ai")
+DHIS2_PASSWORD = _get_secret("DHIS2_PASSWORD", "Data.ai@2025")
+OPENAI_API_KEY = _get_secret("OPENAI_API_KEY", "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")
+OPENAI_MODEL = _get_secret("OPENAI_MODEL", "gpt-5")
 
 
 # ============================================================
@@ -69,7 +68,7 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5").strip()
 # ============================================================
 
 st.set_page_config(
-    page_title="DANIP-NI AI Data Intelligence",
+    page_title="NEXUS DANIP AI Data Intelligence",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -1016,6 +1015,217 @@ st.markdown(
 )
 
 
+
+# ============================================================
+# PREMIUM UI THEME — NEXUS AI
+# UI ONLY: does not modify data, AI, DHIS2 or analysis logic.
+# ============================================================
+
+st.markdown(
+    """
+    <style>
+    /* ---------- Canvas ---------- */
+    [data-testid="stAppViewContainer"] {
+        background:
+            radial-gradient(circle at 88% 0%, rgba(109,93,252,.07), transparent 28%),
+            radial-gradient(circle at 8% 5%, rgba(49,94,251,.05), transparent 25%),
+            #f7f8fb !important;
+    }
+    [data-testid="stHeader"] {
+        background: rgba(247,248,251,.88) !important;
+        backdrop-filter: blur(12px);
+    }
+    .block-container {
+        max-width: 1540px !important;
+        padding-top: 1.15rem !important;
+        padding-bottom: 4rem !important;
+    }
+
+    /* ---------- Luxury hero ---------- */
+    .app-hero {
+        position: relative !important;
+        overflow: hidden !important;
+        border: 1px solid rgba(255,255,255,.7) !important;
+        border-radius: 26px !important;
+        padding: 1.8rem 1.9rem 1.55rem !important;
+        background: linear-gradient(135deg, #0a1020 0%, #17233a 52%, #29436f 100%) !important;
+        box-shadow: 0 20px 50px rgba(16,24,40,.16) !important;
+        margin-bottom: 1.35rem !important;
+    }
+    .app-hero::before {
+        content: "";
+        position: absolute;
+        width: 360px;
+        height: 360px;
+        right: -90px;
+        top: -190px;
+        border-radius: 50%;
+        background: rgba(109,93,252,.25);
+        filter: blur(8px);
+    }
+    .app-hero::after {
+        content: "";
+        position: absolute;
+        width: 220px;
+        height: 220px;
+        right: 160px;
+        bottom: -170px;
+        border-radius: 50%;
+        background: rgba(49,94,251,.18);
+    }
+    .app-title, .app-subtitle, .status-row { position: relative; z-index: 1; }
+    .app-title {
+        color: #fff !important;
+        -webkit-text-fill-color: #fff !important;
+        font-size: clamp(2rem, 3.7vw, 3.05rem) !important;
+        font-weight: 850 !important;
+        letter-spacing: -.05em !important;
+        line-height: 1.02 !important;
+    }
+    .app-subtitle {
+        color: #cbd5e1 !important;
+        -webkit-text-fill-color: #cbd5e1 !important;
+        max-width: 930px !important;
+        font-size: .96rem !important;
+        line-height: 1.65 !important;
+        margin-top: .7rem !important;
+    }
+    .status-row { gap: .55rem !important; margin-top: 1.05rem !important; }
+    .status-pill {
+        background: rgba(255,255,255,.085) !important;
+        border: 1px solid rgba(255,255,255,.14) !important;
+        color: #e5e7eb !important;
+        -webkit-text-fill-color: #e5e7eb !important;
+        padding: .4rem .74rem !important;
+        backdrop-filter: blur(10px);
+    }
+    .status-ok { color: #b7f7d0 !important; -webkit-text-fill-color: #b7f7d0 !important; }
+    .status-info { color: #dbe5ff !important; -webkit-text-fill-color: #dbe5ff !important; }
+
+    /* ---------- Sidebar ---------- */
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, #0a1020 0%, #111827 100%) !important;
+        border-right: 1px solid rgba(255,255,255,.08) !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] span {
+        color: #e5e7eb !important;
+        -webkit-text-fill-color: #e5e7eb !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stExpander"] {
+        background: rgba(255,255,255,.045) !important;
+        border: 1px solid rgba(255,255,255,.09) !important;
+        border-radius: 14px !important;
+    }
+    [data-testid="stSidebar"] [data-testid="stExpander"] * {
+        color: #e5e7eb !important;
+        -webkit-text-fill-color: #e5e7eb !important;
+    }
+    [data-testid="stSidebar"] .stButton > button {
+        border: 1px solid rgba(255,255,255,.12) !important;
+        background: rgba(255,255,255,.07) !important;
+        color: #fff !important;
+    }
+
+    /* ---------- Content cards ---------- */
+    .section-card, .guided-panel, .requested-viz-card, .dq-audit-shell,
+    .me-programme-card, .dq-ai-quality-card {
+        border-radius: 17px !important;
+        box-shadow: 0 6px 22px rgba(16,24,40,.045) !important;
+    }
+    .section-card {
+        background: rgba(255,255,255,.94) !important;
+        border-color: #e7eaf0 !important;
+    }
+    .section-kicker {
+        color: #5b5bd6 !important;
+        -webkit-text-fill-color: #5b5bd6 !important;
+        letter-spacing: .12em !important;
+    }
+    .section-title { letter-spacing: -.015em !important; }
+
+    /* ---------- Metrics ---------- */
+    [data-testid="stMetric"] {
+        border: 1px solid #e6e9ef !important;
+        border-radius: 15px !important;
+        background: #fff !important;
+        box-shadow: 0 5px 16px rgba(16,24,40,.04) !important;
+        transition: transform .18s ease, box-shadow .18s ease;
+    }
+    [data-testid="stMetric"]:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 9px 24px rgba(16,24,40,.075) !important;
+    }
+
+    /* ---------- Inputs ---------- */
+    textarea, input, [data-baseweb="input"] input, [data-baseweb="textarea"] textarea,
+    [data-baseweb="select"] > div {
+        border-radius: 11px !important;
+    }
+    textarea:focus, input:focus {
+        border-color: #6d5dfc !important;
+        box-shadow: 0 0 0 2px rgba(109,93,252,.12) !important;
+    }
+    .stButton > button, .stDownloadButton > button {
+        border-radius: 11px !important;
+        min-height: 42px !important;
+        font-weight: 750 !important;
+        transition: transform .15s ease, box-shadow .15s ease;
+    }
+    .stButton > button:hover, .stDownloadButton > button:hover {
+        transform: translateY(-1px);
+        box-shadow: 0 6px 18px rgba(16,24,40,.09) !important;
+    }
+
+    /* ---------- Chat ---------- */
+    .danip-analysis-chat {
+        border: 1px solid rgba(109,93,252,.35) !important;
+        border-radius: 20px !important;
+        background: linear-gradient(135deg, #0a1020 0%, #162746 58%, #263c68 100%) !important;
+        box-shadow: 0 14px 34px rgba(16,24,40,.12) !important;
+        padding: 1.15rem 1.2rem !important;
+    }
+    .danip-analysis-chat .chat-kicker {
+        color: #aeb7ff !important;
+        -webkit-text-fill-color: #aeb7ff !important;
+        letter-spacing: .12em !important;
+    }
+    .danip-analysis-chat .chat-title {
+        color: #fff !important;
+        -webkit-text-fill-color: #fff !important;
+        font-size: 1.28rem !important;
+    }
+    .danip-analysis-chat .chat-help {
+        color: #cbd5e1 !important;
+        -webkit-text-fill-color: #cbd5e1 !important;
+    }
+    [data-testid="stChatInput"] {
+        border: 1px solid rgba(49,94,251,.55) !important;
+        border-radius: 14px !important;
+        box-shadow: 0 8px 25px rgba(16,24,40,.09) !important;
+    }
+
+    /* ---------- Data tables ---------- */
+    [data-testid="stDataFrame"] {
+        border: 1px solid #e5e7eb !important;
+        border-radius: 14px !important;
+        overflow: hidden !important;
+        box-shadow: 0 5px 18px rgba(16,24,40,.04) !important;
+    }
+
+    /* ---------- Small screens ---------- */
+    @media (max-width: 700px) {
+        .app-hero { padding: 1.25rem !important; border-radius: 19px !important; }
+        .app-title { font-size: 2rem !important; }
+        .app-subtitle { font-size: .88rem !important; }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # ============================================================
 # HEADER
 # ============================================================
@@ -1023,11 +1233,11 @@ st.markdown(
 st.markdown(
     """
     <div class="app-hero">
-        <div class="app-title">DANIP- AI Data Analyst</div>
+        <div class="app-title">NEXUS DANIP AI Data Analyst</div>
         <div class="app-subtitle">
-            Analyze DHIS2 and other tabular/API data using natural language.
-            User intent controls the analysis. Data quality has high priority.
-            All applicable rows are processed locally before AI interpretation.
+            A premium evidence-first workspace for DHIS2, tabular and API data.
+            Ask questions in natural language, explore performance, compare indicators,
+            assess data quality and turn evidence into decision-ready intelligence.
         </div>
         <div class="status-row">
             <span class="status-pill status-ok">● Complete Data Processing</span>
@@ -1053,10 +1263,10 @@ if not DHIS2_USERNAME:
     missing.append("data.ai")
 
 if not DHIS2_PASSWORD:
-    missing.append("DHIS2_PASSWORD")
+    missing.append("Data.ai@2025")
 
 if not OPENAI_API_KEY:
-    missing.append("OPENAI_API_KEY")
+    missing.append("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")
 
 if missing:
     st.warning(
@@ -1296,7 +1506,7 @@ def read_csv_response(response):
         return pd.read_csv(StringIO(response.text))
     except Exception as e:
         raise Exception(
-            "DHIS2 returned CSV data, but Python could not read it.\n\n"
+            "DANIP returned CSV data, but Python could not read it.\n\n"
             f"{e}"
         )
 
@@ -1306,7 +1516,7 @@ def read_json_response(response):
         return response.json()
     except Exception as e:
         raise Exception(
-            "DHIS2 returned JSON data, but it could not be parsed.\n\n"
+            "DANIP returned JSON data, but it could not be parsed.\n\n"
             f"{e}"
         )
 
@@ -5587,8 +5797,8 @@ Trusted domains: {", ".join(EXTERNAL_EVIDENCE_DOMAINS)}
 def render_ai_methodology_and_external_context(df, quality_summary, quality_issues, external_context):
     st.markdown("""
     <div class="section-card auto-analysis-card">
-      <div class="section-kicker">DANIP-NI INTELLIGENCE LAYER</div>
-      <div class="section-title">🧠 How DANIP-NI is working with your data</div>
+      <div class="section-kicker">NEXUS INTELLIGENCE LAYER</div>
+      <div class="section-title">🧠 How NEXUS AI is working with your data</div>
       <div class="section-help">Python calculates deterministic evidence from the complete dataset. AI interprets that evidence, while verified UN/INGO/public-health sources provide indicator context without changing the user's calculations.</div>
     </div>
     """, unsafe_allow_html=True)
@@ -5599,7 +5809,7 @@ def render_ai_methodology_and_external_context(df, quality_summary, quality_issu
     with a4: st.metric("External context", "Available" if external_context.get("status")=="SUCCESS" else "Limited")
     with st.expander("🔍 1. Data-quality narration", expanded=True):
         st.markdown(build_data_quality_narrative(quality_summary, quality_issues))
-        st.caption("Quality checks qualify the interpretation. DANIP-NI does not silently delete outliers, convert zeros to missing, or change the requested aggregation.")
+        st.caption("Quality checks qualify the interpretation. The AI does not silently delete outliers, convert zeros to missing, or change the requested aggregation.")
     with st.expander("🤖 2. How the AI works", expanded=False):
         st.markdown("""
 **Step 1 — Complete-data processing:** all returned rows are loaded locally.
@@ -6575,6 +6785,468 @@ Indicator-level quality: **{primary['quality_rating']} ({primary['quality_score'
 """
 
 
+
+# ============================================================
+# CHAT PERFORMANCE INTELLIGENCE
+# ============================================================
+
+def _chat_performance_intent(question):
+    """Detect a request to assess indicators against programme targets."""
+    q = _chat_normalize_text(question)
+    performance_terms = (
+        "performance", "below target", "under target", "underperform",
+        "off target", "missed target", "not meeting target",
+        "below the target", "which indicators are below",
+        "which indicator is below", "target achievement",
+        "target performance", "achievement against target",
+    )
+    return any(term in q for term in performance_terms)
+
+
+def _chat_normalize_name(value):
+    return re.sub(r"[^a-z0-9]+", " ", str(value or "").lower()).strip()
+
+
+def _chat_find_indicator_column(df):
+    """Find a row-level indicator/name field when the dataset is long-form."""
+    patterns = [
+        r"^indicator$", r"indicator name", r"indicator",
+        r"data element", r"dataelement", r"dx",
+        r"measure", r"metric"
+    ]
+    return _meal_col(df, patterns) if "_meal_col" in globals() else None
+
+
+def _chat_match_indicator_column(df, indicator_name):
+    """Match a Results Framework indicator name to a loaded dataframe column."""
+    target = _chat_normalize_name(indicator_name)
+    if not target:
+        return None
+
+    exact = {}
+    for c in df.columns:
+        exact[_chat_normalize_name(c)] = c
+
+    if target in exact:
+        return exact[target]
+
+    # Conservative containment match; avoid arbitrary fuzzy matches.
+    candidates = []
+    for c in df.columns:
+        nc = _chat_normalize_name(c)
+        if not nc:
+            continue
+        if target in nc or nc in target:
+            candidates.append((abs(len(nc) - len(target)), c))
+
+    if candidates:
+        candidates.sort(key=lambda x: x[0])
+        return candidates[0][1]
+
+    return None
+
+
+def _chat_performance_from_results_framework(df):
+    """
+    Build indicator-level target-vs-actual performance using the persistent
+    Results Framework when available. This is the preferred path because it
+    gives the chatbot an explicit indicator target.
+    """
+    try:
+        rf = _meal_persistent_df("meal_results_framework")
+    except Exception:
+        rf = pd.DataFrame()
+
+    if not isinstance(rf, pd.DataFrame) or rf.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for _, rec in rf.iterrows():
+        indicator = str(rec.get("Indicator", "")).strip()
+        if not indicator:
+            continue
+
+        target = pd.to_numeric(pd.Series([rec.get("Target", "")]), errors="coerce").iloc[0]
+        if pd.isna(target):
+            continue
+
+        actual_col = _chat_match_indicator_column(df, indicator)
+        if not actual_col:
+            continue
+
+        values = pd.to_numeric(df[actual_col], errors="coerce").dropna()
+        if values.empty:
+            continue
+
+        # Counts/volumes are normally additive; percentages/rates are better
+        # represented by their observed mean when the target is <= 100.
+        if float(target) <= 100:
+            actual = float(values.mean())
+        else:
+            actual = float(values.sum())
+
+        direction = str(rec.get("Direction", "") or "Higher is better").strip()
+        direction_lower = direction.lower()
+
+        if "lower" in direction_lower:
+            gap = float(target) - actual
+            achievement = (target / actual * 100) if actual != 0 else None
+            below_target = actual > float(target)
+            status = "Above target" if not below_target else "Below target"
+        else:
+            gap = actual - float(target)
+            achievement = (actual / target * 100) if target != 0 else None
+            below_target = actual < float(target)
+            status = "Below target" if below_target else "At/above target"
+
+        rows.append({
+            "Indicator": indicator,
+            "Data field": str(actual_col),
+            "Target": float(target),
+            "Actual": actual,
+            "Achievement %": achievement,
+            "Gap": gap,
+            "Direction": direction or "Higher is better",
+            "Status": status,
+            "Valid observations": int(values.count()),
+            "Missing observations": int(df[actual_col].isna().sum()),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def _chat_performance_from_long_data(df):
+    """
+    Build indicator-level target-vs-actual performance when Target and Actual
+    exist as columns in a long-form dataset.
+    """
+    target_col = _meal_col(df, [
+        r"^target$", r"annual target", r"monthly target",
+        r"quarter target", r"planned", r"goal"
+    ])
+    actual_col = _meal_col(df, [
+        r"^actual$", r"achievement", r"result",
+        r"reported value", r"actual value", r"^value$"
+    ], exclude=[target_col] if target_col else [])
+
+    indicator_col = _chat_find_indicator_column(df)
+
+    if not target_col or not actual_col or not indicator_col:
+        return pd.DataFrame()
+
+    work = df[[indicator_col, target_col, actual_col]].copy()
+    work[target_col] = pd.to_numeric(work[target_col], errors="coerce")
+    work[actual_col] = pd.to_numeric(work[actual_col], errors="coerce")
+    work = work.dropna(subset=[indicator_col, target_col, actual_col])
+
+    if work.empty:
+        return pd.DataFrame()
+
+    rows = []
+    for indicator, grp in work.groupby(indicator_col, dropna=False):
+        target_values = grp[target_col].dropna()
+        actual_values = grp[actual_col].dropna()
+        if target_values.empty or actual_values.empty:
+            continue
+
+        # If target values are percentages/rates, use mean. For volume targets,
+        # aggregate the rows. This preserves the reporting grain.
+        target_value = (
+            float(target_values.mean())
+            if float(target_values.max()) <= 100
+            else float(target_values.sum())
+        )
+        actual_value = (
+            float(actual_values.mean())
+            if target_value <= 100
+            else float(actual_values.sum())
+        )
+
+        achievement = (
+            actual_value / target_value * 100
+            if target_value != 0 else None
+        )
+        gap = actual_value - target_value
+        below = actual_value < target_value
+
+        rows.append({
+            "Indicator": str(indicator),
+            "Data field": str(actual_col),
+            "Target": target_value,
+            "Actual": actual_value,
+            "Achievement %": achievement,
+            "Gap": gap,
+            "Direction": "Higher is better",
+            "Status": "Below target" if below else "At/above target",
+            "Valid observations": int(actual_values.count()),
+            "Missing observations": int(grp[actual_col].isna().sum()),
+        })
+
+    return pd.DataFrame(rows)
+
+
+def _chat_performance_report_data(df, quality_issues=None):
+    """
+    Deterministic performance engine for chatbot requests such as:
+    'Performance: Which indicators are below target and why?'
+
+    Returns the full performance table, below-target subset and evidence-based
+    explanations. It never claims causality from descriptive dashboard data.
+    """
+    result = _chat_performance_from_results_framework(df)
+
+    if result.empty:
+        result = _chat_performance_from_long_data(df)
+
+    if result.empty:
+        # Fall back to the existing target/actual engine. This is still useful
+        # for datasets where the reporting grain is one record per observation.
+        try:
+            performance, meta = build_meal_performance(df)
+        except Exception:
+            performance, meta = pd.DataFrame(), {}
+
+        if not performance.empty:
+            result = performance.copy()
+            result.insert(0, "Indicator", [
+                f"Performance record {i + 1}"
+                for i in range(len(result))
+            ])
+            result["Valid observations"] = 1
+            result["Missing observations"] = 0
+            result["Direction"] = "Higher is better"
+
+    if result.empty:
+        return {
+            "status": "NOT_AVAILABLE",
+            "all": pd.DataFrame(),
+            "below": pd.DataFrame(),
+            "report": (
+                "## Performance Report\n\n"
+                "The loaded dataset does not contain enough information to "
+                "identify indicators below target. A target and actual value "
+                "could not be reliably matched to an indicator.\n\n"
+                "**Required evidence:** an indicator name plus target and "
+                "actual/result values, or a configured Results Framework "
+                "target that matches a loaded indicator field."
+            ),
+        }
+
+    result["Achievement %"] = pd.to_numeric(result["Achievement %"], errors="coerce")
+    result["Target"] = pd.to_numeric(result["Target"], errors="coerce")
+    result["Actual"] = pd.to_numeric(result["Actual"], errors="coerce")
+    result["Gap"] = pd.to_numeric(result["Gap"], errors="coerce")
+
+    below_mask = result["Status"].astype(str).str.contains(
+        "Below target", case=False, na=False
+    )
+    below = result.loc[below_mask].copy()
+
+    # Build evidence-based explanations for "why".
+    quality_text = []
+    for issue in (quality_issues or []):
+        if isinstance(issue, dict):
+            quality_text.append(
+                " ".join(str(issue.get(k, "")) for k in (
+                    "Priority", "Domain", "Issue", "Column",
+                    "Impact", "Recommendation"
+                ))
+            )
+    quality_blob = " ".join(quality_text).lower()
+
+    explanation_rows = []
+    for _, row in below.iterrows():
+        indicator = str(row.get("Indicator", "Indicator"))
+        data_field = str(row.get("Data field", ""))
+        reasons = []
+
+        if int(row.get("Missing observations", 0) or 0) > 0:
+            reasons.append(
+                f"{int(row['Missing observations']):,} missing observations "
+                "could reduce the reported result."
+            )
+
+        if data_field and data_field.lower() in quality_blob:
+            reasons.append(
+                "The data-quality findings include an issue linked to the "
+                "indicator/data field."
+            )
+
+        # Do not invent a programme cause. Give management hypotheses to verify.
+        if not reasons:
+            reasons.append(
+                "The dashboard demonstrates a target gap, but it does not "
+                "contain enough causal evidence to say why the gap occurred."
+            )
+
+        reasons.append(
+            "Verify reporting completeness, service delivery volume, "
+            "target assumptions, denominator/eligibility definitions and "
+            "local implementation constraints with the responsible team."
+        )
+
+        explanation_rows.append({
+            "Indicator": indicator,
+            "Why / evidence": " ".join(reasons),
+        })
+
+    if explanation_rows:
+        reasons_df = pd.DataFrame(explanation_rows)
+        below = below.merge(reasons_df, on="Indicator", how="left")
+    else:
+        below["Why / evidence"] = "No indicators are below target."
+
+    # Management report text.
+    report_lines = [
+        "## 📊 Performance Report — Indicators Below Target",
+        "",
+        f"**Indicators assessed:** {len(result):,}",
+        f"**Indicators below target:** {len(below):,}",
+        "",
+    ]
+
+    if below.empty:
+        report_lines.extend([
+            "### Overall finding",
+            "",
+            "No indicator in the available target-versus-actual evidence is "
+            "below target.",
+            "",
+            "### Management interpretation",
+            "",
+            "Continue routine monitoring and verify that targets, reporting "
+            "completeness and indicator definitions remain appropriate.",
+        ])
+    else:
+        report_lines.extend([
+            "### Indicators below target",
+            "",
+        ])
+        for _, row in below.iterrows():
+            ach = row.get("Achievement %")
+            ach_text = f"{float(ach):.1f}%" if pd.notna(ach) else "not available"
+            report_lines.append(
+                f"- **{row['Indicator']}** — target **{row['Target']:,.2f}**, "
+                f"actual **{row['Actual']:,.2f}**, achievement **{ach_text}**, "
+                f"gap **{row['Gap']:,.2f}**."
+            )
+
+        report_lines.extend([
+            "",
+            "### Why / evidence",
+            "",
+        ])
+        for _, row in below.iterrows():
+            report_lines.append(
+                f"- **{row['Indicator']}:** {row['Why / evidence']}"
+            )
+
+        report_lines.extend([
+            "",
+            "### Programme-management interpretation",
+            "",
+            "The available data confirms a performance gap, but descriptive "
+            "dashboard data alone cannot establish programme causality. "
+            "Management should review the affected reporting units and periods, "
+            "data completeness, denominator/eligibility rules, service delivery "
+            "constraints and whether the approved target remains realistic.",
+            "",
+            "### Recommended actions",
+            "",
+            "1. Validate the target and indicator definition against the approved "
+            "Results Framework/DHIS2 metadata.",
+            "2. Drill down by organisation unit and reporting period to locate "
+            "where the gap is concentrated.",
+            "3. Check data-quality findings before making high-stakes decisions.",
+            "4. Confirm operational explanations with programme and reporting "
+            "teams, then record the agreed corrective action.",
+        ])
+
+    return {
+        "status": "SUCCESS",
+        "all": result,
+        "below": below,
+        "report": "\n".join(report_lines),
+    }
+
+
+def render_chat_performance_visual(report_data):
+    """Render a guaranteed performance graph for a target-gap chat request."""
+    if not isinstance(report_data, dict):
+        return
+
+    below = report_data.get("below")
+    if not isinstance(below, pd.DataFrame) or below.empty:
+        return
+
+    try:
+        import plotly.express as px
+
+        plot_df = below[["Indicator", "Achievement %"]].copy()
+        plot_df["Achievement %"] = pd.to_numeric(
+            plot_df["Achievement %"], errors="coerce"
+        )
+        plot_df = plot_df.dropna(subset=["Achievement %"])
+
+        if plot_df.empty:
+            return
+
+        plot_df = plot_df.sort_values("Achievement %", ascending=True)
+
+        fig = px.bar(
+            plot_df,
+            x="Achievement %",
+            y="Indicator",
+            orientation="h",
+            title="Indicators Below Target — Achievement vs 100% Target",
+            text="Achievement %",
+        )
+        fig.add_vline(
+            x=100,
+            line_dash="dash",
+            annotation_text="Target = 100%",
+            annotation_position="top",
+        )
+        fig.update_traces(
+            texttemplate="%{text:.1f}%",
+            textposition="outside",
+        )
+        fig.update_layout(
+            template="plotly_white",
+            paper_bgcolor="#ffffff",
+            plot_bgcolor="#ffffff",
+            font=dict(
+                family="Arial, Helvetica, sans-serif",
+                color="#111827",
+            ),
+            margin=dict(l=20, r=50, t=70, b=50),
+            xaxis_title="Achievement (%)",
+            yaxis_title="Indicator",
+        )
+        fig.update_xaxes(
+            showgrid=True,
+            gridcolor="#e5e7eb",
+            zeroline=False,
+            range=[0, max(110, float(plot_df["Achievement %"].max()) * 1.12)],
+        )
+        fig.update_yaxes(
+            automargin=True,
+        )
+
+        st.markdown("### 📈 Performance Gap Graph")
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+            config={"displayModeBar": False, "responsive": True},
+        )
+        st.caption(
+            "The dashed 100% line represents full target achievement. "
+            "Only indicators identified as below target are plotted."
+        )
+    except Exception as exc:
+        st.warning(f"Performance graph could not be rendered: {exc}")
+
+
 def build_analysis_chat_evidence(
     df,
     source_url,
@@ -7031,6 +7703,25 @@ def ask_analysis_chatbot(
     if not question:
         return None
 
+    # ---------------------------------------------------------
+    # PERFORMANCE TARGET-GAP MODE
+    # ---------------------------------------------------------
+    # This mode is deterministic and independent of the manual graph controls.
+    # A request such as "Performance: Which indicators are below target and why?"
+    # must produce BOTH a report and a graph from the current performance evidence.
+    if _chat_performance_intent(question):
+        performance_report = _chat_performance_report_data(
+            df=df,
+            quality_issues=quality_issues,
+        )
+
+        return {
+            "status": performance_report.get("status", "SUCCESS"),
+            "source": "CHAT_PERFORMANCE",
+            "text": performance_report.get("report", ""),
+            "performance_report": performance_report,
+        }
+
     indicators = _chat_indicator_candidates(
         question,
         df,
@@ -7290,12 +7981,13 @@ def render_analysis_chatbot(
     st.markdown(
         """
         <div class="danip-analysis-chat">
-            <div class="chat-kicker">DANIP-NI CONVERSATIONAL ANALYSIS · M&E CHAT v3</div>
+            <div class="chat-kicker">NEXUS AI · CONVERSATIONAL ANALYSIS · M&E CHAT</div>
             <div class="chat-title">💬 Ask questions about this analysis</div>
             <div class="chat-help">
                 Ask follow-up questions about the currently loaded data,
-                indicators, trends, rankings, totals, averages or data quality.
-                Answers are based on the same source and analysis shown above.
+                indicators, performance against target, trends, rankings, totals,
+                averages, data quality or programme management. Performance target-gap
+                questions automatically generate a report and graph from the evidence.
             </div>
         </div>
         """,
@@ -7409,10 +8101,40 @@ def render_analysis_chatbot(
                 quality_issues=quality_issues,
             )
 
-        st.markdown(
-            f'<div class="danip-chat-answer">{answer}</div>',
-            unsafe_allow_html=True,
-        )
+        # Performance questions have a dedicated report + graph response.
+        if result and result.get("source") == "CHAT_PERFORMANCE":
+            # Render Markdown normally so the report headings/bullets are formatted.
+            st.markdown(answer)
+
+            performance_report = result.get("performance_report") or {}
+            render_chat_performance_visual(performance_report)
+
+            performance_table = performance_report.get("below")
+            if isinstance(performance_table, pd.DataFrame) and not performance_table.empty:
+                st.markdown("### 📋 Below-Target Indicator Detail")
+                display_cols = [
+                    c for c in [
+                        "Indicator", "Target", "Actual", "Achievement %",
+                        "Gap", "Direction", "Why / evidence"
+                    ]
+                    if c in performance_table.columns
+                ]
+                st.dataframe(
+                    performance_table[display_cols],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            st.caption(
+                "Performance report and graph are generated deterministically "
+                "from the current dataset/Results Framework. Causal explanations "
+                "are not invented when the data does not support them."
+            )
+        else:
+            st.markdown(
+                f'<div class="danip-chat-answer">{answer}</div>',
+                unsafe_allow_html=True,
+            )
 
         if result and result.get("source") == "OPENAI":
             st.caption(
@@ -7484,7 +8206,7 @@ with st.sidebar:
         )
 
     st.caption(
-        "DANIP AI • Data Intelligence • Data Quality First"
+        "NEXUS AI • Data Intelligence • Evidence First"
     )
 
 
@@ -7500,7 +8222,7 @@ else:
     status_items.append("🟠 DHIS2 credentials required for protected APIs")
 
 if OPENAI_API_KEY:
-    status_items.append("🟢 DANIP-NI automatic intelligence ready")
+    status_items.append("🟢 NEXUS automatic intelligence ready")
 else:
     status_items.append("🟠 AI narrative disabled until OPENAI_API_KEY is added")
 
@@ -7537,9 +8259,9 @@ st.markdown(
     """
     <div class="section-card auto-analysis-card">
         <div class="section-kicker">AUTOMATIC ANALYSIS</div>
-        <div class="section-title">🤖 DANIP-NI will analyze the complete dataset automatically</div>
+        <div class="section-title">🤖 NEXUS AI will analyze the complete dataset automatically</div>
         <div class="section-help">
-            DANIP-NI automatically generates the baseline report and data-quality assessment.
+            NEXUS AI automatically generates the baseline report and data-quality assessment.
             You can optionally select indicators, dimensions, graph type, analysis type and
             aggregation below to run a focused user-requested analysis.
         </div>
@@ -7559,7 +8281,7 @@ if not user_url.strip():
             <div style="font-size:2rem;">📡</div>
             <strong>Ready to analyze your data</strong>
             <div style="margin-top:.35rem;">
-                Paste your data URL and DANIP-NI will automatically build the analysis,
+                Paste your data URL and NEXUS AI will automatically build the analysis,
                 data-quality assessment, dashboard and intelligence report.
             </div>
         </div>
@@ -9641,7 +10363,7 @@ def _meal_build_word_bytes(context, report, performance, results_framework, outc
     section.left_margin = Inches(0.65)
     section.right_margin = Inches(0.65)
 
-    title = doc.add_heading("DANIP-AI MEAL Intelligence & Programme Management Report", 0)
+    title = doc.add_heading("NEXUS AI — MEAL Intelligence & Programme Management Report", 0)
     title.runs[0].font.size = Pt(20)
 
     programme = context.get("Programme / Project", "") or "Programme / Project"
@@ -9694,7 +10416,7 @@ def _meal_build_word_bytes(context, report, performance, results_framework, outc
     doc.add_heading("16. Management Conclusion", level=1)
     doc.add_paragraph(context.get("Management Conclusion", "Edit this conclusion based on programme context, evidence and decisions."))
 
-    doc.add_paragraph("\nGenerated by DANIP-AI. Analytical values are evidence summaries; causal interpretation should use appropriate evaluation evidence.")
+    doc.add_paragraph("\nGenerated by NEXUS AI. Analytical values are evidence summaries; causal interpretation should use appropriate evaluation evidence.")
 
     output = BytesIO()
     doc.save(output)
@@ -10224,7 +10946,7 @@ if automatic_analysis or st.session_state.get("data_loaded", False):
         and isinstance(st.session_state.get("loaded_df"), pd.DataFrame)
     ):
         df = st.session_state["loaded_df"].copy()
-        st.info("♻️ Using the already loaded dataset for automatic DANIP-NI analysis.")
+        st.info("♻️ Using the already loaded dataset for automatic NEXUS AI analysis.")
     else:
         with st.spinner("📥 Retrieving the complete dataset..."):
             try:
