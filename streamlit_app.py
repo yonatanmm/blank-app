@@ -59,7 +59,7 @@ DHIS2_URL = _get_secret(
 # Never hard-code passwords or API keys in source code.
 DHIS2_USERNAME = _get_secret("DHIS2_USERNAME", "data.ai")
 DHIS2_PASSWORD = _get_secret("DHIS2_PASSWORD", "Data.ai@2025")
-OPENAI_API_KEY = _get_secret("OPENAI_API_KEY", "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")
+OPENAI_API_KEY = _get_secret("OPENAI_API_KEY", "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")
 OPENAI_MODEL = _get_secret("OPENAI_MODEL", "gpt-5")
 
 
