@@ -57,9 +57,9 @@ DHIS2_URL = _get_secret(
 # Local: .env beside this file.
 # Streamlit Cloud: App settings -> Secrets.
 # Never hard-code passwords or API keys in source code.
-DHIS2_USERNAME = _get_secret("DHIS2_USERNAME", "data.ai")
-DHIS2_PASSWORD = _get_secret("DHIS2_PASSWORD", "Data.ai@2025")
-OPENAI_API_KEY = _get_secret("OPENAI_API_KEY", "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")
+DHIS2_USERNAME = _get_secret("DHIS2_USERNAME", "")
+DHIS2_PASSWORD = _get_secret("DHIS2_PASSWORD", "")
+OPENAI_API_KEY = _get_secret("OPENAI_API_KEY", "")
 OPENAI_MODEL = _get_secret("OPENAI_MODEL", "gpt-5")
 
 
@@ -1266,7 +1266,7 @@ if not DHIS2_PASSWORD:
     missing.append("Data.ai@2025")
 
 if not OPENAI_API_KEY:
-    missing.append("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")
+    missing.append("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")
 
 if missing:
     st.warning(
@@ -7670,6 +7670,86 @@ If no credible source is found, say so explicitly.
         "error": error_text,
     }
 
+def research_mne_external_context(question, indicators=None):
+    """Automatically retrieve authoritative external M&E context for every analysis question.
+
+    Dashboard/DHIS2 values remain the numerical source of truth. External web evidence is
+    used only for indicator meaning, programme relevance, standards/guidance and context.
+    """
+    if client is None:
+        return {
+            "status": "DISABLED",
+            "sources": [],
+            "text": "No external source could be queried because OPENAI_API_KEY is not configured.",
+        }
+
+    indicators = indicators or []
+    indicator_text = "\n".join(f"- {str(x)}" for x in indicators[:5]) or "- No specific indicator confidently identified."
+
+    prompt = f"""
+You are the external evidence layer for a DHIS2 nutrition/public-health M&E analysis.
+
+Use web search for this request. Find authoritative external evidence that helps interpret the
+indicator(s) and the M&E question. The external evidence must NOT replace or modify any dashboard
+number.
+
+USER QUESTION:
+{question}
+
+CURRENT INDICATORS:
+{indicator_text}
+
+SOURCE PRIORITY:
+1. WHO / data.who.int
+2. UNICEF / data.unicef.org
+3. UNFPA / data.unfpa.org
+4. United Nations / UN Statistics
+5. World Bank
+6. Nutrition International
+7. DHIS2 / DHIS2 documentation
+8. Other major public-health institutions only when the above do not provide a suitable source
+
+MATCHING RULES:
+- Prefer sources whose population, timing, definition and measurement match the indicator.
+- Label a source EXACT MATCH only when the definition is materially aligned.
+- Otherwise label it RELATED MATCH.
+- Never invent a definition, target, benchmark, statistic, publication or URL.
+- Do not use dashboard values as external evidence.
+- Do not use external evidence to cap, recalculate, replace or alter dashboard values.
+- Do not infer programme causality from descriptive dashboard data.
+- If no suitable source is found, explicitly state: NO VERIFIED EXTERNAL MATCH.
+
+Return concise evidence with organization, publication/title, date/year when available, match status,
+key contextual point, relevance to M&E interpretation, and source URL when available.
+"""
+
+    try:
+        response = client.responses.create(
+            model=OPENAI_MODEL,
+            tools=[{
+                "type": "web_search",
+                "search_context_size": "high",
+                "filters": {"allowed_domains": EXTERNAL_EVIDENCE_DOMAINS},
+            }],
+            input=prompt,
+        )
+        answer = (response.output_text or "").strip()
+        urls = _extract_response_urls(response)
+        if not answer:
+            answer = "NO VERIFIED EXTERNAL MATCH."
+        return {
+            "status": "SUCCESS",
+            "sources": urls[:12],
+            "text": answer,
+        }
+    except Exception as exc:
+        return {
+            "status": "ERROR",
+            "sources": [],
+            "text": "External evidence search could not be completed: " + str(exc)[-1500:],
+        }
+
+
 def ask_analysis_chatbot(
     user_question,
     df,
@@ -7737,6 +7817,13 @@ def ask_analysis_chatbot(
             if isinstance(chart_plan, dict)
             else []
         )
+
+    # Always retrieve authoritative external context for M&E interpretation.
+    # This does not change any dashboard values or deterministic calculations.
+    external_context = research_mne_external_context(
+        question=question,
+        indicators=indicators,
+    )
 
     # Always prepare a deterministic fallback first.
     local_answer = _chat_local_mne_answer(
@@ -7854,6 +7941,11 @@ NON-NEGOTIABLE RULES:
     a target or benchmark is supplied. Instead say whether the observed pattern
     warrants routine monitoring or investigation.
 17. Keep the response concise but substantive.
+18. External authoritative evidence is REQUIRED for M&E interpretation whenever a relevant source is available.
+19. Clearly separate dashboard findings from external evidence.
+20. Do not present external context as if it were a DANIP/DHIS2 value.
+21. Include a short **External evidence** section with the organization/publication and source link(s) when available.
+22. If no suitable external source is available, explicitly say **NO VERIFIED EXTERNAL MATCH** rather than inventing one.
 
 CURRENT SOURCE:
 {source_url}
@@ -7866,6 +7958,9 @@ RECENT CHAT:
 
 M&E INDICATOR CONTEXT AND DETERMINISTIC EVIDENCE:
 {safe_json_dumps(evidence)}
+
+AUTHORITATIVE EXTERNAL EVIDENCE (CONTEXT ONLY — NEVER MODIFY DASHBOARD VALUES):
+{safe_json_dumps(external_context)}
 
 Use this response structure when appropriate:
 
@@ -7882,6 +7977,9 @@ Use this response structure when appropriate:
 ...
 
 **Data quality note**
+...
+
+**External evidence**
 ...
 
 Do not include sections that are not relevant.
@@ -7902,16 +8000,28 @@ Do not include sections that are not relevant.
         try:
             response = client.responses.create(
                 model=model,
+                tools=[{
+                    "type": "web_search",
+                    "search_context_size": "high",
+                    "filters": {"allowed_domains": EXTERNAL_EVIDENCE_DOMAINS},
+                }],
                 input=prompt,
             )
 
             answer = (response.output_text or "").strip()
             if answer:
+                response_urls = _extract_response_urls(response)
+                combined_sources = []
+                for url in (response_urls + (external_context.get("sources") or [])):
+                    if url and url not in combined_sources:
+                        combined_sources.append(url)
                 return {
                     "status": "SUCCESS",
                     "source": "OPENAI_M_AND_E",
                     "model": model,
                     "text": answer,
+                    "sources": combined_sources[:15],
+                    "external_context": external_context,
                 }
 
             api_errors.append(f"{model}: empty response")
@@ -7939,11 +8049,7 @@ Do not include sections that are not relevant.
     return {
         "status": "FALLBACK",
         "source": "LOCAL_M_AND_E",
-        "text": local_answer + (
-            "\n\n*ChatGPT interpretation was unavailable for this request, "
-            "so the answer above uses the dashboard's deterministic M&E "
-            "evidence and indicator context.*"
-        ),
+        "text": local_answer,
         "error": " | ".join(api_errors)[-3000:],
     }
 
@@ -8136,14 +8242,20 @@ def render_analysis_chatbot(
                 unsafe_allow_html=True,
             )
 
-        if result and result.get("source") == "OPENAI":
+        if result and result.get("sources"):
+            st.markdown("**🌐 External sources used**")
+            for url in result.get("sources", [])[:10]:
+                st.markdown(f"- {url}")
+
+        if result and result.get("source") in ("OPENAI", "OPENAI_M_AND_E"):
             st.caption(
-                "Numerical answers are grounded in deterministic Python evidence "
-                "from the current dataset."
+                "Numerical answers are grounded in deterministic Python evidence. "
+                "External sources are used only for M&E context and interpretation."
             )
         elif result and result.get("source") in ("LOCAL", "LOCAL_M_AND_E"):
             st.caption(
-                "M&E answer grounded in the currently loaded dataset and deterministic analysis evidence."
+                "M&E answer grounded in the currently loaded dataset and deterministic analysis evidence. "
+                "External evidence was unavailable for this fallback response."
             )
 
     st.session_state["analysis_chat_messages"].append(
