@@ -6,6 +6,8 @@ import re
 import json
 import time
 import textwrap
+import sqlite3
+from datetime import datetime
 from io import BytesIO, StringIO
 from urllib.parse import urlparse, urlunparse
 
@@ -15,6 +17,17 @@ import requests
 import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI
+
+# Optional Word export dependency. Excel export uses pandas/openpyxl.
+try:
+    from docx import Document
+    from docx.shared import Inches, Pt
+    WORD_EXPORT_AVAILABLE = True
+except Exception:
+    Document = None
+    Inches = None
+    Pt = None
+    WORD_EXPORT_AVAILABLE = False
 
 
 # ============================================================
@@ -42,9 +55,12 @@ DHIS2_URL = _get_secret(
 
 # Read secrets from Streamlit Cloud first, then local environment/.env.
 # IMPORTANT: never hard-code API keys or passwords in this source file.
+# Read all credentials through the same secure helper.
+# This allows Streamlit Cloud Secrets and local .env/environment variables
+# to work consistently. No API key or password is hard-coded in the app.
 DHIS2_USERNAME = os.getenv("DHIS2_USERNAME", "data.ai").strip()
 DHIS2_PASSWORD = os.getenv("DHIS2_PASSWORD", "Data.ai@2025").strip()
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "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").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "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").strip()
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5").strip()
 
 
@@ -1104,11 +1120,14 @@ def show_ai_error(error):
             "The data-quality and deterministic analysis pipeline can still "
             "process the loaded data, but AI interpretation requires API access."
         )
-    elif "invalid_api_key" in message or "401" in message:
+    elif "invalid_api_key" in message or "incorrect api key" in message.lower() or "401" in message:
         st.error(
-            "🔑 OpenAI rejected the API key. Create a new API key and update "
-            "OPENAI_API_KEY in Streamlit Cloud → App settings → Secrets. "
-            "Do not put the key inside streamlit_app.py."
+            "🔑 OpenAI rejected the API key. The chatbot's AI/web-research "
+            "features cannot authenticate until OPENAI_API_KEY is corrected."
+        )
+        st.info(
+            "Update OPENAI_API_KEY in Streamlit Cloud → App settings → Secrets "
+            "or in the local .env file. Restart Streamlit after changing it."
         )
     elif "429" in message:
         st.warning("⏳ The AI service is temporarily rate-limited.")
@@ -6843,6 +6862,10 @@ If no credible source is found, say so explicitly.
     # Keep the first attempt deliberately simple. This avoids failures
     # caused by unsupported filter syntax in older OpenAI SDK versions.
     # ------------------------------------------------------------
+    # OpenAI currently exposes the stable Responses API web-search tool as
+    # ``web_search``. Keep the older ``web_search_preview`` as a compatibility
+    # fallback for environments whose SDK/API endpoint still exposes only the
+    # preview tool.
     search_attempts = [
         (
             "web_search",
@@ -9167,6 +9190,992 @@ def render_complete_dataset_table(df, source_url=None):
         st.dataframe(column_info, use_container_width=True, hide_index=True)
 
 
+
+# ============================================================
+# MEAL INTELLIGENCE LAYER — ADDITIVE MODULE
+# ============================================================
+# This section is intentionally self-contained.
+# It reads the loaded dataframe and stores MEAL registers in
+# Streamlit session state only. It does not alter existing
+# DHIS2 retrieval, calculations, charts, quality scores or AI.
+# ============================================================
+
+def _meal_col(df, patterns, exclude=None):
+    exclude = set(exclude or [])
+    for c in df.columns:
+        if c in exclude:
+            continue
+        n = re.sub(r"[^a-z0-9]+", " ", str(c).lower()).strip()
+        if any(re.search(p, n) for p in patterns):
+            return c
+    return None
+
+
+def _meal_num(s):
+    return pd.to_numeric(s, errors="coerce")
+
+
+def _meal_pct(a, t):
+    try:
+        a, t = float(a), float(t)
+        return None if t == 0 else a / t * 100
+    except Exception:
+        return None
+
+
+def _meal_status(pct, direction="Higher is better"):
+    if pct is None or not pd.notna(pct):
+        return "⚪ No target"
+    if direction == "Lower is better":
+        if pct <= 100:
+            return "🟢 On track"
+        if pct <= 120:
+            return "🟡 Attention"
+        return "🔴 Off track"
+    if pct >= 90:
+        return "🟢 On track"
+    if pct >= 75:
+        return "🟡 Attention"
+    return "🔴 Off track"
+
+
+def _meal_period_column(df):
+    return find_period_column(df) or _meal_col(
+        df, [r"month", r"reporting date", r"event date", r"year"]
+    )
+
+
+# ============================================================
+# MEAL PERSISTENT STORAGE — SQLITE
+# ============================================================
+# Session state is only a UI cache. SQLite is the persistent source
+# for manually maintained MEAL registers, so records survive refresh,
+# browser reloads and Streamlit reruns.
+MEAL_DB_PATH = os.path.join(BASE_DIR, "danip_meal.db")
+
+_MEAL_TABLE_COLUMNS = {
+    "meal_results_framework": [
+        "Indicator", "Result Level", "Baseline", "Target",
+        "Direction", "Frequency", "Responsible", "Definition", "Status"
+    ],
+    "meal_actions": [
+        "Finding", "Action", "Owner", "Due Date", "Priority", "Status"
+    ],
+    "meal_learning": [
+        "Learning", "Evidence", "Decision", "Adaptation", "Owner", "Date", "Status"
+    ],
+    "meal_feedback": [
+        "Date", "Location", "Category", "Priority", "Feedback",
+        "Owner", "Response Date", "Status", "Resolution"
+    ],
+    "meal_risks": [
+        "Risk / Assumption", "Evidence", "Likelihood", "Impact",
+        "Mitigation", "Owner", "Status"
+    ],
+    "meal_project_context": [
+        "Programme / Project", "Country / Location", "Reporting Period",
+        "Donor / Funding", "Prepared By", "Programme Context",
+        "Executive Summary", "Key Challenges", "Key Recommendations",
+        "Management Conclusion"
+    ],
+}
+
+
+def _meal_db_connect():
+    conn = sqlite3.connect(MEAL_DB_PATH, timeout=15)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS meal_registers (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            register TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+    """)
+    conn.commit()
+    return conn
+
+
+def _meal_db_load(register):
+    columns = _MEAL_TABLE_COLUMNS[register]
+    try:
+        conn = _meal_db_connect()
+        rows = conn.execute(
+            "SELECT id, payload FROM meal_registers WHERE register=? ORDER BY id",
+            (register,)
+        ).fetchall()
+        conn.close()
+        if not rows:
+            return pd.DataFrame(columns=columns)
+
+        data = []
+        for record_id, payload in rows:
+            try:
+                item = json.loads(payload)
+            except Exception:
+                item = {}
+            item = {c: item.get(c, "") for c in columns}
+            item["_MEAL_ID"] = record_id
+            data.append(item)
+        return pd.DataFrame(data, columns=["_MEAL_ID"] + columns)
+    except Exception as exc:
+        st.warning(f"MEAL persistent storage could not be loaded: {exc}")
+        return pd.DataFrame(columns=columns)
+
+
+def _meal_db_replace(register, df):
+    """Persist the complete current register while retaining stable IDs when possible."""
+    columns = _MEAL_TABLE_COLUMNS[register]
+    work = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame(columns=columns)
+    for c in columns:
+        if c not in work.columns:
+            work[c] = ""
+    work = work[columns + (["_MEAL_ID"] if "_MEAL_ID" in work.columns else [])].copy()
+
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    try:
+        conn = _meal_db_connect()
+        existing_ids = set(
+            r[0] for r in conn.execute(
+                "SELECT id FROM meal_registers WHERE register=?", (register,)
+            ).fetchall()
+        )
+        kept_ids = set()
+
+        for _, row in work.iterrows():
+            payload = {}
+            for c in columns:
+                value = row.get(c, "")
+                if pd.isna(value):
+                    value = ""
+                payload[c] = str(value)
+
+            rid = row.get("_MEAL_ID", None)
+            try:
+                rid = int(rid) if pd.notna(rid) else None
+            except Exception:
+                rid = None
+
+            if rid and rid in existing_ids:
+                conn.execute(
+                    "UPDATE meal_registers SET payload=?, updated_at=? WHERE id=? AND register=?",
+                    (json.dumps(payload, ensure_ascii=False), now, rid, register),
+                )
+                kept_ids.add(rid)
+            else:
+                cur = conn.execute(
+                    "INSERT INTO meal_registers(register,payload,created_at,updated_at) VALUES(?,?,?,?)",
+                    (register, json.dumps(payload, ensure_ascii=False), now, now),
+                )
+                kept_ids.add(cur.lastrowid)
+
+        for rid in existing_ids - kept_ids:
+            conn.execute("DELETE FROM meal_registers WHERE id=? AND register=?", (rid, register))
+        conn.commit()
+        conn.close()
+    except Exception as exc:
+        st.error(f"Unable to save MEAL register '{register}': {exc}")
+
+
+def _meal_db_add(register, record):
+    """Insert one MEAL record and return its database ID."""
+    columns = _MEAL_TABLE_COLUMNS[register]
+    payload = {}
+    for c in columns:
+        value = record.get(c, "")
+        if pd.isna(value):
+            value = ""
+        payload[c] = str(value)
+    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    try:
+        conn = _meal_db_connect()
+        cur = conn.execute(
+            "INSERT INTO meal_registers(register,payload,created_at,updated_at) VALUES(?,?,?,?)",
+            (register, json.dumps(payload, ensure_ascii=False), now, now),
+        )
+        conn.commit()
+        rid = cur.lastrowid
+        conn.close()
+        return rid
+    except Exception as exc:
+        st.error(f"Unable to save MEAL record: {exc}")
+        return None
+
+
+def _meal_persistent_df(register):
+    return _meal_db_load(register)
+
+
+def _meal_init_state():
+    defaults = {
+        "meal_results_framework": pd.DataFrame(columns=_MEAL_TABLE_COLUMNS["meal_results_framework"]),
+        "meal_actions": pd.DataFrame(columns=_MEAL_TABLE_COLUMNS["meal_actions"]),
+        "meal_learning": pd.DataFrame(columns=_MEAL_TABLE_COLUMNS["meal_learning"]),
+        "meal_feedback": pd.DataFrame(columns=_MEAL_TABLE_COLUMNS["meal_feedback"]),
+        "meal_risks": pd.DataFrame(columns=_MEAL_TABLE_COLUMNS["meal_risks"]),
+        "meal_project_context": pd.DataFrame(columns=_MEAL_TABLE_COLUMNS["meal_project_context"]),
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            stored = _meal_persistent_df(key)
+            st.session_state[key] = stored if not stored.empty else value.copy()
+
+
+def build_meal_performance(df):
+    if df.empty:
+        return pd.DataFrame(), {}
+    target = _meal_col(df, [
+        r"^target$", r"annual target", r"monthly target",
+        r"quarter target", r"planned", r"goal"
+    ])
+    actual = _meal_col(df, [
+        r"^actual$", r"achievement", r"result", r"reported value",
+        r"actual value", r"^value$"
+    ], exclude=[target] if target else [])
+    if not target or not actual:
+        return pd.DataFrame(), {
+            "target": target, "actual": actual, "status": "NOT_AVAILABLE"
+        }
+
+    work = pd.DataFrame({
+        "Target": _meal_num(df[target]),
+        "Actual": _meal_num(df[actual]),
+    }).dropna()
+
+    if work.empty:
+        return pd.DataFrame(), {
+            "target": target, "actual": actual, "status": "NO_VALID_DATA"
+        }
+
+    work["Achievement %"] = [
+        _meal_pct(a, t) for a, t in zip(work["Actual"], work["Target"])
+    ]
+    work["Gap"] = work["Actual"] - work["Target"]
+    work["Status"] = work["Achievement %"].apply(_meal_status)
+    return work, {
+        "target": str(target), "actual": str(actual),
+        "status": "SUCCESS", "records": len(work)
+    }
+
+
+def build_meal_equity(df):
+    dimensions = {
+        "Sex / Gender": [r"^sex$", r"gender"],
+        "Age / Age Group": [r"^age$", r"age group", r"age_group"],
+        "Geography": [
+            r"district", r"region", r"province", r"county",
+            r"zone", r"woreda", r"location"
+        ],
+        "Organisation Unit": [
+            r"organisation unit", r"organization unit",
+            r"org unit", r"orgunit", r"facility"
+        ],
+        "Population Group": [
+            r"population group", r"beneficiary group", r"target group"
+        ],
+        "Disability": [r"disability", r"functional difficulty"],
+        "Vulnerability": [r"vulnerab", r"refugee", r"displaced", r"migrant"],
+    }
+    return {
+        label: _meal_col(df, pats)
+        for label, pats in dimensions.items()
+        if _meal_col(df, pats)
+    }
+
+
+def build_meal_outcome_change(df):
+    period = _meal_period_column(df)
+    if not period:
+        return pd.DataFrame(), "NO_PERIOD"
+
+    work = df.copy()
+    parsed = pd.to_datetime(work[period], errors="coerce")
+
+    # Support common DHIS2 monthly period codes such as 2025Jan.
+    if parsed.notna().sum() < 2:
+        parsed = pd.to_datetime(
+            work[period].astype(str).str.replace(
+                r"^(\d{4})([A-Za-z]{3})$", r"\1-\2-01", regex=True
+            ),
+            errors="coerce"
+        )
+
+    work["__meal_date"] = parsed
+    work = work.dropna(subset=["__meal_date"]).sort_values("__meal_date")
+    if work.empty or work["__meal_date"].nunique() < 2:
+        return pd.DataFrame(), "INSUFFICIENT_PERIODS"
+
+    first_date = work["__meal_date"].min()
+    last_date = work["__meal_date"].max()
+    first = work[work["__meal_date"] == first_date]
+    last = work[work["__meal_date"] == last_date]
+
+    rows = []
+    for c in get_numeric_columns(df):
+        a = _meal_num(first[c]).dropna()
+        b = _meal_num(last[c]).dropna()
+        if a.empty or b.empty:
+            continue
+        av, bv = float(a.mean()), float(b.mean())
+        rows.append({
+            "Indicator / Field": str(c),
+            "First Period": str(first_date.date()),
+            "Latest Period": str(last_date.date()),
+            "First Value": av,
+            "Latest Value": bv,
+            "Absolute Change": bv - av,
+            "% Change": ((bv - av) / abs(av) * 100) if av else None,
+            "Direction": "Improved" if bv > av else "Declined" if bv < av else "No change",
+        })
+    return pd.DataFrame(rows), "SUCCESS" if rows else "NO_NUMERIC_INDICATORS"
+
+
+def build_meal_indicator_registry(df):
+    numeric = get_numeric_columns(df)
+    period = _meal_period_column(df)
+    ou = find_ou_column(df)
+    source = _meal_col(df, [r"data source", r"source"])
+    numerator = _meal_col(df, [r"numerator"])
+    denominator = _meal_col(df, [r"denominator"])
+
+    rows = []
+    for c in numeric:
+        rows.append({
+            "Indicator / Field": str(c),
+            "Numeric": "Yes",
+            "Reporting Period": str(period) if period else "Not detected",
+            "Organisation Unit": str(ou) if ou else "Not detected",
+            "Data Source": str(source) if source else "Not detected",
+            "Numerator": str(numerator) if numerator else "Not detected",
+            "Denominator": str(denominator) if denominator else "Not detected",
+            "Definition": "User/configuration required",
+        })
+    return pd.DataFrame(rows)
+
+
+def _meal_download(df, filename, label):
+    if isinstance(df, pd.DataFrame) and not df.empty:
+        st.download_button(
+            label, df.to_csv(index=False).encode("utf-8"),
+            filename, "text/csv", use_container_width=True,
+            key=f"meal_dl_{filename.replace('.', '_')}"
+        )
+
+
+
+def _meal_context_record():
+    """Return the single persistent project/programme context record."""
+    stored = _meal_persistent_df("meal_project_context")
+    if stored.empty:
+        return {c: "" for c in _MEAL_TABLE_COLUMNS["meal_project_context"]}
+    row = stored.iloc[0].to_dict()
+    return {c: ("" if pd.isna(row.get(c, "")) else str(row.get(c, ""))) for c in _MEAL_TABLE_COLUMNS["meal_project_context"]}
+
+
+def _meal_save_context(record):
+    """Persist project/programme reporting context as a single editable record."""
+    context_df = pd.DataFrame([record], columns=_MEAL_TABLE_COLUMNS["meal_project_context"])
+    _meal_db_replace("meal_project_context", context_df)
+    st.session_state["meal_project_context"] = _meal_persistent_df("meal_project_context")
+
+
+def _meal_build_excel_bytes(sheets):
+    """Build an editable multi-sheet Excel MEAL report."""
+    output = BytesIO()
+    try:
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            for name, frame in sheets.items():
+                safe_name = re.sub(r"[\\/*?:\[\]]", "-", str(name))[:31] or "Sheet"
+                data = frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame(frame)
+                data.to_excel(writer, sheet_name=safe_name, index=False)
+                ws = writer.book[safe_name]
+                ws.freeze_panes = "A2"
+                for col_cells in ws.columns:
+                    max_len = 0
+                    col_letter = col_cells[0].column_letter
+                    for cell in col_cells[:200]:
+                        value = "" if cell.value is None else str(cell.value)
+                        max_len = max(max_len, len(value))
+                    ws.column_dimensions[col_letter].width = min(max(max_len + 2, 12), 45)
+    except Exception as exc:
+        raise RuntimeError(f"Excel export failed: {exc}") from exc
+    return output.getvalue()
+
+
+def _meal_add_word_table(doc, title, frame, max_rows=200):
+    """Add a readable editable Word table from a dataframe."""
+    if not isinstance(frame, pd.DataFrame):
+        frame = pd.DataFrame(frame)
+    doc.add_heading(str(title), level=2)
+    if frame.empty:
+        doc.add_paragraph("No records available.")
+        return
+    display = frame.drop(columns=["_MEAL_ID"], errors="ignore").copy().head(max_rows)
+    table = doc.add_table(rows=1, cols=len(display.columns))
+    table.style = "Table Grid"
+    for i, col in enumerate(display.columns):
+        table.rows[0].cells[i].text = str(col)
+    for _, row in display.iterrows():
+        cells = table.add_row().cells
+        for i, col in enumerate(display.columns):
+            value = row.get(col, "")
+            if pd.isna(value):
+                value = ""
+            cells[i].text = str(value)
+    if len(frame) > max_rows:
+        doc.add_paragraph(f"Note: Word table limited to first {max_rows:,} rows. Full data is available in the Excel export.")
+
+
+def _meal_build_word_bytes(context, report, performance, results_framework, outcome,
+                           equity_tables, registry, feedback, learning, actions, risks,
+                           quality_issues, complete_data=None):
+    """Build an editable Word MEAL report containing context, findings and registers."""
+    if not WORD_EXPORT_AVAILABLE:
+        raise RuntimeError("Word export requires python-docx. Install it with: pip install python-docx")
+
+    doc = Document()
+    section = doc.sections[0]
+    section.top_margin = Inches(0.65)
+    section.bottom_margin = Inches(0.65)
+    section.left_margin = Inches(0.65)
+    section.right_margin = Inches(0.65)
+
+    title = doc.add_heading("DANIP-AI MEAL Intelligence & Programme Management Report", 0)
+    title.runs[0].font.size = Pt(20)
+
+    programme = context.get("Programme / Project", "") or "Programme / Project"
+    period = context.get("Reporting Period", "")
+    location = context.get("Country / Location", "")
+    doc.add_paragraph(f"Programme/Project: {programme}")
+    if location:
+        doc.add_paragraph(f"Country / Location: {location}")
+    if period:
+        doc.add_paragraph(f"Reporting Period: {period}")
+    if context.get("Donor / Funding"):
+        doc.add_paragraph(f"Donor / Funding: {context['Donor / Funding']}")
+    if context.get("Prepared By"):
+        doc.add_paragraph(f"Prepared By: {context['Prepared By']}")
+
+    doc.add_heading("1. Programme Context", level=1)
+    doc.add_paragraph(context.get("Programme Context", "Edit this section to describe the programme context, implementation setting, target population and reporting purpose."))
+
+    doc.add_heading("2. Executive Summary", level=1)
+    doc.add_paragraph(context.get("Executive Summary", "Edit this section to provide the programme-specific management summary."))
+
+    _meal_add_word_table(doc, "3. Evidence Snapshot", report, max_rows=50)
+    _meal_add_word_table(doc, "4. Target vs Actual Performance", performance, max_rows=200)
+    _meal_add_word_table(doc, "5. Results Framework / Logframe", results_framework, max_rows=200)
+    _meal_add_word_table(doc, "6. Outcome Monitoring & Change", outcome, max_rows=200)
+
+    doc.add_heading("7. Equity & Disaggregation", level=1)
+    if equity_tables:
+        for name, frame in equity_tables.items():
+            _meal_add_word_table(doc, name, frame, max_rows=100)
+    else:
+        doc.add_paragraph("No standard equity/disaggregation fields were detected.")
+
+    _meal_add_word_table(doc, "8. Indicator Registry", registry, max_rows=300)
+    _meal_add_word_table(doc, "9. Accountability / Feedback", feedback, max_rows=200)
+    _meal_add_word_table(doc, "10. Learning & Adaptation", learning, max_rows=200)
+    _meal_add_word_table(doc, "11. Action Tracker", actions, max_rows=200)
+    _meal_add_word_table(doc, "12. Risks & Assumptions", risks, max_rows=200)
+
+    doc.add_heading("13. Data Quality Findings", level=1)
+    if quality_issues:
+        _meal_add_word_table(doc, "Priority Data Quality Issues", pd.DataFrame(quality_issues), max_rows=100)
+    else:
+        doc.add_paragraph("No priority data-quality findings were supplied to the MEAL report.")
+
+    doc.add_heading("14. Programme-Specific Challenges", level=1)
+    doc.add_paragraph(context.get("Key Challenges", "Edit this section to capture contextual implementation challenges."))
+    doc.add_heading("15. Key Recommendations", level=1)
+    doc.add_paragraph(context.get("Key Recommendations", "Edit this section to capture programme-specific recommendations and management decisions."))
+    doc.add_heading("16. Management Conclusion", level=1)
+    doc.add_paragraph(context.get("Management Conclusion", "Edit this conclusion based on programme context, evidence and decisions."))
+
+    doc.add_paragraph("\nGenerated by DANIP-AI. Analytical values are evidence summaries; causal interpretation should use appropriate evaluation evidence.")
+
+    output = BytesIO()
+    doc.save(output)
+    return output.getvalue()
+
+
+def _meal_export_bundle(df, performance, registry, outcome, equity, report, quality_issues):
+    """Create the full editable Excel + Word reporting bundle."""
+    context = _meal_context_record()
+    rf = st.session_state.get("meal_results_framework", pd.DataFrame())
+    feedback = st.session_state.get("meal_feedback", pd.DataFrame())
+    learning = st.session_state.get("meal_learning", pd.DataFrame())
+    actions = st.session_state.get("meal_actions", pd.DataFrame())
+    risks = st.session_state.get("meal_risks", pd.DataFrame())
+
+    equity_tables = {}
+    for dim, col in (equity or {}).items():
+        counts = (
+            df[col].astype("string").fillna("Missing / blank")
+            .value_counts(dropna=False)
+            .rename_axis(dim).reset_index(name="Records")
+        )
+        counts["Share %"] = counts["Records"] / max(len(df), 1) * 100
+        equity_tables[f"Equity - {dim}"] = counts
+
+    sheets = {
+        "Project Context": pd.DataFrame([context]),
+        "Executive Review": report,
+        "Performance": performance,
+        "Results Framework": rf.drop(columns=["_MEAL_ID"], errors="ignore"),
+        "Outcomes": outcome,
+        **equity_tables,
+        "Indicator Registry": registry,
+        "Accountability": feedback.drop(columns=["_MEAL_ID"], errors="ignore"),
+        "Learning": learning.drop(columns=["_MEAL_ID"], errors="ignore"),
+        "Actions": actions.drop(columns=["_MEAL_ID"], errors="ignore"),
+        "Risks Assumptions": risks.drop(columns=["_MEAL_ID"], errors="ignore"),
+        "DQ Findings": pd.DataFrame(quality_issues or []),
+    }
+
+    # Keep the full dataset in Excel when it fits within Excel's row limit.
+    excel_max_rows = 1_048_000
+    if isinstance(df, pd.DataFrame):
+        sheets["Complete Data"] = df.head(excel_max_rows).copy()
+        if len(df) > excel_max_rows:
+            sheets["Project Context"] = pd.concat([
+                sheets["Project Context"],
+                pd.DataFrame([{"Programme / Project": f"Complete Data note: {len(df):,} records loaded; Excel export includes first {excel_max_rows:,} rows due to Excel row limits."}])
+            ], ignore_index=True)
+
+    excel_bytes = _meal_build_excel_bytes(sheets)
+    word_bytes = _meal_build_word_bytes(
+        context, report, performance, rf, outcome, equity_tables, registry,
+        feedback, learning, actions, risks, quality_issues, complete_data=df
+    )
+    return excel_bytes, word_bytes
+
+
+def render_meal_intelligence_layer(df, quality_issues=None, quality_summary=None):
+    """Render all additional MEAL functionality without changing the core app."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return
+
+    _meal_init_state()
+
+    performance, pmeta = build_meal_performance(df)
+    equity = build_meal_equity(df)
+    outcome, outcome_status = build_meal_outcome_change(df)
+    registry = build_meal_indicator_registry(df)
+
+    st.markdown("---")
+    st.markdown("## 🧭 MEAL Intelligence & Programme Management")
+    st.caption(
+        "Additive MEAL layer for results monitoring, indicator management, "
+        "equity, outcome change, accountability, learning, action tracking "
+        "and risk/assumption management."
+    )
+    st.caption(f"💾 Persistent MEAL storage: `{os.path.basename(MEAL_DB_PATH)}` — manual MEAL records survive refresh and app reruns.")
+
+    # Executive KPI strip
+    high_q = sum(
+        1 for i in (quality_issues or [])
+        if str(i.get("Priority", "")).upper() == "HIGH"
+    )
+    k = st.columns(6)
+    k[0].metric("MEAL records", f"{len(df):,}")
+    k[1].metric("Indicators", f"{len(registry):,}")
+    k[2].metric("Equity dimensions", f"{len(equity):,}")
+    k[3].metric("Actions", f"{len(st.session_state['meal_actions']):,}")
+    k[4].metric("Learning", f"{len(st.session_state['meal_learning']):,}")
+    k[5].metric("High DQ findings", f"{high_q:,}")
+
+    tabs = st.tabs([
+        "🎯 Performance", "🧩 Results Framework", "📊 Outcomes",
+        "⚖️ Equity", "📖 Indicator Registry", "📣 Accountability",
+        "💡 Learning", "✅ Actions", "⚠️ Risks & Assumptions",
+        "📄 MEAL Report"
+    ])
+
+    # 1 Performance
+    with tabs[0]:
+        st.markdown("### Target vs Actual Performance")
+        if pmeta.get("status") == "SUCCESS":
+            st.caption(
+                f"Detected target: **{pmeta['target']}** | "
+                f"actual: **{pmeta['actual']}**"
+            )
+            avg = performance["Achievement %"].dropna().mean()
+            a, b, c, d = st.columns(4)
+            a.metric("Average achievement", f"{avg:.1f}%")
+            b.metric("On track", int(performance["Status"].eq("🟢 On track").sum()))
+            c.metric("Attention", int(performance["Status"].eq("🟡 Attention").sum()))
+            d.metric("Off track", int(performance["Status"].eq("🔴 Off track").sum()))
+            st.dataframe(
+                performance.style.format({
+                    "Target": "{:,.2f}", "Actual": "{:,.2f}",
+                    "Achievement %": "{:,.1f}%", "Gap": "{:,.2f}"
+                }),
+                use_container_width=True, hide_index=True
+            )
+            _meal_download(performance, "DANIP_MEAL_Performance.csv", "⬇️ Export Performance")
+        else:
+            st.info(
+                "Target/actual performance is not automatically available in this "
+                "dataset. Configure targets in the Results Framework tab."
+            )
+
+    # 2 Results Framework
+    with tabs[1]:
+        st.markdown("### Results Framework / Logframe")
+        st.caption(
+            "Map indicators to Impact, Outcome, Output or Activity and document "
+            "baseline, target, direction, frequency and accountability."
+        )
+        existing = st.session_state["meal_results_framework"]
+        display_existing = existing.drop(columns=["_MEAL_ID"], errors="ignore")
+        edited = st.data_editor(
+            display_existing,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="meal_results_framework_editor"
+        )
+        # Preserve stable database IDs for existing rows and persist edits.
+        edited = edited.copy()
+        if "_MEAL_ID" in existing.columns:
+            old_ids = existing["_MEAL_ID"].tolist()
+            ids = old_ids[:len(edited)] + [None] * max(0, len(edited) - len(old_ids))
+            edited.insert(0, "_MEAL_ID", ids[:len(edited)])
+        st.session_state["meal_results_framework"] = edited.copy()
+        _meal_db_replace("meal_results_framework", edited)
+        _meal_download(edited.drop(columns=["_MEAL_ID"], errors="ignore"), "DANIP_MEAL_Results_Framework.csv", "⬇️ Export Results Framework")
+
+    # 3 Outcomes
+    with tabs[2]:
+        st.markdown("### Outcome Monitoring & Change")
+        if outcome_status == "SUCCESS":
+            st.dataframe(
+                outcome.style.format({
+                    "First Value": "{:,.2f}",
+                    "Latest Value": "{:,.2f}",
+                    "Absolute Change": "{:,.2f}",
+                    "% Change": "{:,.1f}%"
+                }),
+                use_container_width=True, hide_index=True
+            )
+            st.caption(
+                "Descriptive first-versus-latest comparison only. "
+                "It does not establish attribution or causal impact."
+            )
+            _meal_download(outcome, "DANIP_MEAL_Outcome_Change.csv", "⬇️ Export Outcome Analysis")
+        else:
+            st.info(f"Outcome change analysis: {outcome_status}.")
+        st.markdown("#### MEAL Evaluation Questions")
+        st.markdown(
+            "- What changed from baseline/earliest observation to the latest observation?\n"
+            "- Which results are on track, off track or uncertain?\n"
+            "- Which population groups or locations show different patterns?\n"
+            "- What additional qualitative or evaluation evidence is required before making causal claims?"
+        )
+
+    # 4 Equity
+    with tabs[3]:
+        st.markdown("### Equity, Inclusion & Disaggregation")
+        if equity:
+            selected = st.selectbox(
+                "Dimension", list(equity.keys()), key="meal_equity_dimension"
+            )
+            c = equity[selected]
+            counts = (
+                df[c].astype("string").fillna("Missing / blank")
+                .value_counts(dropna=False)
+                .rename_axis(selected).reset_index(name="Records")
+            )
+            counts["Share %"] = counts["Records"] / max(len(df), 1) * 100
+            st.dataframe(counts, use_container_width=True, hide_index=True)
+            st.caption(
+                "Record shares are descriptive. Equity gaps should be assessed against "
+                "population denominators, programme targets and context."
+            )
+        else:
+            st.info("No standard disaggregation fields were detected.")
+
+    # 5 Indicator registry
+    with tabs[4]:
+        st.markdown("### Indicator Registry / Data Dictionary")
+        st.dataframe(registry, use_container_width=True, hide_index=True)
+        _meal_download(registry, "DANIP_MEAL_Indicator_Registry.csv", "⬇️ Export Indicator Registry")
+        st.info(
+            "The registry detects available technical fields from the live dataset. "
+            "Definitions, calculation methods, source and targets should be maintained "
+            "by the MEAL team rather than invented by the application."
+        )
+
+    # 6 Accountability
+    with tabs[5]:
+        st.markdown("### Accountability, Feedback & Complaints")
+        feedback = st.session_state["meal_feedback"]
+        resolved = feedback["Status"].astype(str).str.lower().isin(
+            ["resolved", "closed"]
+        ).sum() if not feedback.empty else 0
+        a, b, c = st.columns(3)
+        a.metric("Cases", len(feedback))
+        b.metric("Open", len(feedback) - int(resolved))
+        c.metric("Resolution rate", f"{(resolved/len(feedback)*100) if len(feedback) else 0:.1f}%")
+
+        with st.form("meal_feedback_add", clear_on_submit=True):
+            x1, x2, x3 = st.columns(3)
+            with x1:
+                fdate = st.date_input("Date")
+                flocation = st.text_input("Location")
+                fcat = st.selectbox("Category", ["Feedback", "Complaint", "Suggestion", "Request", "Safeguarding", "Other"])
+            with x2:
+                fpriority = st.selectbox("Priority", ["HIGH", "MEDIUM", "LOW"])
+                fowner = st.text_input("Owner")
+                fresponse = st.date_input("Response date")
+            with x3:
+                fstatus = st.selectbox("Status", ["Open", "In progress", "Resolved", "Closed"])
+                fissue = st.text_area("Feedback / complaint")
+                fresolution = st.text_area("Resolution")
+            if st.form_submit_button("➕ Add case", use_container_width=True):
+                new = pd.DataFrame([{
+                    "Date": str(fdate), "Location": flocation, "Category": fcat,
+                    "Priority": fpriority, "Feedback": fissue, "Owner": fowner,
+                    "Response Date": str(fresponse), "Status": fstatus,
+                    "Resolution": fresolution
+                }])
+                _meal_db_add("meal_feedback", new.iloc[0].to_dict())
+                st.session_state["meal_feedback"] = _meal_persistent_df("meal_feedback")
+                st.rerun()
+
+        if not st.session_state["meal_feedback"].empty:
+            st.dataframe(st.session_state["meal_feedback"].drop(columns=["_MEAL_ID"], errors="ignore"), use_container_width=True, hide_index=True)
+            _meal_download(st.session_state["meal_feedback"].drop(columns=["_MEAL_ID"], errors="ignore"), "DANIP_MEAL_Accountability.csv", "⬇️ Export Accountability Register")
+
+    # 7 Learning
+    with tabs[6]:
+        st.markdown("### Learning & Adaptation Register")
+        learning = st.session_state["meal_learning"]
+        with st.form("meal_learning_add", clear_on_submit=True):
+            a, b = st.columns(2)
+            with a:
+                lesson = st.text_area("Learning / lesson")
+                evidence = st.text_area("Evidence")
+                decision = st.text_area("Programme decision")
+            with b:
+                adaptation = st.text_area("Adaptation / change")
+                owner = st.text_input("Owner")
+                ldate = st.date_input("Date")
+                status = st.selectbox("Status", ["Identified", "Under review", "Applied", "Closed"])
+            if st.form_submit_button("➕ Add learning", use_container_width=True):
+                new = pd.DataFrame([{
+                    "Learning": lesson, "Evidence": evidence,
+                    "Decision": decision, "Adaptation": adaptation,
+                    "Owner": owner, "Date": str(ldate), "Status": status
+                }])
+                _meal_db_add("meal_learning", new.iloc[0].to_dict())
+                st.session_state["meal_learning"] = _meal_persistent_df("meal_learning")
+                st.rerun()
+        if not st.session_state["meal_learning"].empty:
+            st.dataframe(st.session_state["meal_learning"].drop(columns=["_MEAL_ID"], errors="ignore"), use_container_width=True, hide_index=True)
+            _meal_download(st.session_state["meal_learning"].drop(columns=["_MEAL_ID"], errors="ignore"), "DANIP_MEAL_Learning.csv", "⬇️ Export Learning Register")
+
+    # 8 Actions
+    with tabs[7]:
+        st.markdown("### MEAL Action Tracker")
+        actions = st.session_state["meal_actions"]
+        if not actions.empty:
+            overdue = int(actions["Status"].astype(str).str.lower().eq("overdue").sum())
+        else:
+            overdue = 0
+        a, b, c = st.columns(3)
+        a.metric("Total actions", len(actions))
+        b.metric("Open / active", int(len(actions) - actions["Status"].astype(str).str.lower().isin(["completed", "closed"]).sum()) if not actions.empty else 0)
+        c.metric("Marked overdue", overdue)
+
+        with st.form("meal_action_add", clear_on_submit=True):
+            a1, a2 = st.columns(2)
+            with a1:
+                finding = st.text_area("Finding")
+                action = st.text_area("Action")
+                owner = st.text_input("Owner")
+            with a2:
+                due = st.date_input("Due date")
+                priority = st.selectbox("Priority", ["HIGH", "MEDIUM", "LOW"])
+                status = st.selectbox("Status", ["Open", "In progress", "Completed", "Overdue"])
+            if st.form_submit_button("➕ Add action", use_container_width=True):
+                new = pd.DataFrame([{
+                    "Finding": finding, "Action": action, "Owner": owner,
+                    "Due Date": str(due), "Priority": priority, "Status": status
+                }])
+                _meal_db_add("meal_actions", new.iloc[0].to_dict())
+                st.session_state["meal_actions"] = _meal_persistent_df("meal_actions")
+                st.rerun()
+        if not st.session_state["meal_actions"].empty:
+            st.dataframe(st.session_state["meal_actions"].drop(columns=["_MEAL_ID"], errors="ignore"), use_container_width=True, hide_index=True)
+            _meal_download(st.session_state["meal_actions"].drop(columns=["_MEAL_ID"], errors="ignore"), "DANIP_MEAL_Action_Tracker.csv", "⬇️ Export Action Tracker")
+
+    # 9 Risks / assumptions
+    with tabs[8]:
+        st.markdown("### Risk, Assumption & Theory-of-Change Register")
+        st.caption(
+            "Document risks and assumptions explicitly. The application does not "
+            "infer programme risks from numbers alone."
+        )
+        existing_risks = st.session_state["meal_risks"]
+        display_risks = existing_risks.drop(columns=["_MEAL_ID"], errors="ignore")
+        risks = st.data_editor(
+            display_risks,
+            num_rows="dynamic",
+            use_container_width=True,
+            key="meal_risk_editor"
+        )
+        risks = risks.copy()
+        if "_MEAL_ID" in existing_risks.columns:
+            old_ids = existing_risks["_MEAL_ID"].tolist()
+            ids = old_ids[:len(risks)] + [None] * max(0, len(risks) - len(old_ids))
+            risks.insert(0, "_MEAL_ID", ids[:len(risks)])
+        st.session_state["meal_risks"] = risks.copy()
+        _meal_db_replace("meal_risks", risks)
+        if not risks.empty:
+            high = int(risks["Impact"].astype(str).str.upper().eq("HIGH").sum())
+            st.metric("High-impact risks", high)
+            _meal_download(risks.drop(columns=["_MEAL_ID"], errors="ignore"), "DANIP_MEAL_Risks_Assumptions.csv", "⬇️ Export Risk Register")
+
+    # 10 Executive MEAL report
+    with tabs[9]:
+        st.markdown("### Project / Programme Reporting Context")
+        st.caption(
+            "Set the context once. These fields are persistent and are included in the editable Word and Excel reports."
+        )
+        context = _meal_context_record()
+        with st.form("meal_project_context_form"):
+            c1, c2 = st.columns(2)
+            with c1:
+                project_name = st.text_input("Programme / Project", value=context.get("Programme / Project", ""))
+                location = st.text_input("Country / Location", value=context.get("Country / Location", ""))
+                reporting_period = st.text_input("Reporting Period", value=context.get("Reporting Period", ""))
+                donor = st.text_input("Donor / Funding", value=context.get("Donor / Funding", ""))
+                prepared_by = st.text_input("Prepared By", value=context.get("Prepared By", ""))
+            with c2:
+                programme_context = st.text_area("Programme Context", value=context.get("Programme Context", ""), height=110)
+                executive_summary = st.text_area("Executive Summary", value=context.get("Executive Summary", ""), height=110)
+            c3, c4, c5 = st.columns(3)
+            with c3:
+                challenges = st.text_area("Key Challenges", value=context.get("Key Challenges", ""), height=110)
+            with c4:
+                recommendations = st.text_area("Key Recommendations", value=context.get("Key Recommendations", ""), height=110)
+            with c5:
+                conclusion = st.text_area("Management Conclusion", value=context.get("Management Conclusion", ""), height=110)
+            if st.form_submit_button("💾 Save Project / Programme Context", use_container_width=True):
+                _meal_save_context({
+                    "Programme / Project": project_name,
+                    "Country / Location": location,
+                    "Reporting Period": reporting_period,
+                    "Donor / Funding": donor,
+                    "Prepared By": prepared_by,
+                    "Programme Context": programme_context,
+                    "Executive Summary": executive_summary,
+                    "Key Challenges": challenges,
+                    "Key Recommendations": recommendations,
+                    "Management Conclusion": conclusion,
+                })
+                st.success("Project/programme context saved permanently.")
+
+        st.markdown("### MEAL Executive Review")
+        qscore = (quality_summary or {}).get("score")
+        qrating = (quality_summary or {}).get("rating", "Unknown")
+        perf_avg = performance["Achievement %"].dropna().mean() if not performance.empty else None
+
+        st.markdown("#### Evidence Snapshot")
+        report = pd.DataFrame([{
+            "Measure": "Loaded records",
+            "Value": f"{len(df):,}",
+            "Interpretation": "Complete dataset currently loaded"
+        }, {
+            "Measure": "Data quality score",
+            "Value": f"{float(qscore):.1f}/100" if qscore is not None else "Not available",
+            "Interpretation": str(qrating)
+        }, {
+            "Measure": "Average target achievement",
+            "Value": f"{perf_avg:.1f}%" if perf_avg is not None and pd.notna(perf_avg) else "Not available",
+            "Interpretation": "Detected target/actual fields"
+        }, {
+            "Measure": "High-priority DQ findings",
+            "Value": f"{high_q:,}",
+            "Interpretation": "Findings requiring MEAL attention"
+        }, {
+            "Measure": "Open actions",
+            "Value": str(int(len(st.session_state["meal_actions"]) - st.session_state["meal_actions"]["Status"].astype(str).str.lower().isin(["completed", "closed"]).sum()) if not st.session_state["meal_actions"].empty else 0),
+            "Interpretation": "Items requiring follow-up"
+        }])
+        st.dataframe(report, use_container_width=True, hide_index=True)
+
+        st.markdown("#### Recommended MEAL Review Questions")
+        st.markdown(
+            "1. **Performance:** Which indicators are below target and why?\n"
+            "2. **Quality:** Which data-quality findings could materially affect decisions?\n"
+            "3. **Equity:** Which groups or locations require deeper analysis?\n"
+            "4. **Outcomes:** What has changed over time, and what additional evidence is needed?\n"
+            "5. **Accountability:** Are feedback and complaints being responded to on time?\n"
+            "6. **Learning:** What evidence should trigger programme adaptation?\n"
+            "7. **Action:** Who owns each decision and when is follow-up due?\n"
+            "8. **Risk:** Which assumptions or contextual risks need active monitoring?"
+        )
+
+        export = pd.concat([
+            report,
+            pd.DataFrame([{
+                "Measure": "Actions registered",
+                "Value": len(st.session_state["meal_actions"]),
+                "Interpretation": "Session register"
+            }])
+        ], ignore_index=True)
+        _meal_download(export, "DANIP_MEAL_Executive_Review.csv", "⬇️ Export MEAL Executive Review")
+
+        st.markdown("### 📦 Full Editable MEAL Report")
+        st.caption(
+            "Excel contains separate editable sheets for the project context, executive review, performance, results framework, outcomes, equity, indicator registry, accountability, learning, actions, risks, data quality and complete data. Word contains an editable narrative report with the same MEAL evidence and registers."
+        )
+        try:
+            excel_bytes, word_bytes = _meal_export_bundle(
+                df=df,
+                performance=performance,
+                registry=registry,
+                outcome=outcome,
+                equity=equity,
+                report=report,
+                quality_issues=quality_issues,
+            )
+            e1, e2 = st.columns(2)
+            with e1:
+                st.download_button(
+                    "📊 Download Full MEAL Report — Excel",
+                    excel_bytes,
+                    "DANIP_AI_Full_MEAL_Report.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True,
+                    key="meal_full_excel_export",
+                )
+            with e2:
+                if WORD_EXPORT_AVAILABLE:
+                    st.download_button(
+                        "📝 Download Full MEAL Report — Word",
+                        word_bytes,
+                        "DANIP_AI_Full_MEAL_Report.docx",
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                        use_container_width=True,
+                        key="meal_full_word_export",
+                    )
+                else:
+                    st.warning("Word export requires python-docx. Run: pip install python-docx")
+        except Exception as exc:
+            st.error(f"Full MEAL report export is unavailable: {exc}")
+
+        st.success(
+            "MEAL layer is additive: the existing complete-data processing, "
+            "user-requested analysis, Data Quality Matrix, visualizations, "
+            "Advanced Analytics, AI interpretation and chatbot are not modified."
+        )
+
+
 # ============================================================
 # MAIN
 # ============================================================
@@ -9355,6 +10364,18 @@ if automatic_analysis or st.session_state.get("data_loaded", False):
         quality_summary=quality_summary,
     )
 
+    # ========================================================
+    # MEAL INTELLIGENCE LAYER — ADDITIVE MODULE
+    # ========================================================
+    # Uses the same complete loaded dataset and existing DQ outputs.
+    # It does not replace or modify the existing analysis, charts,
+    # data-quality calculations, AI interpretation or chatbot.
+    render_meal_intelligence_layer(
+        df=df,
+        quality_issues=quality_issues,
+        quality_summary=quality_summary,
+    )
+
 # ============================================================
-# END — USER-REQUESTED ANALYSIS + DATA QUALITY MATRIX ONLY
+# END — DANIP-AI ANALYSIS + DATA QUALITY + MEAL INTELLIGENCE LAYER
 # ============================================================
