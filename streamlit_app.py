@@ -1266,7 +1266,7 @@ if not DHIS2_PASSWORD:
     missing.append("Data.ai@2025")
 
 if not OPENAI_API_KEY:
-    missing.append("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")
+    missing.append("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")
 
 if missing:
     st.warning(
