@@ -1036,7 +1036,8 @@ st.markdown(
         backdrop-filter: blur(12px);
     }
     .block-container {
-        max-width: 1540px !important;
+        max-width: none !important;
+        width: 100% !important;
         padding-top: 1.15rem !important;
         padding-bottom: 4rem !important;
     }
@@ -8267,413 +8268,1682 @@ def render_analysis_chatbot(
 
 
 
+
 # ============================================================
-# SIDEBAR
+# DANIP M&E MANAGEMENT HUB — SEPARATE APPLICATION TAB
 # ============================================================
 
-with st.sidebar:
+ME_HUB_DB_PATH = os.path.join(BASE_DIR, "danip_me_management.db")
 
-    st.markdown("### ⚙️ Workspace")
 
-    if DHIS2_USERNAME and DHIS2_PASSWORD:
-        st.success("DHIS2 credentials configured")
+def _me_hub_conn():
+    conn = sqlite3.connect(ME_HUB_DB_PATH)
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def _me_hub_init_db():
+    conn = _me_hub_conn()
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS me_programs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        program_name TEXT NOT NULL,
+        sponsor TEXT,
+        department TEXT,
+        status TEXT DEFAULT 'On Track',
+        calendar_year INTEGER,
+        budget REAL DEFAULT 0,
+        actual REAL DEFAULT 0,
+        eac REAL DEFAULT 0,
+        progress REAL DEFAULT 0,
+        start_date TEXT,
+        finish_date TEXT,
+        notes TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS me_issues (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        program_name TEXT,
+        issue TEXT NOT NULL,
+        priority TEXT DEFAULT 'Medium',
+        owner TEXT,
+        status TEXT DEFAULT 'Open',
+        due_date TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS me_risks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        program_name TEXT,
+        risk TEXT NOT NULL,
+        rating TEXT DEFAULT 'Medium',
+        owner TEXT,
+        mitigation TEXT,
+        status TEXT DEFAULT 'Open',
+        due_date TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS me_changes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        program_name TEXT,
+        change_request TEXT NOT NULL,
+        impact TEXT DEFAULT 'Medium',
+        owner TEXT,
+        status TEXT DEFAULT 'Pending',
+        requested_date TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS me_workplan (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        program_name TEXT,
+        activity TEXT NOT NULL,
+        indicator TEXT,
+        owner TEXT,
+        due_date TEXT,
+        status TEXT DEFAULT 'Planned',
+        evidence_link TEXT,
+        notes TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS me_evidence (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        program_name TEXT,
+        indicator TEXT,
+        evidence_type TEXT,
+        title TEXT NOT NULL,
+        source_link TEXT,
+        period TEXT,
+        verification_status TEXT DEFAULT 'Pending',
+        notes TEXT,
+        created_at TEXT DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS me_monthly_finance (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        program_name TEXT,
+        month TEXT,
+        forecast REAL DEFAULT 0,
+        actual REAL DEFAULT 0,
+        budget REAL DEFAULT 0,
+        eac REAL DEFAULT 0
+    );
+    """)
+    conn.commit()
+    conn.close()
+
+
+def _me_hub_df(table):
+    conn = _me_hub_conn()
+    try:
+        return pd.read_sql_query(f"SELECT * FROM {table}", conn)
+    finally:
+        conn.close()
+
+
+def _me_hub_insert(table, values):
+    conn = _me_hub_conn()
+    cols = list(values.keys())
+    placeholders = ",".join(["?"] * len(cols))
+    sql = f"INSERT INTO {table} ({','.join(cols)}) VALUES ({placeholders})"
+    conn.execute(sql, [values[c] for c in cols])
+    conn.commit()
+    conn.close()
+
+
+def _me_hub_delete(table, row_id):
+    conn = _me_hub_conn()
+    conn.execute(f"DELETE FROM {table} WHERE id = ?", (int(row_id),))
+    conn.commit()
+    conn.close()
+
+
+def _me_hub_update(table, row_id, values):
+    conn = _me_hub_conn()
+    assignments = ", ".join([f"{k} = ?" for k in values])
+    conn.execute(
+        f"UPDATE {table} SET {assignments} WHERE id = ?",
+        [values[k] for k in values] + [int(row_id)],
+    )
+    conn.commit()
+    conn.close()
+
+
+def _me_hub_money(value):
+    try:
+        value = float(value or 0)
+    except Exception:
+        value = 0.0
+    if abs(value) >= 1_000_000:
+        return f"${value / 1_000_000:.2f}M"
+    if abs(value) >= 1_000:
+        return f"${value / 1_000:.1f}K"
+    return f"${value:,.0f}"
+
+
+def _me_hub_status_class(status):
+    s = str(status or "").lower()
+    if "on track" in s or "complete" in s or "closed" in s:
+        return "🟢"
+    if "watch" in s or "attention" in s or "progress" in s or "pending" in s:
+        return "🟡"
+    if "trouble" in s or "off track" in s or "overdue" in s or "high" in s:
+        return "🔴"
+    return "⚪"
+
+
+
+def _me_hub_find_column(df, exact=(), contains=()):
+    """Find the best matching column without changing the source dataframe."""
+    if df is None or df.empty:
+        return None
+    lookup = {str(c).strip().lower(): c for c in df.columns}
+    for name in exact:
+        if str(name).strip().lower() in lookup:
+            return lookup[str(name).strip().lower()]
+    for c in df.columns:
+        n = str(c).strip().lower()
+        if any(token in n for token in contains):
+            return c
+    return None
+
+
+def _me_hub_numeric_col(df, exact=(), contains=()):
+    """Find a numeric column using semantic names and numeric-content validation."""
+    col = _me_hub_find_column(df, exact=exact, contains=contains)
+    if col is not None:
+        return col
+    for c in df.columns:
+        n = str(c).strip().lower()
+        if any(token in n for token in contains):
+            values = pd.to_numeric(df[c], errors="coerce")
+            if values.notna().sum() > 0:
+                return c
+    return None
+
+
+def _me_hub_period_dates(series):
+    """Parse common DHIS2 period/date formats for management charts."""
+    raw = series.astype("string").str.strip()
+    parsed = pd.to_datetime(raw, errors="coerce")
+
+    # YYYYMM
+    mask = parsed.isna() & raw.str.fullmatch(r"\d{6}", na=False)
+    if mask.any():
+        parsed.loc[mask] = pd.to_datetime(raw.loc[mask], format="%Y%m", errors="coerce")
+
+    # YYYYMon, e.g. 2025Jan
+    mask = parsed.isna() & raw.str.fullmatch(r"\d{4}[A-Za-z]{3}", na=False)
+    if mask.any():
+        parsed.loc[mask] = pd.to_datetime(raw.loc[mask], format="%Y%b", errors="coerce")
+
+    # YYYY-Qn / YYYYnQn / YYYYQn
+    for pattern in [r"(\d{4})[- ]?[Qq]([1-4])", r"(\d{4})[- ]?([1-4])[Qq]"]:
+        mask = parsed.isna() & raw.str.fullmatch(pattern, na=False)
+        if mask.any():
+            extracted = raw.loc[mask].str.extract(pattern)
+            for idx, (year, quarter) in extracted.iterrows():
+                try:
+                    month = (int(quarter) - 1) * 3 + 1
+                    parsed.loc[idx] = pd.Timestamp(int(year), month, 1)
+                except Exception:
+                    pass
+
+    return parsed
+
+
+def _me_hub_status_from_progress(value):
+    try:
+        pct = float(value)
+    except Exception:
+        return "Unknown"
+    if pct >= 90:
+        return "On Track"
+    if pct >= 75:
+        return "Watch"
+    return "Troubled"
+
+
+def _me_hub_build_api_view(api_df):
+    """Create a read-only management view from the SAME dataset loaded by the API tab.
+
+    The function deliberately does not reinterpret arbitrary DHIS2 numeric columns as
+    financial values. Budget/Actual/EAC are only populated when their column names make
+    the financial meaning reasonably explicit.
+    """
+    if not isinstance(api_df, pd.DataFrame) or api_df.empty:
+        return {
+            "programs": pd.DataFrame(),
+            "finance": pd.DataFrame(),
+            "performance": pd.DataFrame(),
+            "meta": {},
+        }
+
+    df = api_df.copy()
+
+    program_col = _me_hub_find_column(
+        df,
+        exact=("program name", "programme name", "program", "programme", "project name", "project"),
+        contains=("program name", "programme name", "project name"),
+    )
+    sponsor_col = _me_hub_find_column(df, exact=("sponsor",), contains=("sponsor", "donor", "funder"))
+    dept_col = _me_hub_find_column(df, exact=("department", "dept"), contains=("department",))
+    status_col = _me_hub_find_column(df, exact=("program status", "programme status", "status"), contains=("program status", "programme status"))
+    period_col = find_period_column(df)
+    ou_col = find_ou_column(df)
+
+    target_col = _me_hub_numeric_col(
+        df,
+        exact=("target", "forecast", "annual target", "planned"),
+        contains=("target", "forecast", "planned"),
+    )
+    actual_col = _me_hub_numeric_col(
+        df,
+        exact=("actual", "actual value", "achievement", "value"),
+        contains=("actual", "achievement"),
+    )
+    budget_col = _me_hub_numeric_col(
+        df,
+        exact=("budget", "total budget", "approved budget", "budget amount"),
+        contains=("budget",),
+    )
+    eac_col = _me_hub_numeric_col(
+        df,
+        exact=("eac", "estimate at completion", "estimated at completion"),
+        contains=("eac", "estimate at completion"),
+    )
+    start_col = _me_hub_find_column(df, exact=("start date", "start"), contains=("start date",))
+    finish_col = _me_hub_find_column(df, exact=("finish date", "end date", "finish"), contains=("finish date", "end date"))
+
+    # If a generic 'value' column is found, it is valid for performance analysis but
+    # must not be silently presented as financial actuals.
+    financial_actual_col = _me_hub_numeric_col(
+        df,
+        exact=("actual", "actual amount", "actual cost", "actual expenditure", "actual spend"),
+        contains=("actual cost", "actual expenditure", "actual spend", "expenditure", "spend"),
+    )
+
+    if program_col:
+        program_series = df[program_col].astype("string").fillna("Unspecified").replace("", "Unspecified")
     else:
-        st.warning("DHIS2 credentials not configured")
-    if OPENAI_API_KEY:
-        st.success("AI connection configured")
-    else:
-        st.warning("AI key not configured")
+        # Do not use an OU as a fake programme. Keep the portfolio as one transparent
+        # API-sourced programme when the source does not contain programme metadata.
+        program_series = pd.Series("DANIP API Portfolio", index=df.index, dtype="string")
 
-    st.divider()
+    df["__ME_PROGRAM__"] = program_series.astype(str)
+    df["__ME_TARGET__"] = pd.to_numeric(df[target_col], errors="coerce") if target_col else np.nan
+    df["__ME_PERF_ACTUAL__"] = pd.to_numeric(df[actual_col], errors="coerce") if actual_col else np.nan
+    df["__ME_BUDGET__"] = pd.to_numeric(df[budget_col], errors="coerce") if budget_col else np.nan
+    df["__ME_FIN_ACTUAL__"] = pd.to_numeric(df[financial_actual_col], errors="coerce") if financial_actual_col else np.nan
+    df["__ME_EAC__"] = pd.to_numeric(df[eac_col], errors="coerce") if eac_col else np.nan
 
-    with st.expander(
-        "🔐 Connection details",
-        expanded=False,
-    ):
-        st.caption("DHIS2 server")
-        st.code(DHIS2_URL)
-
-        st.caption("Account")
-        st.write(DHIS2_USERNAME)
-
-    with st.expander(
-        "💡 How to ask",
-        expanded=True,
-    ):
-        st.markdown(
-            """
-            **Ask naturally:**
-
-            • Compare indicators  
-            • Compare countries / OUs  
-            • Compare periods  
-            • Show top / bottom performers  
-            • Specify X and Y  
-            • Choose a chart  
-            • Ask for statistics  
-            • Ask for interpretation only  
-            • Ask for data-quality problems  
-            • Ask for percentage / difference / change
-            """
+    if target_col and actual_col:
+        df["__ME_PROGRESS__"] = np.where(
+            df["__ME_TARGET__"] > 0,
+            (df["__ME_PERF_ACTUAL__"] / df["__ME_TARGET__"]) * 100.0,
+            np.nan,
         )
+        # Keep the observed value for analysis; only the management status is classified.
+        df["__ME_PROGRESS__"] = pd.to_numeric(df["__ME_PROGRESS__"], errors="coerce")
+    else:
+        df["__ME_PROGRESS__"] = np.nan
+
+    if period_col:
+        df["__ME_PERIOD_RAW__"] = df[period_col].astype("string")
+        df["__ME_PERIOD_DATE__"] = _me_hub_period_dates(df[period_col])
+    else:
+        df["__ME_PERIOD_RAW__"] = ""
+        df["__ME_PERIOD_DATE__"] = pd.NaT
+
+    if status_col:
+        df["__ME_STATUS__"] = df[status_col].astype("string").fillna("Unknown")
+    else:
+        df["__ME_STATUS__"] = df["__ME_PROGRESS__"].map(_me_hub_status_from_progress).fillna("Data Available")
+
+    # Calendar year is derived from period first, then from an explicit year field.
+    year_col = _me_hub_find_column(df, exact=("calendar year", "year"), contains=("calendar year",))
+    if year_col:
+        years = pd.to_numeric(df[year_col], errors="coerce")
+    else:
+        years = df["__ME_PERIOD_DATE__"].dt.year
+    df["__ME_YEAR__"] = years
+
+    records = []
+    for name, g in df.groupby("__ME_PROGRAM__", dropna=False):
+        valid_progress = g["__ME_PROGRESS__"].dropna()
+        latest_date = g["__ME_PERIOD_DATE__"].dropna().max() if g["__ME_PERIOD_DATE__"].notna().any() else pd.NaT
+        latest = g if pd.isna(latest_date) else g[g["__ME_PERIOD_DATE__"] == latest_date]
+        latest_progress = latest["__ME_PROGRESS__"].dropna()
+        progress = float(latest_progress.mean()) if not latest_progress.empty else (float(valid_progress.mean()) if not valid_progress.empty else np.nan)
+
+        if status_col:
+            latest_status = str(latest["__ME_STATUS__"].dropna().iloc[-1]) if not latest["__ME_STATUS__"].dropna().empty else "Unknown"
+        else:
+            latest_status = _me_hub_status_from_progress(progress) if pd.notna(progress) else "Data Available"
+
+        sponsor = str(g[sponsor_col].dropna().iloc[-1]) if sponsor_col and not g[sponsor_col].dropna().empty else ""
+        dept = str(g[dept_col].dropna().iloc[-1]) if dept_col and not g[dept_col].dropna().empty else ""
+        start = str(g[start_col].dropna().iloc[0]) if start_col and not g[start_col].dropna().empty else ""
+        finish = str(g[finish_col].dropna().iloc[-1]) if finish_col and not g[finish_col].dropna().empty else ""
+
+        records.append({
+            "program_name": str(name),
+            "sponsor": sponsor,
+            "department": dept,
+            "status": latest_status,
+            "calendar_year": int(latest["__ME_YEAR__"].dropna().iloc[-1]) if not latest["__ME_YEAR__"].dropna().empty else "",
+            "budget": float(g["__ME_BUDGET__"].sum()) if budget_col else np.nan,
+            "actual": float(g["__ME_FIN_ACTUAL__"].sum()) if financial_actual_col else np.nan,
+            "eac": float(g["__ME_EAC__"].sum()) if eac_col else np.nan,
+            "progress": round(progress, 2) if pd.notna(progress) else np.nan,
+            "start_date": start,
+            "finish_date": finish,
+            "records": int(len(g)),
+        })
+
+    programs = pd.DataFrame(records)
+
+    # Financial monthly view only when explicit finance columns exist.
+    finance = pd.DataFrame()
+    if period_col and any([target_col, financial_actual_col, budget_col, eac_col]):
+        finance = df[["__ME_PERIOD_RAW__", "__ME_PERIOD_DATE__", "__ME_TARGET__", "__ME_FIN_ACTUAL__", "__ME_BUDGET__", "__ME_EAC__"]].copy()
+        finance = finance.rename(columns={
+            "__ME_PERIOD_RAW__": "month",
+            "__ME_PERIOD_DATE__": "period_date",
+            "__ME_TARGET__": "forecast",
+            "__ME_FIN_ACTUAL__": "actual",
+            "__ME_BUDGET__": "budget",
+            "__ME_EAC__": "eac",
+        })
+        finance = finance.groupby(["month", "period_date"], dropna=False)[["forecast", "actual", "budget", "eac"]].sum(min_count=1).reset_index()
+        finance = finance.sort_values(["period_date", "month"], na_position="last")
+
+    performance = df[["__ME_PROGRAM__", "__ME_PERIOD_RAW__", "__ME_PERIOD_DATE__", "__ME_TARGET__", "__ME_PERF_ACTUAL__", "__ME_PROGRESS__", "__ME_STATUS__"]].copy()
+    performance = performance.rename(columns={
+        "__ME_PROGRAM__": "program_name",
+        "__ME_PERIOD_RAW__": "period",
+        "__ME_PERIOD_DATE__": "period_date",
+        "__ME_TARGET__": "target",
+        "__ME_PERF_ACTUAL__": "actual",
+        "__ME_PROGRESS__": "progress",
+        "__ME_STATUS__": "status",
+    })
+
+    meta = {
+        "program_col": str(program_col) if program_col else None,
+        "period_col": str(period_col) if period_col else None,
+        "ou_col": str(ou_col) if ou_col else None,
+        "target_col": str(target_col) if target_col else None,
+        "actual_col": str(actual_col) if actual_col else None,
+        "budget_col": str(budget_col) if budget_col else None,
+        "financial_actual_col": str(financial_actual_col) if financial_actual_col else None,
+        "eac_col": str(eac_col) if eac_col else None,
+        "start_col": str(start_col) if start_col else None,
+        "finish_col": str(finish_col) if finish_col else None,
+        "rows": int(len(df)),
+        "indicators": int(len(find_indicator_like_columns(df))),
+        "organisation_units": int(df[ou_col].nunique(dropna=True)) if ou_col else 0,
+        "periods": int(df[period_col].nunique(dropna=True)) if period_col else 0,
+        "has_finance": bool(financial_actual_col or budget_col or eac_col),
+        "has_performance": bool(target_col and actual_col),
+    }
+    return {"programs": programs, "finance": finance, "performance": performance, "meta": meta}
+
+
+def _me_hub_responsive_css():
+    st.markdown("""
+    <style>
+    :root{--mh-navy:#101827;--mh-navy2:#182235;--mh-blue:#2563eb;--mh-red:#a51e31;--mh-border:#e5e7eb;--mh-text:#172033;--mh-muted:#64748b;--mh-bg:#f4f7fb}
+    /* Common Streamlit sidebar is shared by both top-level workspaces. */
+    [data-testid="stSidebar"]{display:block!important}
+    section[data-testid="stMain"]{width:100%!important}
+    .block-container{max-width:none!important;width:100%!important;padding-top:.65rem!important;padding-bottom:2rem!important;padding-left:1.25rem!important;padding-right:1.25rem!important}
+    .app-hero{width:100%!important;max-width:none!important;box-sizing:border-box!important}
+    .mh-admin-top{height:52px;background:#fff;border:1px solid var(--mh-border);border-radius:10px;display:flex;align-items:center;justify-content:space-between;padding:0 16px;margin-bottom:12px;box-shadow:0 2px 8px rgba(15,23,42,.04)}
+    .mh-brand{display:flex;align-items:center;gap:9px;font-weight:800;color:var(--mh-text);font-size:.92rem}.mh-brand-mark{width:29px;height:29px;border-radius:7px;background:var(--mh-blue);color:#fff;display:flex;align-items:center;justify-content:center}.mh-top-right{font-size:.72rem;color:var(--mh-muted)}
+    .mehub-statusbar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:#f8fafc;border:1px solid #dbe4ef;border-radius:9px;padding:8px 12px;margin:8px 0 14px;color:#475569;font-size:.72rem}
+    .mehub-status-dot{width:9px;height:9px;border-radius:50%;background:#16a34a;box-shadow:0 0 0 3px rgba(22,163,74,.12);flex:0 0 auto}
+    .mehub-status-main{font-weight:750;color:#172033}
+    .mehub-status-muted{color:#64748b}
+
+    .mh-logo{height:82px;background:#fff;border:1px solid var(--mh-border);border-radius:10px;display:flex;align-items:center;justify-content:center;margin-bottom:12px;box-shadow:0 2px 8px rgba(15,23,42,.04)}.mh-logo-placeholder{width:80%;height:45px;border:1px dashed #d4dce7;border-radius:7px;display:flex;align-items:center;justify-content:center;color:#94a3b8;font-size:.65rem;letter-spacing:.08em;text-transform:uppercase}.mh-title-card{background:#fff;border:1px solid var(--mh-border);border-radius:10px;padding:14px 16px;margin-bottom:12px}.mh-kicker{font-size:.59rem;color:#4f46e5;letter-spacing:.12em;font-weight:800;text-transform:uppercase}.mh-title{font-size:1.18rem;font-weight:800;color:var(--mh-text);margin-top:4px}.mh-help{font-size:.7rem;color:var(--mh-muted);margin-top:3px}
+    /* Dashboard cards */
+    div[data-testid="stMetric"]{background:#fff!important;border:1px solid var(--mh-border)!important;border-radius:9px!important;box-shadow:0 2px 7px rgba(15,23,42,.035)!important;padding:.75rem .8rem!important;min-height:78px}.mh-main [data-testid="stMetricLabel"]{font-size:.67rem!important;color:#64748b!important}.mh-main [data-testid="stMetricValue"]{font-size:1.3rem!important;color:#172033!important;font-weight:800!important}
+    [data-testid="stDataFrame"]{border-radius:8px;overflow:hidden}
+    /* ============================================================
+       TOP-LEVEL DANIP WORKSPACE NAVIGATION
+       Admin-style full-width two-option bar.
+       ============================================================ */
+    [data-testid="stRadio"]{
+        width:100%!important;
+        margin:0 0 14px 0!important;
+        padding:0!important;
+        background:#17374b!important;
+        border-bottom:3px solid #b03a2e!important;
+        border-radius:0!important;
+        overflow:hidden!important;
+    }
+    [data-testid="stRadio"] > label{display:none!important}
+    [data-testid="stRadio"] > div{
+        width:100%!important;
+        display:flex!important;
+        flex-direction:row!important;
+        flex-wrap:nowrap!important;
+        gap:0!important;
+        margin:0!important;
+        padding:0!important;
+    }
+    [data-testid="stRadio"] [role="radiogroup"]{
+        width:100%!important;
+        display:flex!important;
+        flex-direction:row!important;
+        gap:0!important;
+        margin:0!important;
+        padding:0!important;
+    }
+    [data-testid="stRadio"] [role="radio"]{
+        flex:1 1 50%!important;
+        min-width:0!important;
+        min-height:48px!important;
+        margin:0!important;
+        padding:0!important;
+        border:0!important;
+        border-radius:0!important;
+        background:#17374b!important;
+        color:#ffffff!important;
+        cursor:pointer!important;
+        display:flex!important;
+        align-items:center!important;
+        justify-content:center!important;
+        text-align:center!important;
+        font-size:.78rem!important;
+        font-weight:800!important;
+        white-space:nowrap!important;
+        transition:background .18s ease!important;
+    }
+    [data-testid="stRadio"] [role="radio"]:hover{background:#244e63!important}
+    [data-testid="stRadio"] [role="radio"][aria-checked="true"]{
+        background:#a51e31!important;
+        color:#ffffff!important;
+    }
+    [data-testid="stRadio"] [role="radio"] > div:first-child{
+        display:none!important;
+    }
+    [data-testid="stRadio"] [role="radio"] p,
+    [data-testid="stRadio"] [role="radio"] span{
+        color:#ffffff!important;
+        -webkit-text-fill-color:#ffffff!important;
+        font-weight:800!important;
+        margin:0!important;
+    }
+    [data-testid="stRadio"] [role="radio"] [data-testid="stMarkdownContainer"]{
+        display:flex!important;
+        align-items:center!important;
+        justify-content:center!important;
+    }
+    /* Force workspace selector text to white across Streamlit DOM variants. */
+    [data-testid="stRadio"] [role="radio"] *,
+    [data-testid="stRadio"] [role="radio"] label,
+    [data-testid="stRadio"] [role="radio"] label *,
+    [data-testid="stRadio"] [role="radio"] [data-testid="stMarkdownContainer"] *,
+    [data-testid="stRadio"] [role="radio"] [data-testid="stMarkdownContainer"] p,
+    [data-testid="stRadio"] [role="radio"] [data-testid="stMarkdownContainer"] span{
+        color:#ffffff!important;
+        -webkit-text-fill-color:#ffffff!important;
+        opacity:1!important;
+        text-shadow:none!important;
+    }
+    [data-testid="stRadio"] [role="radio"][aria-checked="true"] *,
+    [data-testid="stRadio"] [role="radio"][aria-checked="true"] label,
+    [data-testid="stRadio"] [role="radio"][aria-checked="true"] label *{
+        color:#ffffff!important;
+        -webkit-text-fill-color:#ffffff!important;
+        opacity:1!important;
+    }
+    /* Keep internal M&E tabs responsive without inheriting the top-level bar style. */
+    [data-testid="stTabs"] [data-baseweb="tab-list"]{overflow-x:auto;flex-wrap:nowrap;gap:2px;scrollbar-width:thin}
+    [data-testid="stTabs"] [data-baseweb="tab"]{white-space:nowrap;min-width:max-content;font-size:.73rem}
+    @media(max-width:900px){.block-container{padding-left:.9rem!important;padding-right:.9rem!important}.mh-top-right{display:none}.mehub-statusbar{font-size:.68rem}}
+    @media(max-width:680px){section[data-testid="stMain"] [data-testid="stTabs"]:first-of-type [data-baseweb="tab"]{height:44px!important;padding:0 8px!important;font-size:.68rem!important}}
+    @media(max-width:430px){section[data-testid="stMain"] [data-testid="stTabs"]:first-of-type [data-baseweb="tab"]{font-size:.61rem!important;padding:0 5px!important}}
+    @media(max-width:680px){.block-container{padding-left:.6rem!important;padding-right:.6rem!important}.mh-admin-top{height:46px}.mh-logo{height:64px}.mh-logo-placeholder{height:38px;width:92%}.mehub-statusbar{padding:8px 10px}}
+    @media(max-width:520px){[data-testid="stHorizontalBlock"]{flex-wrap:wrap!important;gap:.4rem!important}[data-testid="stHorizontalBlock"]>[data-testid="column"]{min-width:100%!important;flex-basis:100%!important}}
+    /* ---------- COMMON SIDEBAR SHARED BY AI + M&E ---------- */
+    [data-testid="stSidebar"]{display:block!important;background:linear-gradient(180deg,#0a1020 0%,#111827 100%)!important;border-right:1px solid rgba(255,255,255,.10)!important}
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"], [data-testid="stSidebar"] label, [data-testid="stSidebar"] p, [data-testid="stSidebar"] span{color:#e5e7eb!important;-webkit-text-fill-color:#e5e7eb!important}
+    [data-testid="stSidebar"] .stCaption, [data-testid="stSidebar"] small{color:#94a3b8!important;-webkit-text-fill-color:#94a3b8!important}
+    .common-sidebar-brand{display:flex;align-items:center;gap:10px;padding:4px 2px 14px;border-bottom:1px solid rgba(255,255,255,.10);margin-bottom:12px;font-weight:800;color:#fff!important;-webkit-text-fill-color:#fff!important}
+    .common-sidebar-mark{width:30px;height:30px;border-radius:8px;background:#2563eb;color:#fff!important;display:flex;align-items:center;justify-content:center;font-weight:900}
+    .common-sidebar-section{font-size:.59rem!important;letter-spacing:.12em;text-transform:uppercase;font-weight:800;color:#94a3b8!important;-webkit-text-fill-color:#94a3b8!important;margin:13px 2px 6px}
+    .common-sidebar-card{padding:9px 10px;border-radius:9px;background:rgba(255,255,255,.055);border:1px solid rgba(255,255,255,.08);font-size:.68rem;line-height:1.5;color:#dbe5f1!important;-webkit-text-fill-color:#dbe5f1!important}
+    .common-sidebar-card b{color:#fff!important;-webkit-text-fill-color:#fff!important}
+    .common-sidebar-live{background:rgba(34,197,94,.09);border-color:rgba(34,197,94,.20)}
+    </style>
+    """, unsafe_allow_html=True)
+
+
+def _me_hub_indicator_columns(df):
+    """Detect numeric indicator/value columns from a DHIS2/API dataset."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return []
+    period_col = find_period_column(df)
+    ou_col = find_ou_column(df)
+    excluded_words = [
+        "period", "event date", "date", "organisation", "organization", "org unit",
+        "facility", "program", "programme", "project", "sponsor", "department",
+        "status", "target", "forecast", "budget", "actual cost", "expenditure",
+        "eac", "start date", "finish date", "end date", "created", "updated"
+    ]
+    exact_exclude = {str(x).strip().lower() for x in [period_col, ou_col] if x is not None}
+    candidates=[]
+    for c in df.columns:
+        name=str(c).strip(); low=name.lower()
+        if low in exact_exclude or low in {"id","uid","uuid","code","year","month","quarter","level","rank"}:
+            continue
+        if any(w in low for w in excluded_words):
+            continue
+        vals=pd.to_numeric(df[c], errors="coerce")
+        n=int(vals.notna().sum())
+        if n==0: continue
+        hint=any(k in low for k in ["indicator","coverage","rate","percent","%","numerator","denominator","vas","wifa","zinc","mnhn","usi","ff","icmnci"])
+        candidates.append((c,n,hint))
+    candidates.sort(key=lambda x:(not x[2],-x[1],str(x[0]).lower()))
+    return [x[0] for x in candidates]
+
+
+def _me_hub_indicator_label(name):
+    return " ".join(str(name).replace("_"," ").replace("-"," ").split()) or "Indicator"
+
+
+def _me_hub_resolve_organisation_names(df, source_url=None):
+    """Return a copy of the dataset with a human-readable DHIS2 organisation name column.
+
+    DHIS2 analytics exports often return the organisation-unit UID in the ``ou``
+    column.  The M&E Hub should never make the user work with those IDs.  When
+    the values look like DHIS2 UIDs, this helper resolves them through the
+    organisationUnits API using the same authenticated DHIS2 session already
+    used by the main application.  If the source already contains names, they
+    are preserved.
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return df.copy() if isinstance(df, pd.DataFrame) else df
+
+    out = df.copy()
+    ou_col = find_ou_column(out)
+    if not ou_col:
+        return out
+
+    raw = out[ou_col].astype("string")
+    cleaned = raw.fillna("").str.strip()
+
+    # DHIS2 UIDs are normally 11-character alphanumeric identifiers.
+    uid_mask = cleaned.str.fullmatch(r"[A-Za-z0-9]{11}", na=False)
+    uid_values = sorted(cleaned[uid_mask].dropna().unique().tolist())
+
+    # If the source is already returning meaningful organisation names, do not
+    # make an unnecessary metadata request.
+    if not uid_values:
+        out["__ME_ORG_NAME__"] = cleaned.replace("", "Organisation not specified")
+        return out
+
+    mapping = {}
+
+    # Resolve against the same DHIS2 host used by the pasted API URL whenever
+    # possible; otherwise fall back to the configured DHIS2 host.
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(str(source_url or ""))
+        if parsed.scheme and parsed.netloc:
+            base_url = f"{parsed.scheme}://{parsed.netloc}"
+        else:
+            base_url = str(DHIS2_URL).rstrip("/")
+    except Exception:
+        base_url = str(DHIS2_URL).rstrip("/")
+
+    # Query in batches so large OU selections do not create an oversized URL.
+    for start in range(0, len(uid_values), 100):
+        batch = uid_values[start:start + 100]
+        try:
+            response = session.get(
+                f"{base_url}/api/organisationUnits.json",
+                params={
+                    "fields": "id,name,displayName,code",
+                    "filter": "id:in:[" + ",".join(batch) + "]",
+                    "paging": "false",
+                },
+                headers={"Accept": "application/json"},
+                timeout=60,
+            )
+            if response.status_code == 200:
+                payload = response.json()
+                for item in payload.get("organisationUnits", []):
+                    uid = str(item.get("id", "")).strip()
+                    name = item.get("displayName") or item.get("name") or item.get("code") or uid
+                    if uid:
+                        mapping[uid] = str(name).strip()
+        except Exception:
+            # Keep the original UID as a last-resort fallback. The dashboard
+            # remains usable even when the metadata endpoint is unavailable.
+            continue
+
+    def _display(value):
+        value = "" if pd.isna(value) else str(value).strip()
+        if not value:
+            return "Organisation not specified"
+        if value in mapping:
+            return mapping[value]
+        return value
+
+    out["__ME_ORG_NAME__"] = raw.map(_display).astype("string")
+    out["__ME_ORG_NAME__"] = out["__ME_ORG_NAME__"].replace("", "Organisation not specified")
+    return out
+
+
+def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_ou="All", selected_indicator="All"):
+    """Automatically generate indicator charts from the currently loaded API data."""
+    if not isinstance(df,pd.DataFrame) or df.empty:
+        st.info("Load the API dataset in DANIP AI Data Analyst to populate the indicator dashboard automatically.")
+        return
+    period_col=find_period_column(df); ou_col=find_ou_column(df)
+    indicator_cols=_me_hub_indicator_columns(df)
+    work=df.copy()
+    work["__ME_PERIOD_LABEL__"]=work[period_col].astype(str) if period_col else "All data"
+    work["__ME_PERIOD_DATE__"]=_me_hub_period_dates(work[period_col]) if period_col else pd.NaT
+    if "__ME_ORG_NAME__" in work.columns:
+        work["__ME_OU_LABEL__"]=work["__ME_ORG_NAME__"].astype(str)
+    else:
+        work["__ME_OU_LABEL__"]=work[ou_col].astype(str) if ou_col else "All organisation units"
+    if selected_period!="All": work=work[work["__ME_PERIOD_LABEL__"]==str(selected_period)]
+    if selected_ou!="All": work=work[work["__ME_OU_LABEL__"]==str(selected_ou)]
+    if work.empty:
+        st.warning("No records match the selected filters."); return
+    if selected_indicator!="All": indicator_cols=[c for c in indicator_cols if str(c)==str(selected_indicator)]
+    if not indicator_cols:
+        st.warning("No numeric indicator columns were detected in the selected dataset/filter."); return
+    # KPIs
+    allvals=pd.concat([pd.to_numeric(work[c],errors="coerce") for c in indicator_cols],ignore_index=True)
+    kc=st.columns(5)
+    kc[0].metric("Indicators",f"{len(indicator_cols):,}")
+    kc[1].metric("Observations",f"{int(allvals.notna().sum()):,}")
+    kc[2].metric("Organisation Units",f"{work['__ME_OU_LABEL__'].nunique():,}")
+    kc[3].metric("Periods",f"{work['__ME_PERIOD_LABEL__'].nunique():,}")
+    kc[4].metric("Average Value",f"{allvals.mean():,.2f}" if allvals.notna().any() else "—")
+    try:
+        import plotly.express as px
+    except Exception:
+        px=None
+    # Summary / ranking
+    rows=[]
+    for c in indicator_cols:
+        v=pd.to_numeric(work[c],errors="coerce").dropna()
+        rows.append({"indicator":_me_hub_indicator_label(c),"average":float(v.mean()) if not v.empty else np.nan,"total":float(v.sum()) if not v.empty else 0,"observations":int(v.size),"zero_values":int((v==0).sum()) if not v.empty else 0})
+    summary=pd.DataFrame(rows).dropna(subset=["average"])
+    if px and not summary.empty:
+        fig=px.bar(summary.sort_values("average"),x="average",y="indicator",orientation="h",title="Average Value by Indicator")
+        fig.update_layout(height=max(360,34*len(summary)),margin=dict(l=10,r=10,t=45,b=10))
+        st.plotly_chart(fig,use_container_width=True)
+    # Overall trend
+    trend_rows=[]
+    for c in indicator_cols:
+        t=pd.DataFrame({"period":work["__ME_PERIOD_LABEL__"],"period_date":work["__ME_PERIOD_DATE__"],"indicator":_me_hub_indicator_label(c),"value":pd.to_numeric(work[c],errors="coerce")}).dropna(subset=["value"])
+        if not t.empty: trend_rows.append(t)
+    trend_all=pd.concat(trend_rows,ignore_index=True) if trend_rows else pd.DataFrame()
+    if px and not trend_all.empty:
+        if trend_all["period_date"].notna().any():
+            t=trend_all.dropna(subset=["period_date"]).groupby(["period_date","indicator"],as_index=False)["value"].mean().sort_values("period_date")
+            fig=px.line(t,x="period_date",y="value",color="indicator",markers=True,title="Indicator Trends Over Time")
+            fig.update_layout(height=430,margin=dict(l=10,r=10,t=45,b=10),xaxis_title="Period",yaxis_title="Value")
+        else:
+            t=trend_all.groupby(["period","indicator"],as_index=False)["value"].mean()
+            fig=px.line(t,x="period",y="value",color="indicator",markers=True,title="Indicator Values by Period")
+            fig.update_layout(height=430,margin=dict(l=10,r=10,t=45,b=10))
+        st.plotly_chart(fig,use_container_width=True)
+    # Organisation-unit comparison, if available
+    if px and ou_col and not trend_all.empty:
+        ou_rows=[]
+        for c in indicator_cols:
+            t=pd.DataFrame({"ou":work["__ME_OU_LABEL__"],"value":pd.to_numeric(work[c],errors="coerce"),"indicator":_me_hub_indicator_label(c)}).dropna(subset=["value"])
+            if not t.empty: ou_rows.append(t.groupby(["ou","indicator"],as_index=False)["value"].mean())
+        if ou_rows:
+            oo=pd.concat(ou_rows,ignore_index=True)
+            top=summary.sort_values("average",ascending=False)["indicator"].head(12).tolist()
+            oo=oo[oo["indicator"].isin(top)]
+            fig=px.bar(oo,x="ou",y="value",color="indicator",barmode="group",title="Indicator Performance by Organisation Unit")
+            fig.update_layout(height=430,margin=dict(l=10,r=10,t=45,b=10),xaxis_title="Organisation Unit",yaxis_title="Average Value")
+            st.plotly_chart(fig,use_container_width=True)
+    # Individual charts: one responsive chart for every populated indicator
+    st.markdown("### 📈 Indicator-by-Indicator Analysis")
+    st.caption(f"{len(indicator_cols):,} indicator chart(s) generated automatically. All charts respond to the Period and Organisation Unit filters above.")
+    for i in range(0,len(indicator_cols),2):
+        cc=st.columns(2)
+        for j,c in enumerate(indicator_cols[i:i+2]):
+            with cc[j]:
+                title=_me_hub_indicator_label(c)
+                vals=pd.to_numeric(work[c],errors="coerce")
+                d=pd.DataFrame({"period":work["__ME_PERIOD_LABEL__"],"period_date":work["__ME_PERIOD_DATE__"],"ou":work["__ME_OU_LABEL__"],"value":vals}).dropna(subset=["value"])
+                st.markdown(f"**{title}**")
+                if d.empty:
+                    st.info("No observations for this indicator in the selected filters."); continue
+                if px and d["period_date"].notna().any():
+                    g=d.dropna(subset=["period_date"]).groupby(["period_date","ou"],as_index=False)["value"].mean().sort_values("period_date")
+                    fig=px.line(g,x="period_date",y="value",color="ou",markers=True)
+                elif px:
+                    g=d.groupby(["period","ou"],as_index=False)["value"].mean()
+                    fig=px.bar(g,x="period",y="value",color="ou",barmode="group")
+                else:
+                    st.dataframe(d,use_container_width=True,hide_index=True); continue
+                fig.update_layout(height=300,margin=dict(l=5,r=5,t=5,b=5),xaxis_title=None,yaxis_title="Value")
+                st.plotly_chart(fig,use_container_width=True)
+    st.markdown("### 📋 Indicator Summary")
+    out=summary.copy(); out.columns=["Indicator","Average","Total","Observations","Zero Values"]
+    out["Average"]=out["Average"].round(2); out["Total"]=out["Total"].round(2)
+    st.dataframe(out,use_container_width=True,hide_index=True)
+
+def render_danip_me_management_hub():
+    """Separate responsive M&E Management Hub using the already-loaded API dataset when available."""
+    _me_hub_init_db()
+    _me_hub_responsive_css()
+
+    # Existing manually maintained governance records remain available.
+    manual_programs = _me_hub_df("me_programs")
+    issues = _me_hub_df("me_issues")
+    risks = _me_hub_df("me_risks")
+    changes = _me_hub_df("me_changes")
+    workplan = _me_hub_df("me_workplan")
+    evidence = _me_hub_df("me_evidence")
+    manual_finance = _me_hub_df("me_monthly_finance")
+
+    # IMPORTANT: the Hub reuses the exact dataframe retrieved after the user pastes
+    # the API URL in the DANIP AI tab. No second API URL is required.
+    api_df = st.session_state.get("loaded_df")
+    api_source_url = st.session_state.get("loaded_source_url") or st.session_state.get("last_analyzed_url")
+    if isinstance(api_df, pd.DataFrame) and not api_df.empty:
+        # Always expose organisation names in the M&E Hub filters/charts.
+        # The original loaded dataframe remains untouched in session state.
+        api_df = _me_hub_resolve_organisation_names(api_df, api_source_url)
+    api_view = _me_hub_build_api_view(api_df)
+    api_programs = api_view["programs"]
+    api_finance = api_view["finance"]
+    performance = api_view["performance"]
+    meta = api_view["meta"]
+
+    # Data-quality results calculated by the main analysis page are also surfaced here.
+    api_quality_issues = st.session_state.get("danip_api_quality_issues", [])
+    api_quality_summary = st.session_state.get("danip_api_quality_summary", {})
+
+    has_api = isinstance(api_df, pd.DataFrame) and not api_df.empty
+    base_programs = api_programs.copy() if has_api and not api_programs.empty else manual_programs.copy()
+
+    # M&E Hub header — compact because the common NEXUS banner is shared above both tabs.
+    st.markdown("""<div class="mh-title-card" style="margin-top:.15rem"><div class="mh-kicker">DANIP · MONITORING, EVALUATION & LEARNING</div><div class="mh-title">🧭 DANIP M&E Management Hub</div><div class="mh-help">Automatic indicator monitoring from the same DHIS2/API dataset loaded by DANIP AI Data Analyst.</div></div>""", unsafe_allow_html=True)
+    if has_api:
+        st.markdown(
+            f'<div class="mehub-source">🟢 <b>Live API dataset connected.</b> '
+            f'{meta.get("rows", len(api_df)):,} records are being used automatically in this Hub.'
+            + (f' Source: {html.escape(str(api_source_url))}' if api_source_url else '')
+            + '</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.info("📡 Paste the API/Data URL in **🤖 DANIP AI Data Analyst**. Once the dataset loads, this Hub will populate automatically—no second URL is required.")
+
+    # ---------------------------------------------------------
+    # PRIMARY M&E FILTERS — period + organisation unit + indicator
+    # ---------------------------------------------------------
+    period_col = find_period_column(api_df) if has_api else None
+    ou_col = find_ou_column(api_df) if has_api else None
+    ou_display_col = "__ME_ORG_NAME__" if has_api and "__ME_ORG_NAME__" in api_df.columns else ou_col
+    indicator_cols = _me_hub_indicator_columns(api_df) if has_api else []
+    period_options = ["All"] + sorted(api_df[period_col].dropna().astype(str).unique().tolist()) if has_api and period_col else ["All"]
+    ou_options = ["All"] + sorted(api_df[ou_display_col].dropna().astype(str).unique().tolist()) if has_api and ou_display_col else ["All"]
+    indicator_options = ["All"] + [str(c) for c in indicator_cols] if has_api else ["All"]
+
+    # Programme/governance metadata filters remain available when the source contains it.
+    program_options = ["All"] + sorted(base_programs["program_name"].dropna().astype(str).unique().tolist()) if not base_programs.empty else ["All"]
+    sponsor_options = ["All"] + sorted(base_programs["sponsor"].dropna().astype(str).replace("", np.nan).dropna().unique().tolist()) if not base_programs.empty else ["All"]
+    dept_options = ["All"] + sorted(base_programs["department"].dropna().astype(str).replace("", np.nan).dropna().unique().tolist()) if not base_programs.empty else ["All"]
+    status_options = ["All"] + sorted(base_programs["status"].dropna().astype(str).replace("", np.nan).dropna().unique().tolist()) if not base_programs.empty else ["All"]
+
+    f1, f2, f3, f4, f5 = st.columns(5)
+    with f1: f_period = st.selectbox("Period", period_options, key="mehub_period_filter")
+    with f2: f_ou = st.selectbox("Organisation Unit Name", ou_options, key="mehub_ou_filter")
+    with f3: f_indicator = st.selectbox("Indicator", indicator_options, key="mehub_indicator_filter")
+    with f4: f_program = st.selectbox("Program Name", program_options, key="mehub_program_filter")
+    with f5: f_status = st.selectbox("Program Status", status_options, key="mehub_status_filter")
+    g1, g2 = st.columns(2)
+    with g1: f_sponsor = st.selectbox("Sponsor", sponsor_options, key="mehub_sponsor_filter")
+    with g2: f_dept = st.selectbox("Department", dept_options, key="mehub_dept_filter")
+
+    # ---------------------------------------------------------
+    # LIVE DASHBOARD STATUS / CHANGE NOTIFICATION
+    # ---------------------------------------------------------
+    filter_signature = (f_period, f_ou, f_indicator, f_program, f_status, f_sponsor, f_dept)
+    previous_signature = st.session_state.get("mehub_previous_filter_signature")
+    if previous_signature is not None and previous_signature != filter_signature:
+        st.toast("Dashboard updated — charts and indicators refreshed for the new selection.", icon="🔄")
+    st.session_state["mehub_previous_filter_signature"] = filter_signature
+
+    if has_api:
+        status_text = (
+            f"{meta.get('rows', len(api_df)):,} records • "
+            f"{meta.get('indicators', len(indicator_cols)):,} indicators • "
+            f"{meta.get('organisation_units', 0):,} organisation units • "
+            f"{meta.get('periods', 0):,} periods"
+        )
+        st.markdown(
+            f'<div class="mehub-statusbar"><span class="mehub-status-dot"></span>'
+            f'<span class="mehub-status-main">Live dashboard ready</span>'
+            f'<span class="mehub-status-muted">{html.escape(status_text)} · Filter changes automatically refresh all analysis.</span></div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            '<div class="mehub-statusbar"><span class="mehub-status-dot" style="background:#f59e0b"></span>'
+            '<span class="mehub-status-main">Waiting for API data</span>'
+            '<span class="mehub-status-muted">Load the dataset in DANIP AI Data Analyst to activate the M&E dashboard.</span></div>',
+            unsafe_allow_html=True,
+        )
+
+    # ---------------------------------------------------------
+    # AUTOMATIC INDICATOR DASHBOARD — PRIMARY VIEW
+    # ---------------------------------------------------------
+    if has_api:
+        st.markdown("## 📊 M&E Indicator Dashboard")
+        st.caption("The dashboard is generated directly from the indicators in the API dataset. Change Period, Organisation Unit or Indicator and every chart updates automatically.")
+        _me_hub_render_auto_indicator_dashboard(api_df, f_period, f_ou, f_indicator)
+    else:
+        st.markdown("## 📊 M&E Indicator Dashboard")
+        st.info("No API dataset is loaded. Paste the API/Data URL in DANIP AI Data Analyst and return here; the indicator dashboard will populate automatically.")
+
+    # ---------------------------------------------------------
+    # MANAGEMENT SUMMARY / GOVERNANCE FILTERS
+    # ---------------------------------------------------------
+    p = base_programs.copy()
+    if not p.empty:
+        if f_program != "All": p = p[p["program_name"].astype(str) == f_program]
+        if f_sponsor != "All": p = p[p["sponsor"].astype(str) == f_sponsor]
+        if f_dept != "All": p = p[p["department"].astype(str) == f_dept]
+        if f_status != "All": p = p[p["status"].astype(str) == f_status]
+    selected_names = set(p["program_name"].astype(str).tolist()) if not p.empty else set()
+    fi_manual = issues[issues["program_name"].astype(str).isin(selected_names)] if selected_names else issues.iloc[0:0]
+    fr = risks[risks["program_name"].astype(str).isin(selected_names)] if selected_names else risks.iloc[0:0]
+    fc = changes[changes["program_name"].astype(str).isin(selected_names)] if selected_names else changes.iloc[0:0]
+    # Filter the M&E workplan once at the management-summary level so it is
+    # available both to the Workplan tab and the Management Priorities section.
+    fw = workplan[workplan["program_name"].astype(str).isin(selected_names)] if selected_names else workplan.iloc[0:0]
+
+    # Financial summary variables are deliberately calculated only from explicit
+    # finance fields exposed by the API view. Never treat arbitrary DHIS2 indicator
+    # values as budget/expenditure data.
+    financial_available = isinstance(api_finance, pd.DataFrame) and not api_finance.empty and any(
+        c in api_finance.columns for c in ["budget", "actual", "eac"]
+    )
+    if financial_available:
+        total_budget = float(pd.to_numeric(api_finance.get("budget"), errors="coerce").sum()) if "budget" in api_finance.columns else 0.0
+        total_fin_actual = float(pd.to_numeric(api_finance.get("actual"), errors="coerce").sum()) if "actual" in api_finance.columns else 0.0
+        total_eac = float(pd.to_numeric(api_finance.get("eac"), errors="coerce").sum()) if "eac" in api_finance.columns else 0.0
+    else:
+        total_budget = total_fin_actual = total_eac = 0.0
+
+    active_dq = int(len(api_quality_issues)) if has_api else 0
+    active_manual_issues = int((fi_manual["status"].astype(str).str.lower().isin(["open", "in progress", "active"])).sum()) if not fi_manual.empty else 0
+    active_issues = active_dq + active_manual_issues
+    active_risks = int((fr["status"].astype(str).str.lower().isin(["open", "active", "monitoring"])).sum()) if not fr.empty else 0
+    active_changes = int((fc["status"].astype(str).str.lower().isin(["pending", "open", "in review", "approved"])).sum()) if not fc.empty else 0
+    progress = pd.to_numeric(p.get("progress", pd.Series(dtype=float)), errors="coerce").dropna() if not p.empty else pd.Series(dtype=float)
+    k = st.columns(7)
+    k[0].metric("Programs", len(p)); k[1].metric("Active Issues", active_issues); k[2].metric("Active Risks", active_risks); k[3].metric("Change Requests", active_changes)
+    k[4].metric("M&E Records", f"{len(api_df):,}" if has_api else "0"); k[5].metric("On Track", int((progress >= 90).sum()) if not progress.empty else "—"); k[6].metric("Avg Progress", f"{progress.mean():.1f}%" if not progress.empty else "—")
+
+    # ---------------------------------------------------------
+    # MANAGEMENT WORKSPACES
+    # ---------------------------------------------------------
+    st.markdown("## M&E Management Workspaces")
+    st.caption("The API-derived dashboard above is read-only. The registers below remain editable management records.")
+    mt1, mt2, mt3, mt4, mt5, mt6 = st.tabs([
+        "📋 Programs", "🚨 Issues & DQ", "⚠️ Risks", "🔄 Change Requests", "🗓️ M&E Workplan", "📁 Evidence"
+    ])
+
+    with mt1:
+        st.markdown("### API Programme Portfolio")
+        if has_api and not api_programs.empty:
+            api_show = api_programs.copy()
+            st.dataframe(api_show, use_container_width=True, hide_index=True)
+            st.caption("Automatically populated from the same API dataset used by DANIP AI Data Analyst. This table is read-only.")
+        else:
+            st.info("No API-derived programme metadata is available yet.")
+
+        st.markdown("### Manual Governance Register")
+        with st.form("mehub_add_program", clear_on_submit=True):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                pn = st.text_input("Program Name")
+                sponsor = st.text_input("Sponsor")
+                department = st.text_input("Department")
+            with c2:
+                status = st.selectbox("Program Status", ["On Track", "Watch", "Troubled", "Completed", "On Hold"])
+                year = st.number_input("Calendar Year", min_value=2000, max_value=2100, value=datetime.now().year, step=1)
+                budget = st.number_input("Budget", min_value=0.0, value=0.0, step=1000.0)
+            with c3:
+                actual = st.number_input("Actual", min_value=0.0, value=0.0, step=1000.0)
+                eac = st.number_input("EAC", min_value=0.0, value=0.0, step=1000.0)
+                progress = st.number_input("Progress %", min_value=0.0, max_value=100.0, value=0.0, step=1.0)
+            c4, c5 = st.columns(2)
+            with c4:
+                start_date = st.date_input("Start Date")
+            with c5:
+                finish_date = st.date_input("Finish Date")
+            notes = st.text_area("Notes")
+            if st.form_submit_button("➕ Add Programme", use_container_width=True):
+                if pn.strip():
+                    _me_hub_insert("me_programs", {
+                        "program_name": pn.strip(), "sponsor": sponsor.strip(), "department": department.strip(),
+                        "status": status, "calendar_year": int(year), "budget": float(budget), "actual": float(actual),
+                        "eac": float(eac), "progress": float(progress), "start_date": str(start_date), "finish_date": str(finish_date), "notes": notes.strip()
+                    })
+                    st.rerun()
+                else:
+                    st.error("Program Name is required.")
+        if not manual_programs.empty:
+            st.dataframe(manual_programs.drop(columns=["created_at"], errors="ignore"), use_container_width=True, hide_index=True)
+
+    with mt2:
+        st.markdown("### Data Quality & Issue Register")
+        if has_api and api_quality_issues:
+            st.markdown(f"**{len(api_quality_issues):,} DQ finding(s)** were detected by the main DANIP data-quality engine.")
+            try:
+                st.dataframe(pd.DataFrame(api_quality_issues), use_container_width=True, hide_index=True)
+            except Exception:
+                st.write(api_quality_issues)
+        else:
+            st.info("No API data-quality findings are available yet.")
+        with st.form("mehub_add_issue", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                iprog = st.selectbox("Program", ["General"] + program_options[1:], key="mehub_iprog")
+                issue = st.text_area("Issue")
+                owner = st.text_input("Owner", key="mehub_i_owner")
+            with c2:
+                priority = st.selectbox("Priority", ["High", "Medium", "Low"])
+                istatus = st.selectbox("Status", ["Open", "In Progress", "Resolved", "Closed"])
+                due = st.date_input("Due Date", key="mehub_i_due")
+            if st.form_submit_button("➕ Add Issue", use_container_width=True):
+                if issue.strip():
+                    _me_hub_insert("me_issues", {"program_name": iprog, "issue": issue.strip(), "priority": priority, "owner": owner.strip(), "status": istatus, "due_date": str(due)})
+                    st.rerun()
+                else:
+                    st.error("Issue is required.")
+        show = fi_manual if f_program != "All" else issues
+        if not show.empty:
+            st.dataframe(show.drop(columns=["created_at"], errors="ignore"), use_container_width=True, hide_index=True)
+
+    with mt3:
+        st.markdown("### Risk Register")
+        with st.form("mehub_add_risk", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                rprog = st.selectbox("Program", ["General"] + program_options[1:], key="mehub_rprog")
+                risk = st.text_area("Risk")
+                owner = st.text_input("Owner", key="mehub_r_owner")
+            with c2:
+                rating = st.selectbox("Rating", ["High", "Medium", "Low"])
+                rstatus = st.selectbox("Status", ["Open", "Monitoring", "Mitigated", "Closed"])
+                rdue = st.date_input("Review Date", key="mehub_r_due")
+            mitigation = st.text_area("Mitigation", key="mehub_r_mit")
+            if st.form_submit_button("➕ Add Risk", use_container_width=True):
+                if risk.strip():
+                    _me_hub_insert("me_risks", {"program_name": rprog, "risk": risk.strip(), "rating": rating, "owner": owner.strip(), "mitigation": mitigation.strip(), "status": rstatus, "due_date": str(rdue)})
+                    st.rerun()
+                else:
+                    st.error("Risk is required.")
+        show = fr if f_program != "All" else risks
+        st.dataframe(show.drop(columns=["created_at"], errors="ignore"), use_container_width=True, hide_index=True)
+
+    with mt4:
+        st.markdown("### Change Request Register")
+        with st.form("mehub_add_change", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                cprog = st.selectbox("Program", ["General"] + program_options[1:], key="mehub_cprog")
+                ctext = st.text_area("Change Request")
+                cowner = st.text_input("Owner", key="mehub_c_owner")
+            with c2:
+                cimpact = st.selectbox("Impact", ["High", "Medium", "Low"])
+                cstatus = st.selectbox("Status", ["Pending", "In Review", "Approved", "Rejected", "Closed"])
+                cdate = st.date_input("Requested Date", key="mehub_c_date")
+            if st.form_submit_button("➕ Add Change Request", use_container_width=True):
+                if ctext.strip():
+                    _me_hub_insert("me_changes", {"program_name": cprog, "change_request": ctext.strip(), "impact": cimpact, "owner": cowner.strip(), "status": cstatus, "requested_date": str(cdate)})
+                    st.rerun()
+                else:
+                    st.error("Change Request is required.")
+        show = fc if f_program != "All" else changes
+        st.dataframe(show.drop(columns=["created_at"], errors="ignore"), use_container_width=True, hide_index=True)
+
+    with mt5:
+        st.markdown("### M&E Workplan & Reporting Calendar")
+        with st.form("mehub_add_workplan", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                wprog = st.selectbox("Program", ["General"] + program_options[1:], key="mehub_wprog")
+                wactivity = st.text_input("M&E Activity")
+                windicator = st.text_input("Related Indicator")
+                wowner = st.text_input("Responsible Person")
+            with c2:
+                wdue = st.date_input("Due Date", key="mehub_w_due")
+                wstatus = st.selectbox("Status", ["Planned", "In Progress", "Completed", "Overdue", "Cancelled"])
+                wevidence = st.text_input("Evidence / Link")
+            wnotes = st.text_area("Notes", key="mehub_w_notes")
+            if st.form_submit_button("➕ Add M&E Activity", use_container_width=True):
+                if wactivity.strip():
+                    _me_hub_insert("me_workplan", {"program_name": wprog, "activity": wactivity.strip(), "indicator": windicator.strip(), "owner": wowner.strip(), "due_date": str(wdue), "status": wstatus, "evidence_link": wevidence.strip(), "notes": wnotes.strip()})
+                    st.rerun()
+                else:
+                    st.error("M&E Activity is required.")
+        show = fw if f_program != "All" else workplan
+        if not show.empty:
+            wp = show.drop(columns=["created_at"], errors="ignore").copy()
+            due = pd.to_datetime(wp["due_date"], errors="coerce")
+            wp["Calendar Status"] = np.where(
+                (due < pd.Timestamp.today()) & ~wp["status"].astype(str).str.lower().isin(["completed", "cancelled"]),
+                "🔴 Overdue",
+                wp["status"].map(_me_hub_status_class) + " " + wp["status"].astype(str),
+            )
+            st.dataframe(wp, use_container_width=True, hide_index=True)
+        else:
+            st.info("No M&E workplan activities yet.")
+
+    with mt6:
+        st.markdown("### Evidence & Verification Repository")
+        with st.form("mehub_add_evidence", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            with c1:
+                eprog = st.selectbox("Program", ["General"] + program_options[1:], key="mehub_eprog")
+                eindicator = st.text_input("Indicator")
+                etype = st.selectbox("Evidence Type", ["DHIS2", "DQA", "Survey", "Register", "Report", "Monitoring Visit", "Other"])
+                etitle = st.text_input("Evidence Title")
+            with c2:
+                elink = st.text_input("Source / SharePoint Link")
+                eperiod = st.text_input("Reporting Period")
+                everify = st.selectbox("Verification Status", ["Pending", "Verified", "Needs Review", "Rejected"])
+                enotes = st.text_area("Notes")
+            if st.form_submit_button("➕ Add Evidence", use_container_width=True):
+                if etitle.strip():
+                    _me_hub_insert("me_evidence", {"program_name": eprog, "indicator": eindicator.strip(), "evidence_type": etype, "title": etitle.strip(), "source_link": elink.strip(), "period": eperiod.strip(), "verification_status": everify, "notes": enotes.strip()})
+                    st.rerun()
+                else:
+                    st.error("Evidence Title is required.")
+        show = evidence[evidence["program_name"].astype(str).isin(selected_names)] if selected_names else evidence.iloc[0:0]
+        st.dataframe(show.drop(columns=["created_at"], errors="ignore"), use_container_width=True, hide_index=True)
+
+    # ---------------------------------------------------------
+    # MANAGEMENT PRIORITIES
+    # ---------------------------------------------------------
+    st.markdown("---")
+    st.markdown("### 🧠 M&E Management Priorities")
+    priority_messages = []
+    if active_issues:
+        priority_messages.append(f"**{active_issues} active issue(s)** require owner follow-up and closure evidence.")
+    if active_risks:
+        priority_messages.append(f"**{active_risks} active risk(s)** should remain under mitigation/review.")
+    if active_changes:
+        priority_messages.append(f"**{active_changes} change request(s)** need governance decision or status confirmation.")
+    if not fw.empty:
+        due = pd.to_datetime(fw["due_date"], errors="coerce")
+        overdue = int(((due < pd.Timestamp.today()) & ~fw["status"].astype(str).str.lower().isin(["completed", "cancelled"])).sum())
+        if overdue:
+            priority_messages.append(f"**{overdue} M&E workplan item(s)** are overdue.")
+    if financial_available and total_budget > 0 and total_eac > total_budget:
+        priority_messages.append("**EAC is above approved budget** for the selected portfolio; review the variance and assumptions.")
+    if api_quality_summary:
+        try:
+            dq_score = api_quality_summary.get("Overall Score", api_quality_summary.get("score", None))
+            if dq_score is not None:
+                priority_messages.append(f"**DQ score: {dq_score}** — consider data-quality evidence when interpreting programme performance.")
+        except Exception:
+            pass
+    if priority_messages:
+        for msg in priority_messages:
+            st.warning(msg)
+    elif has_api:
+        st.success("No management exceptions are currently recorded for the selected API portfolio.")
+    else:
+        st.info("Load the API dataset to activate automatic M&E management analysis.")
 
     st.caption(
-        "NEXUS AI • Data Intelligence • Evidence First"
+        "API-derived values are read from the same complete dataset loaded by DANIP AI Data Analyst. "
+        "Financial fields are populated only when explicit budget/actual/EAC columns exist; arbitrary DHIS2 values are not relabelled as finance."
     )
-
-
-# ============================================================
-# CONNECTION STATUS
-# ============================================================
-
-status_items = []
-
-if DHIS2_USERNAME and DHIS2_PASSWORD:
-    status_items.append("🟢 DHIS2 credentials ready")
-else:
-    status_items.append("🟠 DHIS2 credentials required for protected APIs")
-
-if OPENAI_API_KEY:
-    status_items.append("🟢 NEXUS automatic intelligence ready")
-else:
-    status_items.append("🟠 AI narrative disabled until OPENAI_API_KEY is added")
-
-st.info("  •  ".join(status_items))
-
-
-# ============================================================
-# USER INPUT
-# ============================================================
-
-st.markdown(
-    """
-    <div class="section-card">
-        <div class="section-kicker">Step 1</div>
-        <div class="section-title">📡 Connect your data</div>
-        <div class="section-help">
-            Paste a DHIS2 Analytics, CSV, XLS, XLSX or JSON API URL.
-            Every row returned by the source is loaded and processed.
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-user_url = st.text_area(
-    "Data URL",
-    placeholder="Paste your data/API URL here...",
-    height=90,
-    label_visibility="collapsed",
-    key="data_url_input",
-)
-
-st.markdown(
-    """
-    <div class="section-card auto-analysis-card">
-        <div class="section-kicker">AUTOMATIC ANALYSIS</div>
-        <div class="section-title">🤖 NEXUS AI will analyze the complete dataset automatically</div>
-        <div class="section-help">
-            NEXUS AI automatically generates the baseline report and data-quality assessment.
-            You can optionally select indicators, dimensions, graph type, analysis type and
-            aggregation below to run a focused user-requested analysis.
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-# Automatic mode: entering a data URL is the only trigger required.
-automatic_analysis = bool(user_url.strip())
-
-
-if not user_url.strip():
-    st.markdown(
-        """
-        <div class="empty-state">
-            <div style="font-size:2rem;">📡</div>
-            <strong>Ready to analyze your data</strong>
-            <div style="margin-top:.35rem;">
-                Paste your data URL and NEXUS AI will automatically build the analysis,
-                data-quality assessment, dashboard and intelligence report.
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-# ============================================================
-# FRESH URL
-# ============================================================
-
-def refresh_data_url(url):
-    url = str(url or "").strip()
-
-    if not url:
-        return url
-
-    separator = (
-        "&"
-        if "?" in url
-        else "?"
-    )
-
-    return (
-        f"{url}"
-        f"{separator}"
-        f"_ai_refresh={int(time.time())}"
-    )
+    st.markdown('</div>', unsafe_allow_html=True)
 
 
 
-# ============================================================
-# GUIDED ANALYSIS CONFIGURATION
-# ============================================================
 
-def guided_analysis_ui(df, user_question, initial_plan=None):
-    """
-    Guided analysis configuration.
-
-    Important behaviour:
-      - X axis is a single dimension.
-      - Y axis supports MULTIPLE indicators.
-      - Multiple indicators can be compared in the same analysis.
-      - AI may suggest selections, but the user confirms them.
-      - The confirmed configuration is the only configuration sent
-        to the calculation engine.
-    """
-    options = get_analysis_options(df)
-    numeric_columns = options["numeric_columns"]
-    dimension_columns = options["dimension_columns"]
-
-    st.markdown(
-        """
-        <div class="guided-panel">
-            <div class="section-kicker">Analysis Guide</div>
-            <div class="section-title">🎯 Define exactly what you want to compare</div>
-            <div class="section-help">
-                Statistical Analysis is the default. Optionally select a dimension and one or more
-                indicators for comparisons, trends, rankings and other analyses.
-                The system will calculate the confirmed request using all applicable rows.
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    suggested_x = None
-    suggested_ys = []
-    suggested_chart = None
-    suggested_analysis = None
-
-    if initial_plan:
-        sx = initial_plan.get("x_column")
-        if sx in dimension_columns:
-            suggested_x = sx
-
-        for y in initial_plan.get("y_columns", []) or []:
-            if y in numeric_columns and y not in suggested_ys:
-                suggested_ys.append(y)
-
-        if initial_plan.get("chart_type") in {"bar", "line", "pie", "scatter", "none"}:
-            suggested_chart = initial_plan.get("chart_type")
-
-        if initial_plan.get("analysis_type") in {
-            "statistical", "comparison", "total", "average", "trend", "ranking",
-            "percentage", "difference", "change", "distribution",
-            "interpretation"
-        }:
-            suggested_analysis = initial_plan.get("analysis_type")
-
-    if not suggested_ys and (not initial_plan or initial_plan.get("analysis_type") in {None, "custom", "statistical"}):
-        suggested_ys = list(numeric_columns[:30])
-
-    def idx(options, value):
-        return options.index(value) if value in options else 0
-
-    x_options = ["-- Select X-axis --"] + dimension_columns
-
-    c1, c2 = st.columns([1, 1.7])
-
-    with c1:
-        x_selected = st.selectbox(
-            "1️⃣ X-axis / comparison dimension",
-            x_options,
-            index=idx(x_options, suggested_x),
-            key="guided_x_axis",
+def render_common_sidebar():
+    """Render one common sidebar shared by the DANIP AI and M&E Hub tabs."""
+    with st.sidebar:
+        st.markdown(
+            '<div class="common-sidebar-brand"><div class="common-sidebar-mark">D</div>'
+            '<div>NEXUS DANIP<br><span style="font-weight:500;font-size:.67rem">Data + M&E Intelligence</span></div></div>',
+            unsafe_allow_html=True,
         )
-
-    with c2:
-        y_selected = st.multiselect(
-            "2️⃣ Y-axis / indicators — select one or more",
-            numeric_columns,
-            default=[y for y in suggested_ys if y in numeric_columns],
-            key="guided_y_axes",
-            help="Select multiple indicators when you want a direct comparison.",
-        )
-
-    # ----------------------------------------------------------
-    # 3️⃣ GRAPH TYPE — MULTI-SELECT
-    # ----------------------------------------------------------
-    # IMPORTANT:
-    #   - Nothing is selected by default.
-    #   - The user may select ONE, TWO, or MANY graph types.
-    #   - We never silently insert a graph into the user's selection.
-    # ----------------------------------------------------------
-    chart_options = [
-        "Grouped Bar",
-        "Bar",
-        "Line",
-        "Pie",
-        "Scatter",
-    ]
-
-    # Keep the AI suggestion only as information; do NOT use it
-    # as a default selection because this control is intentionally
-    # user-driven.
-    suggested_chart_label = {
-        "bar": "Bar",
-        "line": "Line",
-        "pie": "Pie",
-        "scatter": "Scatter",
-    }.get(suggested_chart)
-
-
-    analysis_options = [
-        "Statistical Analysis",
-        "Comparison",
-        "Total",
-        "Average",
-        "Trend",
-        "Ranking",
-        "Percentage",
-        "Difference",
-        "Change",
-        "Distribution",
-        "Interpretation",
-    ]
-
-    analysis_labels = {
-        k: k.title()
-        for k in [
-            "statistical", "comparison", "total", "average", "trend", "ranking",
-            "percentage", "difference", "change", "distribution",
-            "interpretation"
-        ]
-    }
-
-    c3, c4 = st.columns(2)
-
-    with c3:
-        chart_selected = st.multiselect(
-            "3️⃣ Graph type — select one or more",
-            options=chart_options,
-            default=[],
-            key="guided_chart_types",
-            help=(
-                "Optional. Select one or more visualization types. "
-                "Nothing is selected automatically."
-            ),
-        )
-
-        if chart_selected:
-            st.caption(
-                f"📊 {len(chart_selected)} graph type"
-                f"{'s' if len(chart_selected) != 1 else ''} selected: "
-                + ", ".join(chart_selected)
+        loaded = st.session_state.get("loaded_df")
+        has_data = isinstance(loaded, pd.DataFrame) and not loaded.empty
+        if has_data:
+            st.markdown(
+                f'<div class="common-sidebar-card common-sidebar-live">🟢 <b>Live dataset ready</b><br>{len(loaded):,} records shared by both workspaces.</div>',
+                unsafe_allow_html=True,
             )
         else:
-            st.caption(
-                "No graph selected. The analysis can still run without "
-                "a requested visualization when the analysis type allows it."
+            st.markdown(
+                '<div class="common-sidebar-card">🟠 <b>Waiting for data</b><br>Load a DHIS2/API dataset in the AI workspace.</div>',
+                unsafe_allow_html=True,
             )
-
-    with c4:
-        analysis_default = analysis_labels.get(
-            suggested_analysis,
-            "Statistical Analysis",
+        st.markdown('<div class="common-sidebar-section">Navigation</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="common-sidebar-card">🤖 <b>DANIP AI Data Analyst</b><br>Natural-language analysis, DQ, charts and AI interpretation.<br><br>🧭 <b>DANIP M&E Management Hub</b><br>Indicator monitoring, performance, trends and M&E management.</div>',
+            unsafe_allow_html=True,
         )
+        if has_data:
+            period_col = find_period_column(loaded)
+            ou_col = find_ou_column(loaded)
+            indicator_cols = _me_hub_indicator_columns(loaded)
+            periods = int(loaded[period_col].nunique(dropna=True)) if period_col else 0
+            ous = int(loaded[ou_col].nunique(dropna=True)) if ou_col else 0
+            st.markdown('<div class="common-sidebar-section">Dataset status</div>', unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="common-sidebar-card"><b>Records:</b> {len(loaded):,}<br><b>Indicators:</b> {len(indicator_cols):,}<br><b>Organisation units:</b> {ous:,}<br><b>Periods:</b> {periods:,}</div>',
+                unsafe_allow_html=True,
+            )
+        st.markdown('<div class="common-sidebar-section">Workspace status</div>', unsafe_allow_html=True)
+        st.caption("The same API dataset is available to both tabs. M&E filters refresh the dashboard automatically.")
 
-        analysis_selected = st.selectbox(
-            "4️⃣ Analysis type",
-            analysis_options,
-            index=idx(analysis_options, analysis_default),
-            key="guided_analysis_type",
-        )
+def render_existing_danip_ai_app():
+    # ============================================================
+    # CONNECTION STATUS
+    # ============================================================
 
-    aggregation_options = [
-        "Sum",
-        "Average",
-        "Median",
-        "Minimum",
-        "Maximum",
-        "Count",
-    ]
+    status_items = []
 
-    aggregation_default_index = 1 if suggested_analysis == "statistical" else 0
+    if DHIS2_USERNAME and DHIS2_PASSWORD:
+        status_items.append("🟢 DHIS2 credentials ready")
+    else:
+        status_items.append("🟠 DHIS2 credentials required for protected APIs")
 
-    aggregation_selected = st.selectbox(
-        "5️⃣ Aggregation",
-        aggregation_options,
-        index=aggregation_default_index,
-        key="guided_aggregation",
+    if OPENAI_API_KEY:
+        status_items.append("🟢 NEXUS automatic intelligence ready")
+    else:
+        status_items.append("🟠 AI narrative disabled until OPENAI_API_KEY is added")
+
+    st.info("  •  ".join(status_items))
+
+
+    # ============================================================
+    # USER INPUT
+    # ============================================================
+
+    st.markdown(
+        """
+        <div class="section-card">
+            <div class="section-kicker">Step 1</div>
+            <div class="section-title">📡 Connect your data</div>
+            <div class="section-help">
+                Paste a DHIS2 Analytics, CSV, XLS, XLSX or JSON API URL.
+                Every row returned by the source is loaded and processed.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    x = None if x_selected.startswith("--") else x_selected
+    user_url = st.text_area(
+        "Data URL",
+        placeholder="Paste your data/API URL here...",
+        height=90,
+        label_visibility="collapsed",
+        key="data_url_input",
+    )
 
-    chart_map = {
-        "Grouped Bar": "bar",
-        "Bar": "bar",
-        "Line": "line",
-        "Pie": "pie",
-        "Scatter": "scatter",
-    }
+    st.markdown(
+        """
+        <div class="section-card auto-analysis-card">
+            <div class="section-kicker">AUTOMATIC ANALYSIS</div>
+            <div class="section-title">🤖 NEXUS AI will analyze the complete dataset automatically</div>
+            <div class="section-help">
+                NEXUS AI automatically generates the baseline report and data-quality assessment.
+                You can optionally select indicators, dimensions, graph type, analysis type and
+                aggregation below to run a focused user-requested analysis.
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
-    # Convert every user selection to an internal chart type.
-    # Preserve the user's order and remove duplicates.
-    chart_types = []
-    for selected_graph in chart_selected:
-        internal_type = chart_map.get(selected_graph)
-        if internal_type and internal_type not in chart_types:
-            chart_types.append(internal_type)
+    # Automatic mode: entering a data URL is the only trigger required.
+    automatic_analysis = bool(user_url.strip())
 
-    # Backward-compatible primary chart.
-    chart = chart_types[0] if chart_types else "none"
 
-    analysis = analysis_selected.lower()
-    if analysis == "statistical analysis":
-        analysis = "statistical"
+    if not user_url.strip():
+        st.markdown(
+            """
+            <div class="empty-state">
+                <div style="font-size:2rem;">📡</div>
+                <strong>Ready to analyze your data</strong>
+                <div style="margin-top:.35rem;">
+                    Paste your data URL and NEXUS AI will automatically build the analysis,
+                    data-quality assessment, dashboard and intelligence report.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    aggregation = {
-        "Sum": "sum",
-        "Average": "mean",
-        "Median": "median",
-        "Minimum": "min",
-        "Maximum": "max",
-        "Count": "count",
-    }[aggregation_selected]
 
-    # ----------------------------------------------------------
-    # LIVE VISUALIZATION PREVIEW
-    # ----------------------------------------------------------
-    # Streamlit reruns the script whenever the user changes a
-    # widget. Store the CURRENT widget values immediately so the
-    # dashboard can render Bar/Pie/Line/Scatter without waiting
-    # for the "Run detailed analysis" button.
-    #
-    # IMPORTANT:
-    # chart_types is the source of truth for the visualization.
-    # The automatic analysis plan is NOT allowed to replace it
-    # with its default Line chart.
-    # ----------------------------------------------------------
-    if x and y_selected and chart_types:
-        st.session_state["guided_preview_plan"] = {
+    # ============================================================
+    # FRESH URL
+    # ============================================================
+
+    def refresh_data_url(url):
+        url = str(url or "").strip()
+
+        if not url:
+            return url
+
+        separator = (
+            "&"
+            if "?" in url
+            else "?"
+        )
+
+        return (
+            f"{url}"
+            f"{separator}"
+            f"_ai_refresh={int(time.time())}"
+        )
+
+
+
+    # ============================================================
+    # GUIDED ANALYSIS CONFIGURATION
+    # ============================================================
+
+    def guided_analysis_ui(df, user_question, initial_plan=None):
+        """
+        Guided analysis configuration.
+
+        Important behaviour:
+          - X axis is a single dimension.
+          - Y axis supports MULTIPLE indicators.
+          - Multiple indicators can be compared in the same analysis.
+          - AI may suggest selections, but the user confirms them.
+          - The confirmed configuration is the only configuration sent
+            to the calculation engine.
+        """
+        options = get_analysis_options(df)
+        numeric_columns = options["numeric_columns"]
+        dimension_columns = options["dimension_columns"]
+
+        st.markdown(
+            """
+            <div class="guided-panel">
+                <div class="section-kicker">Analysis Guide</div>
+                <div class="section-title">🎯 Define exactly what you want to compare</div>
+                <div class="section-help">
+                    Statistical Analysis is the default. Optionally select a dimension and one or more
+                    indicators for comparisons, trends, rankings and other analyses.
+                    The system will calculate the confirmed request using all applicable rows.
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        suggested_x = None
+        suggested_ys = []
+        suggested_chart = None
+        suggested_analysis = None
+
+        if initial_plan:
+            sx = initial_plan.get("x_column")
+            if sx in dimension_columns:
+                suggested_x = sx
+
+            for y in initial_plan.get("y_columns", []) or []:
+                if y in numeric_columns and y not in suggested_ys:
+                    suggested_ys.append(y)
+
+            if initial_plan.get("chart_type") in {"bar", "line", "pie", "scatter", "none"}:
+                suggested_chart = initial_plan.get("chart_type")
+
+            if initial_plan.get("analysis_type") in {
+                "statistical", "comparison", "total", "average", "trend", "ranking",
+                "percentage", "difference", "change", "distribution",
+                "interpretation"
+            }:
+                suggested_analysis = initial_plan.get("analysis_type")
+
+        if not suggested_ys and (not initial_plan or initial_plan.get("analysis_type") in {None, "custom", "statistical"}):
+            suggested_ys = list(numeric_columns[:30])
+
+        def idx(options, value):
+            return options.index(value) if value in options else 0
+
+        x_options = ["-- Select X-axis --"] + dimension_columns
+
+        c1, c2 = st.columns([1, 1.7])
+
+        with c1:
+            x_selected = st.selectbox(
+                "1️⃣ X-axis / comparison dimension",
+                x_options,
+                index=idx(x_options, suggested_x),
+                key="guided_x_axis",
+            )
+
+        with c2:
+            y_selected = st.multiselect(
+                "2️⃣ Y-axis / indicators — select one or more",
+                numeric_columns,
+                default=[y for y in suggested_ys if y in numeric_columns],
+                key="guided_y_axes",
+                help="Select multiple indicators when you want a direct comparison.",
+            )
+
+        # ----------------------------------------------------------
+        # 3️⃣ GRAPH TYPE — MULTI-SELECT
+        # ----------------------------------------------------------
+        # IMPORTANT:
+        #   - Nothing is selected by default.
+        #   - The user may select ONE, TWO, or MANY graph types.
+        #   - We never silently insert a graph into the user's selection.
+        # ----------------------------------------------------------
+        chart_options = [
+            "Grouped Bar",
+            "Bar",
+            "Line",
+            "Pie",
+            "Scatter",
+        ]
+
+        # Keep the AI suggestion only as information; do NOT use it
+        # as a default selection because this control is intentionally
+        # user-driven.
+        suggested_chart_label = {
+            "bar": "Bar",
+            "line": "Line",
+            "pie": "Pie",
+            "scatter": "Scatter",
+        }.get(suggested_chart)
+
+
+        analysis_options = [
+            "Statistical Analysis",
+            "Comparison",
+            "Total",
+            "Average",
+            "Trend",
+            "Ranking",
+            "Percentage",
+            "Difference",
+            "Change",
+            "Distribution",
+            "Interpretation",
+        ]
+
+        analysis_labels = {
+            k: k.title()
+            for k in [
+                "statistical", "comparison", "total", "average", "trend", "ranking",
+                "percentage", "difference", "change", "distribution",
+                "interpretation"
+            ]
+        }
+
+        c3, c4 = st.columns(2)
+
+        with c3:
+            chart_selected = st.multiselect(
+                "3️⃣ Graph type — select one or more",
+                options=chart_options,
+                default=[],
+                key="guided_chart_types",
+                help=(
+                    "Optional. Select one or more visualization types. "
+                    "Nothing is selected automatically."
+                ),
+            )
+
+            if chart_selected:
+                st.caption(
+                    f"📊 {len(chart_selected)} graph type"
+                    f"{'s' if len(chart_selected) != 1 else ''} selected: "
+                    + ", ".join(chart_selected)
+                )
+            else:
+                st.caption(
+                    "No graph selected. The analysis can still run without "
+                    "a requested visualization when the analysis type allows it."
+                )
+
+        with c4:
+            analysis_default = analysis_labels.get(
+                suggested_analysis,
+                "Statistical Analysis",
+            )
+
+            analysis_selected = st.selectbox(
+                "4️⃣ Analysis type",
+                analysis_options,
+                index=idx(analysis_options, analysis_default),
+                key="guided_analysis_type",
+            )
+
+        aggregation_options = [
+            "Sum",
+            "Average",
+            "Median",
+            "Minimum",
+            "Maximum",
+            "Count",
+        ]
+
+        aggregation_default_index = 1 if suggested_analysis == "statistical" else 0
+
+        aggregation_selected = st.selectbox(
+            "5️⃣ Aggregation",
+            aggregation_options,
+            index=aggregation_default_index,
+            key="guided_aggregation",
+        )
+
+        x = None if x_selected.startswith("--") else x_selected
+
+        chart_map = {
+            "Grouped Bar": "bar",
+            "Bar": "bar",
+            "Line": "line",
+            "Pie": "pie",
+            "Scatter": "scatter",
+        }
+
+        # Convert every user selection to an internal chart type.
+        # Preserve the user's order and remove duplicates.
+        chart_types = []
+        for selected_graph in chart_selected:
+            internal_type = chart_map.get(selected_graph)
+            if internal_type and internal_type not in chart_types:
+                chart_types.append(internal_type)
+
+        # Backward-compatible primary chart.
+        chart = chart_types[0] if chart_types else "none"
+
+        analysis = analysis_selected.lower()
+        if analysis == "statistical analysis":
+            analysis = "statistical"
+
+        aggregation = {
+            "Sum": "sum",
+            "Average": "mean",
+            "Median": "median",
+            "Minimum": "min",
+            "Maximum": "max",
+            "Count": "count",
+        }[aggregation_selected]
+
+        # ----------------------------------------------------------
+        # LIVE VISUALIZATION PREVIEW
+        # ----------------------------------------------------------
+        # Streamlit reruns the script whenever the user changes a
+        # widget. Store the CURRENT widget values immediately so the
+        # dashboard can render Bar/Pie/Line/Scatter without waiting
+        # for the "Run detailed analysis" button.
+        #
+        # IMPORTANT:
+        # chart_types is the source of truth for the visualization.
+        # The automatic analysis plan is NOT allowed to replace it
+        # with its default Line chart.
+        # ----------------------------------------------------------
+        if x and y_selected and chart_types:
+            st.session_state["guided_preview_plan"] = {
+                "needs_clarification": False,
+                "analysis_requested": True,
+                "analysis_type": analysis,
+                "chart_requested": True,
+                "chart_type": chart_types[0],
+                "chart_types": list(chart_types),
+                "chart_labels": list(chart_selected),
+                "x_column": x,
+                "y_columns": list(y_selected),
+                "group_column": None,
+                "indicator_columns": list(y_selected),
+                "aggregation": aggregation,
+                "filters": [],
+                "ranking_limit": 10 if analysis == "ranking" else None,
+                "comparison_groups": [],
+                "title": (
+                    f"{' vs '.join(map(str, y_selected))} by {x}"
+                    if len(y_selected) > 1
+                    else f"{y_selected[0]} by {x}"
+                ),
+                "reason": (
+                    "Live visualization preview using the user's current "
+                    "X-axis, indicators, graph types and aggregation."
+                ),
+                "comparison_mode": len(y_selected) > 1,
+            }
+        elif not chart_types:
+            # User explicitly removed all graph selections.
+            # Do not keep showing the previous graph.
+            st.session_state["guided_preview_plan"] = None
+
+        # ----------------------------------------------------------
+        # Guidance
+        # ----------------------------------------------------------
+        if len(y_selected) > 1:
+            st.markdown(
+                f"""
+                <div class="comparison-note">
+                    <strong>📊 Multi-indicator comparison enabled</strong><br>
+                    You selected <strong>{len(y_selected)} indicators</strong>.
+                    The final analysis will compare them using the same X-axis:
+                    <strong>{x or "not selected"}</strong>.
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        if chart == "line" and x and "period" not in str(x).lower() and str(x).lower() not in {
+            "pe", "date", "month", "year"
+        }:
+            st.info(
+                "💡 Line charts are normally most useful for ordered time/period data. "
+                "Confirm that your X-axis is intentionally non-time-based."
+            )
+
+        elif chart == "pie" and len(y_selected) > 1:
+            st.warning(
+                "🥧 A pie chart represents one measure at a time. "
+                "For multiple indicators, a grouped bar chart is recommended."
+            )
+
+        elif chart == "scatter" and len(y_selected) > 1:
+            st.info(
+                "💡 Scatter comparison uses the first selected Y indicator. "
+                "Use grouped bars or lines when comparing several indicators."
+            )
+
+        # ----------------------------------------------------------
+        # Validation
+        # ----------------------------------------------------------
+        missing = []
+
+        if analysis != "statistical" and not x:
+            missing.append("X-axis")
+
+        if not y_selected:
+            missing.append("at least one Y-axis / indicator")
+
+        if analysis != "statistical" and not chart_types:
+            missing.append("at least one graph type")
+
+        if not analysis:
+            missing.append("analysis type")
+
+        if missing:
+            st.warning("Please select: " + ", ".join(missing) + ".")
+            return None
+
+        # ----------------------------------------------------------
+        # Comparison summary before running
+        # ----------------------------------------------------------
+        st.markdown("### 🔎 Confirm your analysis")
+
+        p1, p2, p3, p4 = st.columns(4)
+
+        p1.metric("X-axis", x)
+        p2.metric("Indicators", len(y_selected))
+        p3.metric(
+            "Graphs",
+            str(len(chart_types)) if chart_types else "None",
+        )
+        p4.metric("Analysis", "Statistical Analysis" if analysis == "statistical" else analysis_selected)
+
+        st.caption(
+            "Selected indicators: " + ", ".join(map(str, y_selected))
+        )
+
+        st.caption(
+            "Selected graph types: "
+            + (", ".join(chart_selected) if chart_selected else "None")
+        )
+
+        st.info(
+            f"⚙️ Calculation: **{analysis_selected}** analysis using **{aggregation_selected}** aggregation."
+        )
+
+        # ----------------------------------------------------------
+        # Run
+        # ----------------------------------------------------------
+        run = st.button(
+            "🚀 Run detailed analysis",
+            type="primary",
+            use_container_width=True,
+            key="run_guided_analysis",
+        )
+
+        if not run:
+            return None
+
+        return {
             "needs_clarification": False,
             "analysis_requested": True,
             "analysis_type": analysis,
-            "chart_requested": True,
-            "chart_type": chart_types[0],
-            "chart_types": list(chart_types),
+            "chart_requested": len(chart_types) > 0,
+            "chart_type": chart,
+            "chart_types": chart_types,
             "chart_labels": list(chart_selected),
             "x_column": x,
             "y_columns": list(y_selected),
@@ -8689,2527 +9959,2605 @@ def guided_analysis_ui(df, user_question, initial_plan=None):
                 else f"{y_selected[0]} by {x}"
             ),
             "reason": (
-                "Live visualization preview using the user's current "
-                "X-axis, indicators, graph types and aggregation."
+                "The user explicitly selected the X-axis, multiple indicators, "
+                "graph, analysis type and aggregation."
             ),
             "comparison_mode": len(y_selected) > 1,
         }
-    elif not chart_types:
-        # User explicitly removed all graph selections.
-        # Do not keep showing the previous graph.
-        st.session_state["guided_preview_plan"] = None
-
-    # ----------------------------------------------------------
-    # Guidance
-    # ----------------------------------------------------------
-    if len(y_selected) > 1:
-        st.markdown(
-            f"""
-            <div class="comparison-note">
-                <strong>📊 Multi-indicator comparison enabled</strong><br>
-                You selected <strong>{len(y_selected)} indicators</strong>.
-                The final analysis will compare them using the same X-axis:
-                <strong>{x or "not selected"}</strong>.
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    if chart == "line" and x and "period" not in str(x).lower() and str(x).lower() not in {
-        "pe", "date", "month", "year"
-    }:
-        st.info(
-            "💡 Line charts are normally most useful for ordered time/period data. "
-            "Confirm that your X-axis is intentionally non-time-based."
-        )
-
-    elif chart == "pie" and len(y_selected) > 1:
-        st.warning(
-            "🥧 A pie chart represents one measure at a time. "
-            "For multiple indicators, a grouped bar chart is recommended."
-        )
-
-    elif chart == "scatter" and len(y_selected) > 1:
-        st.info(
-            "💡 Scatter comparison uses the first selected Y indicator. "
-            "Use grouped bars or lines when comparing several indicators."
-        )
-
-    # ----------------------------------------------------------
-    # Validation
-    # ----------------------------------------------------------
-    missing = []
-
-    if analysis != "statistical" and not x:
-        missing.append("X-axis")
-
-    if not y_selected:
-        missing.append("at least one Y-axis / indicator")
-
-    if analysis != "statistical" and not chart_types:
-        missing.append("at least one graph type")
-
-    if not analysis:
-        missing.append("analysis type")
-
-    if missing:
-        st.warning("Please select: " + ", ".join(missing) + ".")
-        return None
-
-    # ----------------------------------------------------------
-    # Comparison summary before running
-    # ----------------------------------------------------------
-    st.markdown("### 🔎 Confirm your analysis")
-
-    p1, p2, p3, p4 = st.columns(4)
-
-    p1.metric("X-axis", x)
-    p2.metric("Indicators", len(y_selected))
-    p3.metric(
-        "Graphs",
-        str(len(chart_types)) if chart_types else "None",
-    )
-    p4.metric("Analysis", "Statistical Analysis" if analysis == "statistical" else analysis_selected)
-
-    st.caption(
-        "Selected indicators: " + ", ".join(map(str, y_selected))
-    )
-
-    st.caption(
-        "Selected graph types: "
-        + (", ".join(chart_selected) if chart_selected else "None")
-    )
-
-    st.info(
-        f"⚙️ Calculation: **{analysis_selected}** analysis using **{aggregation_selected}** aggregation."
-    )
-
-    # ----------------------------------------------------------
-    # Run
-    # ----------------------------------------------------------
-    run = st.button(
-        "🚀 Run detailed analysis",
-        type="primary",
-        use_container_width=True,
-        key="run_guided_analysis",
-    )
-
-    if not run:
-        return None
-
-    return {
-        "needs_clarification": False,
-        "analysis_requested": True,
-        "analysis_type": analysis,
-        "chart_requested": len(chart_types) > 0,
-        "chart_type": chart,
-        "chart_types": chart_types,
-        "chart_labels": list(chart_selected),
-        "x_column": x,
-        "y_columns": list(y_selected),
-        "group_column": None,
-        "indicator_columns": list(y_selected),
-        "aggregation": aggregation,
-        "filters": [],
-        "ranking_limit": 10 if analysis == "ranking" else None,
-        "comparison_groups": [],
-        "title": (
-            f"{' vs '.join(map(str, y_selected))} by {x}"
-            if len(y_selected) > 1
-            else f"{y_selected[0]} by {x}"
-        ),
-        "reason": (
-            "The user explicitly selected the X-axis, multiple indicators, "
-            "graph, analysis type and aggregation."
-        ),
-        "comparison_mode": len(y_selected) > 1,
-    }
 
 
-def get_analysis_options(df):
-    columns = [str(c) for c in df.columns]
-    numeric_columns = get_numeric_columns(df)
-    dimension_columns = []
-    for col in columns:
-        lower = col.lower()
-        if (
-            "period" in lower or lower in {"pe", "date", "month", "year"}
-            or "organisation" in lower or "organization" in lower or "org unit" in lower or "orgunit" in lower
-            or "country" in lower or "region" in lower or "district" in lower or "province" in lower
-            or "facility" in lower or "location" in lower
-        ):
-            dimension_columns.append(col)
-    for col in columns:
-        if col not in numeric_columns and col not in dimension_columns:
-            dimension_columns.append(col)
-    return {"all_columns": columns, "numeric_columns": numeric_columns, "dimension_columns": dimension_columns}
+    def get_analysis_options(df):
+        columns = [str(c) for c in df.columns]
+        numeric_columns = get_numeric_columns(df)
+        dimension_columns = []
+        for col in columns:
+            lower = col.lower()
+            if (
+                "period" in lower or lower in {"pe", "date", "month", "year"}
+                or "organisation" in lower or "organization" in lower or "org unit" in lower or "orgunit" in lower
+                or "country" in lower or "region" in lower or "district" in lower or "province" in lower
+                or "facility" in lower or "location" in lower
+            ):
+                dimension_columns.append(col)
+        for col in columns:
+            if col not in numeric_columns and col not in dimension_columns:
+                dimension_columns.append(col)
+        return {"all_columns": columns, "numeric_columns": numeric_columns, "dimension_columns": dimension_columns}
 
 
 
-# ============================================================
-# DANIP-NI AUTOMATIC ANALYSIS
-# ============================================================
+    # ============================================================
+    # DANIP-NI AUTOMATIC ANALYSIS
+    # ============================================================
 
-def _safe_unique_count(df, column):
-    if not column or column not in df.columns:
-        return 0
-    try:
-        return int(df[column].nunique(dropna=True))
-    except Exception:
-        return 0
+    def _safe_unique_count(df, column):
+        if not column or column not in df.columns:
+            return 0
+        try:
+            return int(df[column].nunique(dropna=True))
+        except Exception:
+            return 0
 
 
-def build_automatic_analysis_plan(df):
-    """
-    Build an analysis plan without asking the user to configure X/Y,
-    aggregation, chart type or analysis type.
+    def build_automatic_analysis_plan(df):
+        """
+        Build an analysis plan without asking the user to configure X/Y,
+        aggregation, chart type or analysis type.
 
-    Python determines the structure first. AI is used later for
-    narrative interpretation only.
-    """
-    columns = [str(c) for c in df.columns]
-    numeric_columns = get_numeric_columns(df)
+        Python determines the structure first. AI is used later for
+        narrative interpretation only.
+        """
+        columns = [str(c) for c in df.columns]
+        numeric_columns = get_numeric_columns(df)
 
-    period_column = find_period_column(df)
-    ou_column = find_ou_column(df)
+        period_column = find_period_column(df)
+        ou_column = find_ou_column(df)
 
-    plan = {
-        "needs_clarification": False,
-        "analysis_requested": True,
-        "analysis_type": "statistical",
-        "indicator_columns": list(numeric_columns),
-        "dimension_column": ou_column or period_column,
-        "x_column": None,
-        "y_columns": [],
-        "group_column": None,
-        "filters": [],
-        "aggregation": "sum",
-        "chart_requested": False,
-        "chart_type": "none",
-        "chart_types": [],
-        "chart_labels": [],
-        "ranking_limit": 10,
-        "comparison_groups": [],
-        "title": "DANIP-NI Automatic Data Intelligence",
-        "reason": (
-            "Automatically generated from the complete dataset. "
-            "No manual analysis configuration is required."
-        ),
-    }
+        plan = {
+            "needs_clarification": False,
+            "analysis_requested": True,
+            "analysis_type": "statistical",
+            "indicator_columns": list(numeric_columns),
+            "dimension_column": ou_column or period_column,
+            "x_column": None,
+            "y_columns": [],
+            "group_column": None,
+            "filters": [],
+            "aggregation": "sum",
+            "chart_requested": False,
+            "chart_type": "none",
+            "chart_types": [],
+            "chart_labels": [],
+            "ranking_limit": 10,
+            "comparison_groups": [],
+            "title": "DANIP-NI Automatic Data Intelligence",
+            "reason": (
+                "Automatically generated from the complete dataset. "
+                "No manual analysis configuration is required."
+            ),
+        }
 
-    if not numeric_columns:
-        return plan
+        if not numeric_columns:
+            return plan
 
-    # Prefer a time view when multiple valid periods exist.
-    # Otherwise use organisation-unit/category performance.
-    period_count = _safe_unique_count(df, period_column)
-    ou_count = _safe_unique_count(df, ou_column)
+        # Prefer a time view when multiple valid periods exist.
+        # Otherwise use organisation-unit/category performance.
+        period_count = _safe_unique_count(df, period_column)
+        ou_count = _safe_unique_count(df, ou_column)
 
-    if period_column and period_count > 1:
-        plan["x_column"] = period_column
-        plan["chart_type"] = "line"
-        plan["chart_requested"] = True
+        if period_column and period_count > 1:
+            plan["x_column"] = period_column
+            plan["chart_type"] = "line"
+            plan["chart_requested"] = True
 
-        # Keep the automatic chart readable.
-        plan["y_columns"] = list(numeric_columns[:8])
+            # Keep the automatic chart readable.
+            plan["y_columns"] = list(numeric_columns[:8])
 
-        # Organisation unit can be used as a grouping dimension only
-        # when the number of OUs is small enough to remain readable.
-        if ou_column and 1 < ou_count <= 12:
-            plan["group_column"] = ou_column
+            # Organisation unit can be used as a grouping dimension only
+            # when the number of OUs is small enough to remain readable.
+            if ou_column and 1 < ou_count <= 12:
+                plan["group_column"] = ou_column
 
-    elif ou_column and ou_count > 1:
-        plan["x_column"] = ou_column
-        plan["chart_type"] = "bar"
-        plan["chart_requested"] = True
-        plan["y_columns"] = list(numeric_columns[:8])
-
-    else:
-        # Fall back to the first useful categorical dimension.
-        candidate = None
-        for column in columns:
-            if column in numeric_columns:
-                continue
-            if column in {period_column, ou_column}:
-                continue
-
-            unique_count = _safe_unique_count(df, column)
-            if 1 < unique_count <= 25:
-                candidate = column
-                break
-
-        if candidate:
-            plan["x_column"] = candidate
+        elif ou_column and ou_count > 1:
+            plan["x_column"] = ou_column
             plan["chart_type"] = "bar"
             plan["chart_requested"] = True
             plan["y_columns"] = list(numeric_columns[:8])
 
-    return plan
-
-
-def build_automatic_analysis_evidence(df, chart_plan):
-    """
-    Deterministic automatic analysis.
-
-    The complete dataframe is processed locally. This produces evidence
-    for totals, averages, distributions, rankings, temporal changes,
-    organisation-unit comparisons and indicator-level statistics.
-    """
-    evidence = {
-        "status": "SUCCESS",
-        "analysis_population": "ALL_ROWS",
-        "source_rows": int(len(df)),
-        "source_columns": int(len(df.columns)),
-        "numeric_indicators": [],
-        "dimensions": [],
-        "automatic_findings": {},
-    }
-
-    numeric_columns = get_numeric_columns(df)
-    period_column = find_period_column(df)
-    ou_column = find_ou_column(df)
-
-    evidence["numeric_indicators"] = list(map(str, numeric_columns))
-    evidence["dimensions"] = {
-        "period_column": str(period_column) if period_column else None,
-        "organisation_unit_column": str(ou_column) if ou_column else None,
-    }
-
-    # --------------------------------------------------------
-    # Indicator-level statistics
-    # --------------------------------------------------------
-    indicator_stats = {}
-
-    for column in numeric_columns:
-        values = pd.to_numeric(df[column], errors="coerce")
-        valid = values.dropna()
-
-        if valid.empty:
-            continue
-
-        q1 = valid.quantile(0.25)
-        q3 = valid.quantile(0.75)
-        iqr = q3 - q1
-
-        if iqr == 0:
-            outliers = 0
         else:
-            outliers = int(
-                (
-                    (valid < q1 - 1.5 * iqr)
-                    | (valid > q3 + 1.5 * iqr)
-                ).sum()
-            )
+            # Fall back to the first useful categorical dimension.
+            candidate = None
+            for column in columns:
+                if column in numeric_columns:
+                    continue
+                if column in {period_column, ou_column}:
+                    continue
 
-        indicator_stats[str(column)] = {
-            "count": int(valid.count()),
-            "missing": int(values.isna().sum()),
-            "total": float(valid.sum()),
-            "mean": float(valid.mean()),
-            "median": float(valid.median()),
-            "minimum": float(valid.min()),
-            "maximum": float(valid.max()),
-            "range": float(valid.max() - valid.min()),
-            "zero_count": int((valid == 0).sum()),
-            "negative_count": int((valid < 0).sum()),
-            "outlier_count": outliers,
+                unique_count = _safe_unique_count(df, column)
+                if 1 < unique_count <= 25:
+                    candidate = column
+                    break
+
+            if candidate:
+                plan["x_column"] = candidate
+                plan["chart_type"] = "bar"
+                plan["chart_requested"] = True
+                plan["y_columns"] = list(numeric_columns[:8])
+
+        return plan
+
+
+    def build_automatic_analysis_evidence(df, chart_plan):
+        """
+        Deterministic automatic analysis.
+
+        The complete dataframe is processed locally. This produces evidence
+        for totals, averages, distributions, rankings, temporal changes,
+        organisation-unit comparisons and indicator-level statistics.
+        """
+        evidence = {
+            "status": "SUCCESS",
+            "analysis_population": "ALL_ROWS",
+            "source_rows": int(len(df)),
+            "source_columns": int(len(df.columns)),
+            "numeric_indicators": [],
+            "dimensions": [],
+            "automatic_findings": {},
         }
 
-    evidence["automatic_findings"]["indicator_statistics"] = indicator_stats
+        numeric_columns = get_numeric_columns(df)
+        period_column = find_period_column(df)
+        ou_column = find_ou_column(df)
 
-    # --------------------------------------------------------
-    # Organisation-unit rankings
-    # --------------------------------------------------------
-    rankings = {}
+        evidence["numeric_indicators"] = list(map(str, numeric_columns))
+        evidence["dimensions"] = {
+            "period_column": str(period_column) if period_column else None,
+            "organisation_unit_column": str(ou_column) if ou_column else None,
+        }
 
-    if ou_column and ou_column in df.columns:
-        for indicator in numeric_columns[:20]:
-            temp = pd.DataFrame({
-                "__ou__": df[ou_column],
-                "__value__": pd.to_numeric(
-                    df[indicator],
-                    errors="coerce",
-                ),
-            }).dropna(subset=["__ou__", "__value__"])
+        # --------------------------------------------------------
+        # Indicator-level statistics
+        # --------------------------------------------------------
+        indicator_stats = {}
 
-            if temp.empty:
+        for column in numeric_columns:
+            values = pd.to_numeric(df[column], errors="coerce")
+            valid = values.dropna()
+
+            if valid.empty:
                 continue
 
-            grouped = (
-                temp.groupby("__ou__", dropna=False)["__value__"]
-                .sum()
-                .sort_values(ascending=False)
-            )
+            q1 = valid.quantile(0.25)
+            q3 = valid.quantile(0.75)
+            iqr = q3 - q1
 
-            rankings[str(indicator)] = {
-                "top_10": [
-                    {
-                        "organisation_unit": str(idx),
-                        "value": float(value),
-                    }
-                    for idx, value in grouped.head(10).items()
-                ],
-                "bottom_10": [
-                    {
-                        "organisation_unit": str(idx),
-                        "value": float(value),
-                    }
-                    for idx, value in grouped.tail(10).sort_values().items()
-                ],
+            if iqr == 0:
+                outliers = 0
+            else:
+                outliers = int(
+                    (
+                        (valid < q1 - 1.5 * iqr)
+                        | (valid > q3 + 1.5 * iqr)
+                    ).sum()
+                )
+
+            indicator_stats[str(column)] = {
+                "count": int(valid.count()),
+                "missing": int(values.isna().sum()),
+                "total": float(valid.sum()),
+                "mean": float(valid.mean()),
+                "median": float(valid.median()),
+                "minimum": float(valid.min()),
+                "maximum": float(valid.max()),
+                "range": float(valid.max() - valid.min()),
+                "zero_count": int((valid == 0).sum()),
+                "negative_count": int((valid < 0).sum()),
+                "outlier_count": outliers,
             }
 
-    evidence["automatic_findings"]["organisation_unit_rankings"] = rankings
+        evidence["automatic_findings"]["indicator_statistics"] = indicator_stats
 
-    # --------------------------------------------------------
-    # Period analysis
-    # --------------------------------------------------------
-    period_analysis = {}
+        # --------------------------------------------------------
+        # Organisation-unit rankings
+        # --------------------------------------------------------
+        rankings = {}
 
-    if period_column and period_column in df.columns:
-        period_values = df[period_column].dropna().astype(str)
-
-        if not period_values.empty:
+        if ou_column and ou_column in df.columns:
             for indicator in numeric_columns[:20]:
                 temp = pd.DataFrame({
-                    "__period__": df[period_column].astype(str),
+                    "__ou__": df[ou_column],
                     "__value__": pd.to_numeric(
                         df[indicator],
                         errors="coerce",
                     ),
-                }).dropna(subset=["__period__", "__value__"])
+                }).dropna(subset=["__ou__", "__value__"])
 
                 if temp.empty:
                     continue
 
                 grouped = (
-                    temp.groupby("__period__", dropna=False)["__value__"]
+                    temp.groupby("__ou__", dropna=False)["__value__"]
                     .sum()
+                    .sort_values(ascending=False)
                 )
 
-                period_analysis[str(indicator)] = [
-                    {
-                        "period": str(idx),
-                        "value": float(value),
-                    }
-                    for idx, value in grouped.items()
-                ]
+                rankings[str(indicator)] = {
+                    "top_10": [
+                        {
+                            "organisation_unit": str(idx),
+                            "value": float(value),
+                        }
+                        for idx, value in grouped.head(10).items()
+                    ],
+                    "bottom_10": [
+                        {
+                            "organisation_unit": str(idx),
+                            "value": float(value),
+                        }
+                        for idx, value in grouped.tail(10).sort_values().items()
+                    ],
+                }
 
-    evidence["automatic_findings"]["period_analysis"] = period_analysis
+        evidence["automatic_findings"]["organisation_unit_rankings"] = rankings
 
-    # --------------------------------------------------------
-    # Indicator comparison
-    # --------------------------------------------------------
-    comparison = []
+        # --------------------------------------------------------
+        # Period analysis
+        # --------------------------------------------------------
+        period_analysis = {}
 
-    totals = []
-    for indicator, stats in indicator_stats.items():
-        totals.append({
-            "indicator": indicator,
-            "total": stats["total"],
-            "mean": stats["mean"],
-            "valid_observations": stats["count"],
-        })
+        if period_column and period_column in df.columns:
+            period_values = df[period_column].dropna().astype(str)
 
-    totals = sorted(
-        totals,
-        key=lambda x: abs(x["total"]),
-        reverse=True,
-    )
+            if not period_values.empty:
+                for indicator in numeric_columns[:20]:
+                    temp = pd.DataFrame({
+                        "__period__": df[period_column].astype(str),
+                        "__value__": pd.to_numeric(
+                            df[indicator],
+                            errors="coerce",
+                        ),
+                    }).dropna(subset=["__period__", "__value__"])
 
-    if totals:
-        comparison = totals[:20]
+                    if temp.empty:
+                        continue
 
-    evidence["automatic_findings"]["indicator_comparison"] = comparison
+                    grouped = (
+                        temp.groupby("__period__", dropna=False)["__value__"]
+                        .sum()
+                    )
 
-    # --------------------------------------------------------
-    # Complete-data profile
-    # --------------------------------------------------------
-    evidence["automatic_findings"]["dataset_profile"] = {
-        "rows": int(len(df)),
-        "columns": int(len(df.columns)),
-        "numeric_columns": int(len(numeric_columns)),
-        "missing_cells": int(df.isna().sum().sum()),
-        "duplicate_rows": int(df.duplicated().sum()),
-        "periods": _safe_unique_count(df, period_column),
-        "organisation_units": _safe_unique_count(df, ou_column),
-    }
+                    period_analysis[str(indicator)] = [
+                        {
+                            "period": str(idx),
+                            "value": float(value),
+                        }
+                        for idx, value in grouped.items()
+                    ]
 
-    return evidence
+        evidence["automatic_findings"]["period_analysis"] = period_analysis
 
+        # --------------------------------------------------------
+        # Indicator comparison
+        # --------------------------------------------------------
+        comparison = []
 
-# ============================================================
-# ADVANCED ANALYTICS — ADDITIVE / NON-DESTRUCTIVE
-# ============================================================
+        totals = []
+        for indicator, stats in indicator_stats.items():
+            totals.append({
+                "indicator": indicator,
+                "total": stats["total"],
+                "mean": stats["mean"],
+                "valid_observations": stats["count"],
+            })
 
-def _advanced_period_series(df, period_column):
-    """Best-effort conversion of common DHIS2 period formats to dates."""
-    if not period_column or period_column not in df.columns:
-        return pd.Series(pd.NaT, index=df.index), False
-
-    raw = df[period_column].astype("string").str.strip()
-    parsed = pd.to_datetime(raw, errors="coerce")
-
-    # DHIS2 monthly code: YYYYMM
-    missing = parsed.isna()
-    if missing.any():
-        ym = raw.str.extract(r"^(20\\d{2})[-/]?(0[1-9]|1[0-2])$", expand=True)
-        ym_dates = pd.to_datetime(
-            ym[0].fillna("") + "-" + ym[1].fillna("") + "-01",
-            errors="coerce",
+        totals = sorted(
+            totals,
+            key=lambda x: abs(x["total"]),
+            reverse=True,
         )
-        parsed = parsed.fillna(ym_dates)
 
-    # Quarter code: YYYYQ1 / YYYY-Q1
-    missing = parsed.isna()
-    if missing.any():
-        q = raw.str.extract(r"^(20\\d{2})[- ]?Q([1-4])$", expand=True)
-        q_year = pd.to_numeric(q[0], errors="coerce")
-        q_num = pd.to_numeric(q[1], errors="coerce")
-        q_month = ((q_num - 1) * 3 + 1).clip(1, 12)
-        q_dates = pd.to_datetime(
-            dict(year=q_year, month=q_month, day=1),
-            errors="coerce",
-        )
-        parsed = parsed.fillna(q_dates)
+        if totals:
+            comparison = totals[:20]
 
-    return parsed, bool(parsed.notna().sum() >= 3)
+        evidence["automatic_findings"]["indicator_comparison"] = comparison
+
+        # --------------------------------------------------------
+        # Complete-data profile
+        # --------------------------------------------------------
+        evidence["automatic_findings"]["dataset_profile"] = {
+            "rows": int(len(df)),
+            "columns": int(len(df.columns)),
+            "numeric_columns": int(len(numeric_columns)),
+            "missing_cells": int(df.isna().sum().sum()),
+            "duplicate_rows": int(df.duplicated().sum()),
+            "periods": _safe_unique_count(df, period_column),
+            "organisation_units": _safe_unique_count(df, ou_column),
+        }
+
+        return evidence
 
 
-def build_advanced_analytics(df, max_indicators=12, max_ous=30):
-    """Deterministic advanced analytics. Never modifies the source dataframe."""
-    result = {
-        "status": "SUCCESS",
-        "rows": int(len(df)),
-        "advanced": {},
-    }
+    # ============================================================
+    # ADVANCED ANALYTICS — ADDITIVE / NON-DESTRUCTIVE
+    # ============================================================
 
-    if not isinstance(df, pd.DataFrame) or df.empty:
-        result["status"] = "NO_DATA"
+    def _advanced_period_series(df, period_column):
+        """Best-effort conversion of common DHIS2 period formats to dates."""
+        if not period_column or period_column not in df.columns:
+            return pd.Series(pd.NaT, index=df.index), False
+
+        raw = df[period_column].astype("string").str.strip()
+        parsed = pd.to_datetime(raw, errors="coerce")
+
+        # DHIS2 monthly code: YYYYMM
+        missing = parsed.isna()
+        if missing.any():
+            ym = raw.str.extract(r"^(20\\d{2})[-/]?(0[1-9]|1[0-2])$", expand=True)
+            ym_dates = pd.to_datetime(
+                ym[0].fillna("") + "-" + ym[1].fillna("") + "-01",
+                errors="coerce",
+            )
+            parsed = parsed.fillna(ym_dates)
+
+        # Quarter code: YYYYQ1 / YYYY-Q1
+        missing = parsed.isna()
+        if missing.any():
+            q = raw.str.extract(r"^(20\\d{2})[- ]?Q([1-4])$", expand=True)
+            q_year = pd.to_numeric(q[0], errors="coerce")
+            q_num = pd.to_numeric(q[1], errors="coerce")
+            q_month = ((q_num - 1) * 3 + 1).clip(1, 12)
+            q_dates = pd.to_datetime(
+                dict(year=q_year, month=q_month, day=1),
+                errors="coerce",
+            )
+            parsed = parsed.fillna(q_dates)
+
+        return parsed, bool(parsed.notna().sum() >= 3)
+
+
+    def build_advanced_analytics(df, max_indicators=12, max_ous=30):
+        """Deterministic advanced analytics. Never modifies the source dataframe."""
+        result = {
+            "status": "SUCCESS",
+            "rows": int(len(df)),
+            "advanced": {},
+        }
+
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            result["status"] = "NO_DATA"
+            return result
+
+        numeric_columns = get_numeric_columns(df)
+        numeric_columns = numeric_columns[:max_indicators]
+        period_column = find_period_column(df)
+        ou_column = find_ou_column(df)
+
+        # ------------------------------------------------------------
+        # 1. Distribution / volatility profile
+        # ------------------------------------------------------------
+        volatility = {}
+        for col in numeric_columns:
+            values = pd.to_numeric(df[col], errors="coerce").dropna()
+            if len(values) < 2:
+                continue
+            mean = float(values.mean())
+            std = float(values.std()) if pd.notna(values.std()) else 0.0
+            volatility[str(col)] = {
+                "mean": mean,
+                "std": std,
+                "coefficient_of_variation_pct": (
+                    round(abs(std / mean) * 100, 2) if mean != 0 else None
+                ),
+                "skewness": round(float(values.skew()), 4) if len(values) >= 3 else None,
+            }
+        result["advanced"]["volatility"] = volatility
+
+        # ------------------------------------------------------------
+        # 2. Correlation network / matrix
+        # ------------------------------------------------------------
+        correlation = {}
+        if len(numeric_columns) >= 2:
+            corr_df = df[numeric_columns].apply(pd.to_numeric, errors="coerce")
+            corr = corr_df.corr(method="pearson", min_periods=5)
+            correlation = {
+                str(row): {
+                    str(col): (
+                        round(float(corr.loc[row, col]), 3)
+                        if pd.notna(corr.loc[row, col]) else None
+                    )
+                    for col in corr.columns
+                }
+                for row in corr.index
+            }
+
+            pairs = []
+            for i, a in enumerate(corr.columns):
+                for b in corr.columns[i + 1:]:
+                    value = corr.loc[a, b]
+                    if pd.notna(value):
+                        pairs.append({
+                            "indicator_1": str(a),
+                            "indicator_2": str(b),
+                            "correlation": round(float(value), 3),
+                            "strength": (
+                                "Very strong" if abs(value) >= .8 else
+                                "Strong" if abs(value) >= .6 else
+                                "Moderate" if abs(value) >= .4 else
+                                "Weak"
+                            ),
+                        })
+            pairs.sort(key=lambda x: abs(x["correlation"]), reverse=True)
+            result["advanced"]["correlation_pairs"] = pairs[:30]
+        result["advanced"]["correlation_matrix"] = correlation
+
+        # ------------------------------------------------------------
+        # 3. Period trend, growth, volatility and simple forecast
+        # ------------------------------------------------------------
+        trend_analysis = {}
+        forecast = {}
+        parsed_period, valid_period = _advanced_period_series(df, period_column)
+
+        if valid_period:
+            period_work = df.copy()
+            period_work["__advanced_period__"] = parsed_period
+            period_work = period_work.dropna(subset=["__advanced_period__"])
+
+            for col in numeric_columns:
+                period_work["__advanced_value__"] = pd.to_numeric(
+                    period_work[col], errors="coerce"
+                )
+                grouped = (
+                    period_work.dropna(subset=["__advanced_value__"])
+                    .groupby("__advanced_period__")["__advanced_value__"]
+                    .sum()
+                    .sort_index()
+                )
+
+                if len(grouped) < 3:
+                    continue
+
+                y = grouped.to_numpy(dtype=float)
+                x = np.arange(len(y), dtype=float)
+                slope, intercept = np.polyfit(x, y, 1)
+                predicted = intercept + slope * x
+                ss_res = float(np.sum((y - predicted) ** 2))
+                ss_tot = float(np.sum((y - y.mean()) ** 2))
+                r2 = 1.0 - ss_res / ss_tot if ss_tot != 0 else 0.0
+
+                first = float(y[0])
+                last = float(y[-1])
+                change_pct = ((last - first) / abs(first) * 100) if first != 0 else None
+                direction = "Increasing" if slope > 0 else "Decreasing" if slope < 0 else "Stable"
+
+                trend_analysis[str(col)] = {
+                    "periods": int(len(grouped)),
+                    "first_period": str(grouped.index[0].date()),
+                    "last_period": str(grouped.index[-1].date()),
+                    "first_value": first,
+                    "last_value": last,
+                    "absolute_change": last - first,
+                    "change_pct": round(float(change_pct), 2) if change_pct is not None else None,
+                    "slope_per_period": round(float(slope), 4),
+                    "r_squared": round(float(r2), 4),
+                    "direction": direction,
+                }
+
+                # Conservative short-horizon linear forecast: 3 future periods.
+                if len(grouped) >= 4:
+                    future_x = np.arange(len(y), len(y) + 3, dtype=float)
+                    future_y = intercept + slope * future_x
+                    future_dates = pd.date_range(
+                        grouped.index[-1] + pd.offsets.MonthBegin(1),
+                        periods=3,
+                        freq="MS",
+                    )
+                    forecast[str(col)] = [
+                        {
+                            "period": str(date.date()),
+                            "forecast": round(float(value), 2),
+                        }
+                        for date, value in zip(future_dates, future_y)
+                    ]
+
+        result["advanced"]["trend_analysis"] = trend_analysis
+        result["advanced"]["forecast"] = forecast
+
+        # ------------------------------------------------------------
+        # 4. Robust anomaly detection (IQR + MAD)
+        # ------------------------------------------------------------
+        anomalies = []
+        for col in numeric_columns:
+            values = pd.to_numeric(df[col], errors="coerce")
+            valid = values.dropna()
+            if len(valid) < 5:
+                continue
+
+            q1 = valid.quantile(.25)
+            q3 = valid.quantile(.75)
+            iqr = q3 - q1
+            low = q1 - 1.5 * iqr
+            high = q3 + 1.5 * iqr
+
+            median = valid.median()
+            mad = (valid - median).abs().median()
+            if mad and pd.notna(mad):
+                robust_z = (values - median).abs() / (1.4826 * mad)
+                anomaly_mask = robust_z > 3.5
+            else:
+                anomaly_mask = (values < low) | (values > high) if iqr != 0 else pd.Series(False, index=df.index)
+
+            indexes = df.index[anomaly_mask.fillna(False)]
+            for idx in indexes[:100]:
+                item = {
+                    "row": int(idx) if isinstance(idx, (int, np.integer)) else str(idx),
+                    "indicator": str(col),
+                    "value": float(values.loc[idx]),
+                    "method": "MAD" if mad and pd.notna(mad) else "IQR",
+                }
+                if ou_column and ou_column in df.columns:
+                    item["organisation_unit"] = str(df.loc[idx, ou_column])
+                if period_column and period_column in df.columns:
+                    item["period"] = str(df.loc[idx, period_column])
+                anomalies.append(item)
+
+        result["advanced"]["anomalies"] = anomalies[:200]
+        result["advanced"]["anomaly_count"] = int(len(anomalies))
+
+        # ------------------------------------------------------------
+        # 5. Organisation-unit benchmarking
+        # ------------------------------------------------------------
+        benchmarking = {}
+        if ou_column and ou_column in df.columns:
+            ou_counts = df[ou_column].nunique(dropna=True)
+            if 1 < ou_counts <= max_ous:
+                for col in numeric_columns[:8]:
+                    temp = pd.DataFrame({
+                        "__ou__": df[ou_column],
+                        "__value__": pd.to_numeric(df[col], errors="coerce"),
+                    }).dropna()
+                    if temp.empty:
+                        continue
+                    grouped = temp.groupby("__ou__")["__value__"].agg(["sum", "mean", "count"])
+                    grouped["share_pct"] = grouped["sum"] / grouped["sum"].sum() * 100 if grouped["sum"].sum() != 0 else np.nan
+                    grouped = grouped.sort_values("sum", ascending=False)
+                    benchmarking[str(col)] = [
+                        {
+                            "organisation_unit": str(idx),
+                            "total": round(float(row["sum"]), 2),
+                            "average": round(float(row["mean"]), 2),
+                            "observations": int(row["count"]),
+                            "share_pct": round(float(row["share_pct"]), 2) if pd.notna(row["share_pct"]) else None,
+                        }
+                        for idx, row in grouped.head(30).iterrows()
+                    ]
+        result["advanced"]["organisation_unit_benchmarking"] = benchmarking
+
         return result
 
-    numeric_columns = get_numeric_columns(df)
-    numeric_columns = numeric_columns[:max_indicators]
-    period_column = find_period_column(df)
-    ou_column = find_ou_column(df)
 
-    # ------------------------------------------------------------
-    # 1. Distribution / volatility profile
-    # ------------------------------------------------------------
-    volatility = {}
-    for col in numeric_columns:
-        values = pd.to_numeric(df[col], errors="coerce").dropna()
-        if len(values) < 2:
-            continue
-        mean = float(values.mean())
-        std = float(values.std()) if pd.notna(values.std()) else 0.0
-        volatility[str(col)] = {
-            "mean": mean,
-            "std": std,
-            "coefficient_of_variation_pct": (
-                round(abs(std / mean) * 100, 2) if mean != 0 else None
-            ),
-            "skewness": round(float(values.skew()), 4) if len(values) >= 3 else None,
-        }
-    result["advanced"]["volatility"] = volatility
+    def render_advanced_analytics(df):
+        """Optional advanced layer. It is isolated from the existing analysis pipeline."""
+        st.subheader("🧠 Advanced Analytics")
+        st.caption(
+            "Additional deterministic analytics. These calculations do not modify "
+            "the source data, current chart plan, aggregation, data-quality score, or AI result."
+        )
 
-    # ------------------------------------------------------------
-    # 2. Correlation network / matrix
-    # ------------------------------------------------------------
-    correlation = {}
-    if len(numeric_columns) >= 2:
-        corr_df = df[numeric_columns].apply(pd.to_numeric, errors="coerce")
-        corr = corr_df.corr(method="pearson", min_periods=5)
-        correlation = {
-            str(row): {
-                str(col): (
-                    round(float(corr.loc[row, col]), 3)
-                    if pd.notna(corr.loc[row, col]) else None
-                )
-                for col in corr.columns
-            }
-            for row in corr.index
-        }
+        with st.expander("Open Advanced Analytics", expanded=False):
+            advanced = build_advanced_analytics(df).get("advanced", {})
 
-        pairs = []
-        for i, a in enumerate(corr.columns):
-            for b in corr.columns[i + 1:]:
-                value = corr.loc[a, b]
-                if pd.notna(value):
-                    pairs.append({
-                        "indicator_1": str(a),
-                        "indicator_2": str(b),
-                        "correlation": round(float(value), 3),
-                        "strength": (
-                            "Very strong" if abs(value) >= .8 else
-                            "Strong" if abs(value) >= .6 else
-                            "Moderate" if abs(value) >= .4 else
-                            "Weak"
-                        ),
-                    })
-        pairs.sort(key=lambda x: abs(x["correlation"]), reverse=True)
-        result["advanced"]["correlation_pairs"] = pairs[:30]
-    result["advanced"]["correlation_matrix"] = correlation
+            volatility = advanced.get("volatility", {})
+            trends = advanced.get("trend_analysis", {})
+            correlations = advanced.get("correlation_pairs", [])
+            anomalies = advanced.get("anomalies", [])
+            forecasts = advanced.get("forecast", {})
+            benchmarking = advanced.get("organisation_unit_benchmarking", {})
 
-    # ------------------------------------------------------------
-    # 3. Period trend, growth, volatility and simple forecast
-    # ------------------------------------------------------------
-    trend_analysis = {}
-    forecast = {}
-    parsed_period, valid_period = _advanced_period_series(df, period_column)
+            t1, t2, t3, t4, t5 = st.tabs([
+                "📈 Trends", "🔮 Forecast", "🔗 Correlation", "🚨 Anomalies", "🏆 Benchmarking"
+            ])
 
-    if valid_period:
-        period_work = df.copy()
-        period_work["__advanced_period__"] = parsed_period
-        period_work = period_work.dropna(subset=["__advanced_period__"])
+            with t1:
+                if trends:
+                    trend_df = pd.DataFrame([
+                        {"Indicator": k, **v} for k, v in trends.items()
+                    ])
+                    st.dataframe(trend_df, use_container_width=True, hide_index=True)
+                    try:
+                        import plotly.express as px
+                        chart_rows = []
+                        period_column = find_period_column(df)
+                        parsed, valid = _advanced_period_series(df, period_column)
+                        if valid:
+                            for col in list(trends.keys())[:6]:
+                                temp = pd.DataFrame({
+                                    "Period": parsed,
+                                    "Value": pd.to_numeric(df[col], errors="coerce"),
+                                }).dropna()
+                                grouped = temp.groupby("Period")["Value"].sum().reset_index()
+                                grouped["Indicator"] = str(col)
+                                chart_rows.append(grouped)
+                        if chart_rows:
+                            plot_df = pd.concat(chart_rows, ignore_index=True)
+                            fig = px.line(
+                                plot_df,
+                                x="Period",
+                                y="Value",
+                                color="Indicator",
+                                markers=True,
+                                title="Advanced Trend Analysis",
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:
+                        st.info(f"Trend chart unavailable: {e}")
+                else:
+                    st.info("A valid period dimension with at least three periods is required for trend analytics.")
 
-        for col in numeric_columns:
-            period_work["__advanced_value__"] = pd.to_numeric(
-                period_work[col], errors="coerce"
-            )
-            grouped = (
-                period_work.dropna(subset=["__advanced_value__"])
-                .groupby("__advanced_period__")["__advanced_value__"]
-                .sum()
-                .sort_index()
-            )
+                if volatility:
+                    st.markdown("#### Volatility & Distribution")
+                    st.dataframe(
+                        pd.DataFrame([{ "Indicator": k, **v } for k, v in volatility.items()]),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
-            if len(grouped) < 3:
-                continue
+            with t2:
+                if forecasts:
+                    forecast_rows = []
+                    for indicator, rows in forecasts.items():
+                        for row in rows:
+                            forecast_rows.append({"Indicator": indicator, **row})
+                    st.dataframe(pd.DataFrame(forecast_rows), use_container_width=True, hide_index=True)
+                    st.caption("Forecasts use a simple deterministic linear trend and should be treated as directional, not causal predictions.")
+                else:
+                    st.info("Forecasting requires at least four valid ordered periods.")
 
-            y = grouped.to_numpy(dtype=float)
-            x = np.arange(len(y), dtype=float)
-            slope, intercept = np.polyfit(x, y, 1)
-            predicted = intercept + slope * x
-            ss_res = float(np.sum((y - predicted) ** 2))
-            ss_tot = float(np.sum((y - y.mean()) ** 2))
-            r2 = 1.0 - ss_res / ss_tot if ss_tot != 0 else 0.0
+            with t3:
+                if correlations:
+                    corr_df = pd.DataFrame(correlations)
+                    st.dataframe(corr_df, use_container_width=True, hide_index=True)
+                    try:
+                        import plotly.express as px
+                        matrix = advanced.get("correlation_matrix", {})
+                        matrix_df = pd.DataFrame(matrix).T
+                        if not matrix_df.empty:
+                            fig = px.imshow(
+                                matrix_df,
+                                text_auto=True,
+                                aspect="auto",
+                                zmin=-1,
+                                zmax=1,
+                                title="Indicator Correlation Matrix",
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+                    except Exception as e:
+                        st.info(f"Correlation heatmap unavailable: {e}")
+                else:
+                    st.info("At least two numeric indicators with five paired observations are required.")
 
-            first = float(y[0])
-            last = float(y[-1])
-            change_pct = ((last - first) / abs(first) * 100) if first != 0 else None
-            direction = "Increasing" if slope > 0 else "Decreasing" if slope < 0 else "Stable"
+            with t4:
+                st.metric("Detected anomalies", f"{len(anomalies):,}")
+                if anomalies:
+                    st.dataframe(pd.DataFrame(anomalies), use_container_width=True, hide_index=True)
+                    st.warning("Anomalies are flagged for investigation; they are never automatically deleted or changed.")
+                else:
+                    st.success("No advanced statistical anomalies were detected in the selected numeric fields.")
 
-            trend_analysis[str(col)] = {
-                "periods": int(len(grouped)),
-                "first_period": str(grouped.index[0].date()),
-                "last_period": str(grouped.index[-1].date()),
-                "first_value": first,
-                "last_value": last,
-                "absolute_change": last - first,
-                "change_pct": round(float(change_pct), 2) if change_pct is not None else None,
-                "slope_per_period": round(float(slope), 4),
-                "r_squared": round(float(r2), 4),
-                "direction": direction,
-            }
+            with t5:
+                if benchmarking:
+                    for indicator, rows in list(benchmarking.items())[:8]:
+                        st.markdown(f"**{indicator} — organisation-unit benchmark**")
+                        bench_df = pd.DataFrame(rows)
+                        st.dataframe(bench_df, use_container_width=True, hide_index=True)
+                else:
+                    st.info("Organisation-unit benchmarking requires a detected OU field and a manageable number of OUs.")
 
-            # Conservative short-horizon linear forecast: 3 future periods.
-            if len(grouped) >= 4:
-                future_x = np.arange(len(y), len(y) + 3, dtype=float)
-                future_y = intercept + slope * future_x
-                future_dates = pd.date_range(
-                    grouped.index[-1] + pd.offsets.MonthBegin(1),
-                    periods=3,
-                    freq="MS",
-                )
-                forecast[str(col)] = [
-                    {
-                        "period": str(date.date()),
-                        "forecast": round(float(value), 2),
-                    }
-                    for date, value in zip(future_dates, future_y)
-                ]
 
-    result["advanced"]["trend_analysis"] = trend_analysis
-    result["advanced"]["forecast"] = forecast
+    # ============================================================
+    # M&E PROGRAMME MANAGER NARRATION
+    # ============================================================
 
-    # ------------------------------------------------------------
-    # 4. Robust anomaly detection (IQR + MAD)
-    # ------------------------------------------------------------
-    anomalies = []
-    for col in numeric_columns:
-        values = pd.to_numeric(df[col], errors="coerce")
-        valid = values.dropna()
-        if len(valid) < 5:
-            continue
+    def _me_numeric(value):
+        try:
+            return float(value)
+        except Exception:
+            return None
 
-        q1 = valid.quantile(.25)
-        q3 = valid.quantile(.75)
-        iqr = q3 - q1
-        low = q1 - 1.5 * iqr
-        high = q3 + 1.5 * iqr
 
-        median = valid.median()
-        mad = (valid - median).abs().median()
-        if mad and pd.notna(mad):
-            robust_z = (values - median).abs() / (1.4826 * mad)
-            anomaly_mask = robust_z > 3.5
-        else:
-            anomaly_mask = (values < low) | (values > high) if iqr != 0 else pd.Series(False, index=df.index)
+    def build_me_programme_narrative(df, plan, quality_issues, quality_matrix, quality_summary):
+        """Create a deterministic M&E interpretation from the exact requested analysis.
 
-        indexes = df.index[anomaly_mask.fillna(False)]
-        for idx in indexes[:100]:
-            item = {
-                "row": int(idx) if isinstance(idx, (int, np.integer)) else str(idx),
-                "indicator": str(col),
-                "value": float(values.loc[idx]),
-                "method": "MAD" if mad and pd.notna(mad) else "IQR",
-            }
-            if ou_column and ou_column in df.columns:
-                item["organisation_unit"] = str(df.loc[idx, ou_column])
-            if period_column and period_column in df.columns:
-                item["period"] = str(df.loc[idx, period_column])
-            anomalies.append(item)
+        The narrative is evidence-led. It does not claim causation and never changes
+        the user's selected indicator, X-axis, aggregation or source data.
+        """
+        if not plan or not plan.get("chart_requested"):
+            return None
 
-    result["advanced"]["anomalies"] = anomalies[:200]
-    result["advanced"]["anomaly_count"] = int(len(anomalies))
+        x = plan.get("x_column")
+        indicators = [c for c in (plan.get("y_columns") or []) if c in df.columns]
+        if not x or x not in df.columns or not indicators:
+            return None
 
-    # ------------------------------------------------------------
-    # 5. Organisation-unit benchmarking
-    # ------------------------------------------------------------
-    benchmarking = {}
-    if ou_column and ou_column in df.columns:
-        ou_counts = df[ou_column].nunique(dropna=True)
-        if 1 < ou_counts <= max_ous:
-            for col in numeric_columns[:8]:
-                temp = pd.DataFrame({
-                    "__ou__": df[ou_column],
-                    "__value__": pd.to_numeric(df[col], errors="coerce"),
-                }).dropna()
-                if temp.empty:
+        chart_df, error = build_chart_data_dataframe(df, plan)
+        if error or chart_df is None or chart_df.empty:
+            return None
+
+        aggregation = str(plan.get("aggregation", "sum")).lower()
+        quality_score = float((quality_summary or {}).get("score", 0))
+        quality_rating = str((quality_summary or {}).get("rating", "Unknown"))
+
+        high = [i for i in (quality_issues or []) if str(i.get("Priority", "")).upper() == "HIGH"]
+        medium = [i for i in (quality_issues or []) if str(i.get("Priority", "")).upper() == "MEDIUM"]
+
+        # Build indicator-level evidence from the same dataframe used by the chart.
+        indicator_evidence = []
+        rows_for_table = []
+
+        if "__series__" in chart_df.columns and "__value__" in chart_df.columns:
+            working = chart_df.copy()
+            working["__value__"] = pd.to_numeric(working["__value__"], errors="coerce")
+            working = working.dropna(subset=["__value__"])
+
+            for indicator in indicators:
+                sub = working[working["__series__"].astype(str) == str(indicator)].copy()
+                if sub.empty:
                     continue
-                grouped = temp.groupby("__ou__")["__value__"].agg(["sum", "mean", "count"])
-                grouped["share_pct"] = grouped["sum"] / grouped["sum"].sum() * 100 if grouped["sum"].sum() != 0 else np.nan
-                grouped = grouped.sort_values("sum", ascending=False)
-                benchmarking[str(col)] = [
-                    {
-                        "organisation_unit": str(idx),
-                        "total": round(float(row["sum"]), 2),
-                        "average": round(float(row["mean"]), 2),
-                        "observations": int(row["count"]),
-                        "share_pct": round(float(row["share_pct"]), 2) if pd.notna(row["share_pct"]) else None,
-                    }
-                    for idx, row in grouped.head(30).iterrows()
-                ]
-    result["advanced"]["organisation_unit_benchmarking"] = benchmarking
-
-    return result
-
-
-def render_advanced_analytics(df):
-    """Optional advanced layer. It is isolated from the existing analysis pipeline."""
-    st.subheader("🧠 Advanced Analytics")
-    st.caption(
-        "Additional deterministic analytics. These calculations do not modify "
-        "the source data, current chart plan, aggregation, data-quality score, or AI result."
-    )
-
-    with st.expander("Open Advanced Analytics", expanded=False):
-        advanced = build_advanced_analytics(df).get("advanced", {})
-
-        volatility = advanced.get("volatility", {})
-        trends = advanced.get("trend_analysis", {})
-        correlations = advanced.get("correlation_pairs", [])
-        anomalies = advanced.get("anomalies", [])
-        forecasts = advanced.get("forecast", {})
-        benchmarking = advanced.get("organisation_unit_benchmarking", {})
-
-        t1, t2, t3, t4, t5 = st.tabs([
-            "📈 Trends", "🔮 Forecast", "🔗 Correlation", "🚨 Anomalies", "🏆 Benchmarking"
-        ])
-
-        with t1:
-            if trends:
-                trend_df = pd.DataFrame([
-                    {"Indicator": k, **v} for k, v in trends.items()
-                ])
-                st.dataframe(trend_df, use_container_width=True, hide_index=True)
-                try:
-                    import plotly.express as px
-                    chart_rows = []
-                    period_column = find_period_column(df)
-                    parsed, valid = _advanced_period_series(df, period_column)
-                    if valid:
-                        for col in list(trends.keys())[:6]:
-                            temp = pd.DataFrame({
-                                "Period": parsed,
-                                "Value": pd.to_numeric(df[col], errors="coerce"),
-                            }).dropna()
-                            grouped = temp.groupby("Period")["Value"].sum().reset_index()
-                            grouped["Indicator"] = str(col)
-                            chart_rows.append(grouped)
-                    if chart_rows:
-                        plot_df = pd.concat(chart_rows, ignore_index=True)
-                        fig = px.line(
-                            plot_df,
-                            x="Period",
-                            y="Value",
-                            color="Indicator",
-                            markers=True,
-                            title="Advanced Trend Analysis",
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-                except Exception as e:
-                    st.info(f"Trend chart unavailable: {e}")
-            else:
-                st.info("A valid period dimension with at least three periods is required for trend analytics.")
-
-            if volatility:
-                st.markdown("#### Volatility & Distribution")
-                st.dataframe(
-                    pd.DataFrame([{ "Indicator": k, **v } for k, v in volatility.items()]),
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-        with t2:
-            if forecasts:
-                forecast_rows = []
-                for indicator, rows in forecasts.items():
-                    for row in rows:
-                        forecast_rows.append({"Indicator": indicator, **row})
-                st.dataframe(pd.DataFrame(forecast_rows), use_container_width=True, hide_index=True)
-                st.caption("Forecasts use a simple deterministic linear trend and should be treated as directional, not causal predictions.")
-            else:
-                st.info("Forecasting requires at least four valid ordered periods.")
-
-        with t3:
-            if correlations:
-                corr_df = pd.DataFrame(correlations)
-                st.dataframe(corr_df, use_container_width=True, hide_index=True)
-                try:
-                    import plotly.express as px
-                    matrix = advanced.get("correlation_matrix", {})
-                    matrix_df = pd.DataFrame(matrix).T
-                    if not matrix_df.empty:
-                        fig = px.imshow(
-                            matrix_df,
-                            text_auto=True,
-                            aspect="auto",
-                            zmin=-1,
-                            zmax=1,
-                            title="Indicator Correlation Matrix",
-                        )
-                        st.plotly_chart(fig, use_container_width=True)
-                except Exception as e:
-                    st.info(f"Correlation heatmap unavailable: {e}")
-            else:
-                st.info("At least two numeric indicators with five paired observations are required.")
-
-        with t4:
-            st.metric("Detected anomalies", f"{len(anomalies):,}")
-            if anomalies:
-                st.dataframe(pd.DataFrame(anomalies), use_container_width=True, hide_index=True)
-                st.warning("Anomalies are flagged for investigation; they are never automatically deleted or changed.")
-            else:
-                st.success("No advanced statistical anomalies were detected in the selected numeric fields.")
-
-        with t5:
-            if benchmarking:
-                for indicator, rows in list(benchmarking.items())[:8]:
-                    st.markdown(f"**{indicator} — organisation-unit benchmark**")
-                    bench_df = pd.DataFrame(rows)
-                    st.dataframe(bench_df, use_container_width=True, hide_index=True)
-            else:
-                st.info("Organisation-unit benchmarking requires a detected OU field and a manageable number of OUs.")
-
-
-# ============================================================
-# M&E PROGRAMME MANAGER NARRATION
-# ============================================================
-
-def _me_numeric(value):
-    try:
-        return float(value)
-    except Exception:
-        return None
-
-
-def build_me_programme_narrative(df, plan, quality_issues, quality_matrix, quality_summary):
-    """Create a deterministic M&E interpretation from the exact requested analysis.
-
-    The narrative is evidence-led. It does not claim causation and never changes
-    the user's selected indicator, X-axis, aggregation or source data.
-    """
-    if not plan or not plan.get("chart_requested"):
-        return None
-
-    x = plan.get("x_column")
-    indicators = [c for c in (plan.get("y_columns") or []) if c in df.columns]
-    if not x or x not in df.columns or not indicators:
-        return None
-
-    chart_df, error = build_chart_data_dataframe(df, plan)
-    if error or chart_df is None or chart_df.empty:
-        return None
-
-    aggregation = str(plan.get("aggregation", "sum")).lower()
-    quality_score = float((quality_summary or {}).get("score", 0))
-    quality_rating = str((quality_summary or {}).get("rating", "Unknown"))
-
-    high = [i for i in (quality_issues or []) if str(i.get("Priority", "")).upper() == "HIGH"]
-    medium = [i for i in (quality_issues or []) if str(i.get("Priority", "")).upper() == "MEDIUM"]
-
-    # Build indicator-level evidence from the same dataframe used by the chart.
-    indicator_evidence = []
-    rows_for_table = []
-
-    if "__series__" in chart_df.columns and "__value__" in chart_df.columns:
-        working = chart_df.copy()
-        working["__value__"] = pd.to_numeric(working["__value__"], errors="coerce")
-        working = working.dropna(subset=["__value__"])
-
-        for indicator in indicators:
-            sub = working[working["__series__"].astype(str) == str(indicator)].copy()
-            if sub.empty:
-                continue
-            vals = sub["__value__"].astype(float)
-            max_idx = vals.idxmax()
-            min_idx = vals.idxmin()
-            max_row = sub.loc[max_idx]
-            min_row = sub.loc[min_idx]
-            evidence = {
-                "indicator": str(indicator),
-                "observations": int(len(sub)),
-                "total": float(vals.sum()),
-                "average": float(vals.mean()),
-                "minimum": float(vals.min()),
-                "maximum": float(vals.max()),
-                "highest_category": str(max_row[x]),
-                "lowest_category": str(min_row[x]),
-            }
-            if len(vals) >= 2:
-                first_value = float(vals.iloc[0])
-                last_value = float(vals.iloc[-1])
-                evidence["first_value"] = first_value
-                evidence["last_value"] = last_value
-                evidence["absolute_change"] = last_value - first_value
-                evidence["percent_change"] = (
-                    (last_value - first_value) / abs(first_value) * 100
-                    if first_value != 0 else None
-                )
-            indicator_evidence.append(evidence)
-
-    else:
-        for indicator in indicators:
-            if indicator not in chart_df.columns:
-                continue
-            vals = pd.to_numeric(chart_df[indicator], errors="coerce")
-            valid = vals.notna()
-            sub = chart_df.loc[valid, [x, indicator]].copy()
-            if sub.empty:
-                continue
-            nums = pd.to_numeric(sub[indicator], errors="coerce")
-            max_idx = nums.idxmax()
-            min_idx = nums.idxmin()
-            evidence = {
-                "indicator": str(indicator),
-                "observations": int(nums.count()),
-                "total": float(nums.sum()),
-                "average": float(nums.mean()),
-                "minimum": float(nums.min()),
-                "maximum": float(nums.max()),
-                "highest_category": str(sub.loc[max_idx, x]),
-                "lowest_category": str(sub.loc[min_idx, x]),
-            }
-            if len(nums) >= 2:
-                first_value = float(nums.iloc[0])
-                last_value = float(nums.iloc[-1])
-                evidence["first_value"] = first_value
-                evidence["last_value"] = last_value
-                evidence["absolute_change"] = last_value - first_value
-                evidence["percent_change"] = (
-                    (last_value - first_value) / abs(first_value) * 100
-                    if first_value != 0 else None
-                )
-            indicator_evidence.append(evidence)
-
-    if not indicator_evidence:
-        return None
-
-    # Programme-facing interpretation based on evidence only.
-    observations = []
-    actions = []
-
-    for item in indicator_evidence:
-        direction = ""
-        pct = item.get("percent_change")
-        if pct is not None:
-            if pct > 5:
-                direction = f"increased by {pct:.1f}%"
-            elif pct < -5:
-                direction = f"decreased by {abs(pct):.1f}%"
-            else:
-                direction = f"changed by {pct:.1f}%"
-
-        observations.append(
-            f"**{item['indicator']}** recorded {item['observations']:,} analysed observations, "
-            f"with an average of {_format_viz_value(item['average'])}, a minimum of "
-            f"{_format_viz_value(item['minimum'])}, and a maximum of {_format_viz_value(item['maximum'])}. "
-            f"The highest observed value was in **{item['highest_category']}** and the lowest was in "
-            f"**{item['lowest_category']}**."
-            + (f" Across the displayed sequence, the indicator {direction}." if direction else "")
-        )
-
-    if high:
-        actions.append("Resolve HIGH-priority data-quality findings before using the result for high-stakes programme decisions.")
-    if medium:
-        actions.append("Validate MEDIUM-priority findings with source registers, reporting units or responsible data owners.")
-    if not actions:
-        actions.append("Continue routine data-quality monitoring and document the current evidence as part of the reporting cycle.")
-    actions.append("Use the observed differences to target programme follow-up, verification and learning; do not infer causality from the descriptive data alone.")
-
-    if quality_score >= 90:
-        quality_implication = "The quality assessment indicates strong evidence for routine interpretation under the implemented controls."
-    elif quality_score >= 75:
-        quality_implication = "The results can support routine programme monitoring, but the identified quality findings should be considered when interpreting differences."
-    elif quality_score >= 50:
-        quality_implication = "The results should be interpreted cautiously because the quality assessment indicates areas requiring review."
-    else:
-        quality_implication = "The results should not be treated as fully reliable for high-stakes management decisions until material quality issues are addressed."
-
-    confidence = "High" if quality_score >= 90 and not high else "Medium" if quality_score >= 50 else "Low"
-
-    return {
-        "analysis": {
-            "x_axis": str(x),
-            "aggregation": aggregation,
-            "indicators": [str(i) for i in indicators],
-            "rows_analysed": int(len(df)),
-            "chart_types": plan.get("chart_labels") or plan.get("chart_types") or [],
-        },
-        "indicator_evidence": indicator_evidence,
-        "quality": {
-            "score": quality_score,
-            "rating": quality_rating,
-            "high_priority": len(high),
-            "medium_priority": len(medium),
-        },
-        "observations": observations,
-        "quality_implication": quality_implication,
-        "actions": actions,
-        "confidence": confidence,
-    }
-
-
-def ask_ai_me_programme_interpretation(evidence, quality_interpretation=None):
-    """Optional AI layer for programme-manager interpretation with local fallback."""
-    if not evidence:
-        return {"status": "FALLBACK", "source": "LOCAL_RULES", "text": "No valid requested-analysis evidence is available."}
-
-    if client is None:
-        return {"status": "FALLBACK", "source": "LOCAL_RULES", "text": build_local_me_programme_interpretation(evidence)}
-
-    prompt = f"""
-You are a senior Monitoring, Evaluation and Learning (M&E) advisor and programme
-manager supporting a DHIS2-based nutrition/public-health programme.
-
-Interpret ONLY the deterministic evidence supplied below. Do not recalculate it,
-do not invent values, and do not claim causation. The user's selected analysis,
-indicator(s), X-axis and aggregation are authoritative.
-
-Your purpose is to translate the result into a concise management narrative:
-- What does the result show?
-- What performance pattern, gap, change or exception matters most?
-- What does it mean for programme monitoring and implementation follow-up?
-- Which findings should a programme manager investigate?
-- What M&E actions should happen next?
-- How does data quality affect confidence in the interpretation?
-
-Use programme-management language, not technical statistical jargon. Distinguish
-observed patterns from possible explanations. Never state that a programme
-intervention caused a change unless the supplied evidence establishes causality.
-
-REQUESTED ANALYSIS EVIDENCE:
-{safe_json_dumps(evidence)}
-
-EXISTING DATA-QUALITY INTERPRETATION, IF AVAILABLE:
-{quality_interpretation or 'None'}
-
-Return exactly these sections:
-
-## Executive Programme Message
-A concise 2-4 sentence management summary.
-
-## What the Analysis Shows
-Describe the most important observed results, comparisons and changes.
-
-## M&E Interpretation
-Explain what the pattern means for programme monitoring, performance review,
-implementation follow-up and learning. Clearly distinguish observation from hypothesis.
-
-## Data Quality Implication
-Explain whether quality findings materially limit interpretation.
-
-## Programme Management Attention
-List the most important issues a programme manager should review.
-
-## Recommended M&E Actions
-Give 3-6 practical actions covering verification, performance follow-up, learning,
-and data-quality improvement where relevant.
-
-## Confidence
-Give High, Medium or Low confidence and one short evidence-based reason.
-"""
-
-    try:
-        response = client.responses.create(
-            model=OPENAI_MODEL,
-            input=prompt,
-        )
-        return {
-            "status": "SUCCESS",
-            "source": "OPENAI",
-            "text": response.output_text or build_local_me_programme_interpretation(evidence),
-        }
-    except Exception:
-        return {
-            "status": "FALLBACK",
-            "source": "LOCAL_RULES",
-            "text": build_local_me_programme_interpretation(evidence),
-        }
-
-
-def build_local_me_programme_interpretation(evidence):
-    """Evidence-only programme-manager narrative used when AI is unavailable."""
-    if not evidence:
-        return "No programme interpretation is available because the requested analysis produced no valid evidence."
-
-    lines = ["## Executive Programme Message"]
-    lines.append(
-        f"The requested analysis covers **{evidence['analysis']['rows_analysed']:,} records** using "
-        f"**{evidence['analysis']['aggregation']}** aggregation across **{evidence['analysis']['x_axis']}**. "
-        f"The interpretation is descriptive and should be used to guide programme review rather than establish causality."
-    )
-
-    lines.append("\n## What the Analysis Shows")
-    lines.extend(f"- {x}" for x in evidence.get("observations", []))
-
-    lines.append("\n## M&E Interpretation")
-    lines.append(
-        "The observed differences identify where programme performance, reporting patterns or implementation follow-up may warrant attention. "
-        "The strongest and weakest observed categories should be reviewed with programme context, service-delivery information and responsible reporting teams before drawing operational conclusions."
-    )
-
-    lines.append("\n## Data Quality Implication")
-    lines.append(evidence.get("quality_implication", "Data-quality implications should be reviewed alongside the result."))
-
-    lines.append("\n## Programme Management Attention")
-    for item in evidence.get("observations", [])[:5]:
-        lines.append(f"- Review the programme context behind: {item}")
-    if evidence["quality"]["high_priority"]:
-        lines.append(f"- Address {evidence['quality']['high_priority']} HIGH-priority data-quality finding(s).")
-    if evidence["quality"]["medium_priority"]:
-        lines.append(f"- Validate {evidence['quality']['medium_priority']} MEDIUM-priority data-quality finding(s).")
-
-    lines.append("\n## Recommended M&E Actions")
-    for idx, action in enumerate(evidence.get("actions", []), 1):
-        lines.append(f"{idx}. {action}")
-
-    lines.append("\n## Confidence")
-    lines.append(
-        f"**{evidence.get('confidence', 'Medium')} confidence.** "
-        "Confidence reflects the deterministic analysis and the current data-quality assessment."
-    )
-    return "\n\n".join(lines)
-
-
-def render_me_programme_narration(df, plan, quality_issues, quality_matrix, quality_summary):
-    """Render the M&E interpretation module immediately below Requested Visualizations."""
-    evidence = build_me_programme_narrative(
-        df,
-        plan,
-        quality_issues,
-        quality_matrix,
-        quality_summary,
-    )
-    if not evidence:
-        return
-
-    st.markdown("---")
-    st.subheader("🧭 M&E Programme Manager Interpretation")
-    st.caption(
-        "Translates the selected analysis, visualization evidence and DHIS2 quality findings into a programme-management narrative. "
-        "It describes observed patterns and does not claim causality."
-    )
-
-    a1, a2, a3, a4 = st.columns(4)
-    with a1:
-        st.metric("Indicators", f"{len(evidence['analysis']['indicators']):,}")
-    with a2:
-        st.metric("Records analysed", f"{evidence['analysis']['rows_analysed']:,}")
-    with a3:
-        st.metric("Quality", f"{evidence['quality']['score']:.1f}/100")
-    with a4:
-        st.metric("Confidence", evidence["confidence"])
-
-    st.markdown(
-        f"""
-        <div class="me-programme-card">
-            <div class="me-programme-kicker">PROGRAMME MANAGEMENT VIEW</div>
-            <div class="me-programme-title">Evidence-based interpretation of the selected result</div>
-            <div class="me-programme-meta">
-                X-axis: <strong>{html.escape(evidence['analysis']['x_axis'])}</strong> ·
-                Aggregation: <strong>{html.escape(evidence['analysis']['aggregation'])}</strong> ·
-                Indicators: <strong>{html.escape(', '.join(evidence['analysis']['indicators']))}</strong>
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    if st.button(
-        "🤖 Generate AI M&E Programme Interpretation",
-        key="generate_me_programme_interpretation",
-        use_container_width=True,
-    ):
-        quality_ai = st.session_state.get("dq_ai_interpretation")
-        quality_text = quality_ai.get("text", "") if isinstance(quality_ai, dict) else ""
-        with st.spinner("🤖 Interpreting the analysis for programme managers..."):
-            st.session_state["me_programme_interpretation"] = ask_ai_me_programme_interpretation(
-                evidence,
-                quality_interpretation=quality_text,
+                vals = sub["__value__"].astype(float)
+                max_idx = vals.idxmax()
+                min_idx = vals.idxmin()
+                max_row = sub.loc[max_idx]
+                min_row = sub.loc[min_idx]
+                evidence = {
+                    "indicator": str(indicator),
+                    "observations": int(len(sub)),
+                    "total": float(vals.sum()),
+                    "average": float(vals.mean()),
+                    "minimum": float(vals.min()),
+                    "maximum": float(vals.max()),
+                    "highest_category": str(max_row[x]),
+                    "lowest_category": str(min_row[x]),
+                }
+                if len(vals) >= 2:
+                    first_value = float(vals.iloc[0])
+                    last_value = float(vals.iloc[-1])
+                    evidence["first_value"] = first_value
+                    evidence["last_value"] = last_value
+                    evidence["absolute_change"] = last_value - first_value
+                    evidence["percent_change"] = (
+                        (last_value - first_value) / abs(first_value) * 100
+                        if first_value != 0 else None
+                    )
+                indicator_evidence.append(evidence)
+
+        else:
+            for indicator in indicators:
+                if indicator not in chart_df.columns:
+                    continue
+                vals = pd.to_numeric(chart_df[indicator], errors="coerce")
+                valid = vals.notna()
+                sub = chart_df.loc[valid, [x, indicator]].copy()
+                if sub.empty:
+                    continue
+                nums = pd.to_numeric(sub[indicator], errors="coerce")
+                max_idx = nums.idxmax()
+                min_idx = nums.idxmin()
+                evidence = {
+                    "indicator": str(indicator),
+                    "observations": int(nums.count()),
+                    "total": float(nums.sum()),
+                    "average": float(nums.mean()),
+                    "minimum": float(nums.min()),
+                    "maximum": float(nums.max()),
+                    "highest_category": str(sub.loc[max_idx, x]),
+                    "lowest_category": str(sub.loc[min_idx, x]),
+                }
+                if len(nums) >= 2:
+                    first_value = float(nums.iloc[0])
+                    last_value = float(nums.iloc[-1])
+                    evidence["first_value"] = first_value
+                    evidence["last_value"] = last_value
+                    evidence["absolute_change"] = last_value - first_value
+                    evidence["percent_change"] = (
+                        (last_value - first_value) / abs(first_value) * 100
+                        if first_value != 0 else None
+                    )
+                indicator_evidence.append(evidence)
+
+        if not indicator_evidence:
+            return None
+
+        # Programme-facing interpretation based on evidence only.
+        observations = []
+        actions = []
+
+        for item in indicator_evidence:
+            direction = ""
+            pct = item.get("percent_change")
+            if pct is not None:
+                if pct > 5:
+                    direction = f"increased by {pct:.1f}%"
+                elif pct < -5:
+                    direction = f"decreased by {abs(pct):.1f}%"
+                else:
+                    direction = f"changed by {pct:.1f}%"
+
+            observations.append(
+                f"**{item['indicator']}** recorded {item['observations']:,} analysed observations, "
+                f"with an average of {_format_viz_value(item['average'])}, a minimum of "
+                f"{_format_viz_value(item['minimum'])}, and a maximum of {_format_viz_value(item['maximum'])}. "
+                f"The highest observed value was in **{item['highest_category']}** and the lowest was in "
+                f"**{item['lowest_category']}**."
+                + (f" Across the displayed sequence, the indicator {direction}." if direction else "")
             )
 
-    result = st.session_state.get("me_programme_interpretation")
-    if result:
-        source = result.get("source", "LOCAL_RULES")
-        badge = "AI-ASSISTED" if source == "OPENAI" else "EVIDENCE-BASED FALLBACK"
+        if high:
+            actions.append("Resolve HIGH-priority data-quality findings before using the result for high-stakes programme decisions.")
+        if medium:
+            actions.append("Validate MEDIUM-priority findings with source registers, reporting units or responsible data owners.")
+        if not actions:
+            actions.append("Continue routine data-quality monitoring and document the current evidence as part of the reporting cycle.")
+        actions.append("Use the observed differences to target programme follow-up, verification and learning; do not infer causality from the descriptive data alone.")
+
+        if quality_score >= 90:
+            quality_implication = "The quality assessment indicates strong evidence for routine interpretation under the implemented controls."
+        elif quality_score >= 75:
+            quality_implication = "The results can support routine programme monitoring, but the identified quality findings should be considered when interpreting differences."
+        elif quality_score >= 50:
+            quality_implication = "The results should be interpreted cautiously because the quality assessment indicates areas requiring review."
+        else:
+            quality_implication = "The results should not be treated as fully reliable for high-stakes management decisions until material quality issues are addressed."
+
+        confidence = "High" if quality_score >= 90 and not high else "Medium" if quality_score >= 50 else "Low"
+
+        return {
+            "analysis": {
+                "x_axis": str(x),
+                "aggregation": aggregation,
+                "indicators": [str(i) for i in indicators],
+                "rows_analysed": int(len(df)),
+                "chart_types": plan.get("chart_labels") or plan.get("chart_types") or [],
+            },
+            "indicator_evidence": indicator_evidence,
+            "quality": {
+                "score": quality_score,
+                "rating": quality_rating,
+                "high_priority": len(high),
+                "medium_priority": len(medium),
+            },
+            "observations": observations,
+            "quality_implication": quality_implication,
+            "actions": actions,
+            "confidence": confidence,
+        }
+
+
+    def ask_ai_me_programme_interpretation(evidence, quality_interpretation=None):
+        """Optional AI layer for programme-manager interpretation with local fallback."""
+        if not evidence:
+            return {"status": "FALLBACK", "source": "LOCAL_RULES", "text": "No valid requested-analysis evidence is available."}
+
+        if client is None:
+            return {"status": "FALLBACK", "source": "LOCAL_RULES", "text": build_local_me_programme_interpretation(evidence)}
+
+        prompt = f"""
+    You are a senior Monitoring, Evaluation and Learning (M&E) advisor and programme
+    manager supporting a DHIS2-based nutrition/public-health programme.
+
+    Interpret ONLY the deterministic evidence supplied below. Do not recalculate it,
+    do not invent values, and do not claim causation. The user's selected analysis,
+    indicator(s), X-axis and aggregation are authoritative.
+
+    Your purpose is to translate the result into a concise management narrative:
+    - What does the result show?
+    - What performance pattern, gap, change or exception matters most?
+    - What does it mean for programme monitoring and implementation follow-up?
+    - Which findings should a programme manager investigate?
+    - What M&E actions should happen next?
+    - How does data quality affect confidence in the interpretation?
+
+    Use programme-management language, not technical statistical jargon. Distinguish
+    observed patterns from possible explanations. Never state that a programme
+    intervention caused a change unless the supplied evidence establishes causality.
+
+    REQUESTED ANALYSIS EVIDENCE:
+    {safe_json_dumps(evidence)}
+
+    EXISTING DATA-QUALITY INTERPRETATION, IF AVAILABLE:
+    {quality_interpretation or 'None'}
+
+    Return exactly these sections:
+
+    ## Executive Programme Message
+    A concise 2-4 sentence management summary.
+
+    ## What the Analysis Shows
+    Describe the most important observed results, comparisons and changes.
+
+    ## M&E Interpretation
+    Explain what the pattern means for programme monitoring, performance review,
+    implementation follow-up and learning. Clearly distinguish observation from hypothesis.
+
+    ## Data Quality Implication
+    Explain whether quality findings materially limit interpretation.
+
+    ## Programme Management Attention
+    List the most important issues a programme manager should review.
+
+    ## Recommended M&E Actions
+    Give 3-6 practical actions covering verification, performance follow-up, learning,
+    and data-quality improvement where relevant.
+
+    ## Confidence
+    Give High, Medium or Low confidence and one short evidence-based reason.
+    """
+
+        try:
+            response = client.responses.create(
+                model=OPENAI_MODEL,
+                input=prompt,
+            )
+            return {
+                "status": "SUCCESS",
+                "source": "OPENAI",
+                "text": response.output_text or build_local_me_programme_interpretation(evidence),
+            }
+        except Exception:
+            return {
+                "status": "FALLBACK",
+                "source": "LOCAL_RULES",
+                "text": build_local_me_programme_interpretation(evidence),
+            }
+
+
+    def build_local_me_programme_interpretation(evidence):
+        """Evidence-only programme-manager narrative used when AI is unavailable."""
+        if not evidence:
+            return "No programme interpretation is available because the requested analysis produced no valid evidence."
+
+        lines = ["## Executive Programme Message"]
+        lines.append(
+            f"The requested analysis covers **{evidence['analysis']['rows_analysed']:,} records** using "
+            f"**{evidence['analysis']['aggregation']}** aggregation across **{evidence['analysis']['x_axis']}**. "
+            f"The interpretation is descriptive and should be used to guide programme review rather than establish causality."
+        )
+
+        lines.append("\n## What the Analysis Shows")
+        lines.extend(f"- {x}" for x in evidence.get("observations", []))
+
+        lines.append("\n## M&E Interpretation")
+        lines.append(
+            "The observed differences identify where programme performance, reporting patterns or implementation follow-up may warrant attention. "
+            "The strongest and weakest observed categories should be reviewed with programme context, service-delivery information and responsible reporting teams before drawing operational conclusions."
+        )
+
+        lines.append("\n## Data Quality Implication")
+        lines.append(evidence.get("quality_implication", "Data-quality implications should be reviewed alongside the result."))
+
+        lines.append("\n## Programme Management Attention")
+        for item in evidence.get("observations", [])[:5]:
+            lines.append(f"- Review the programme context behind: {item}")
+        if evidence["quality"]["high_priority"]:
+            lines.append(f"- Address {evidence['quality']['high_priority']} HIGH-priority data-quality finding(s).")
+        if evidence["quality"]["medium_priority"]:
+            lines.append(f"- Validate {evidence['quality']['medium_priority']} MEDIUM-priority data-quality finding(s).")
+
+        lines.append("\n## Recommended M&E Actions")
+        for idx, action in enumerate(evidence.get("actions", []), 1):
+            lines.append(f"{idx}. {action}")
+
+        lines.append("\n## Confidence")
+        lines.append(
+            f"**{evidence.get('confidence', 'Medium')} confidence.** "
+            "Confidence reflects the deterministic analysis and the current data-quality assessment."
+        )
+        return "\n\n".join(lines)
+
+
+    def render_me_programme_narration(df, plan, quality_issues, quality_matrix, quality_summary):
+        """Render the M&E interpretation module immediately below Requested Visualizations."""
+        evidence = build_me_programme_narrative(
+            df,
+            plan,
+            quality_issues,
+            quality_matrix,
+            quality_summary,
+        )
+        if not evidence:
+            return
+
+        st.markdown("---")
+        st.subheader("🧭 M&E Programme Manager Interpretation")
+        st.caption(
+            "Translates the selected analysis, visualization evidence and DHIS2 quality findings into a programme-management narrative. "
+            "It describes observed patterns and does not claim causality."
+        )
+
+        a1, a2, a3, a4 = st.columns(4)
+        with a1:
+            st.metric("Indicators", f"{len(evidence['analysis']['indicators']):,}")
+        with a2:
+            st.metric("Records analysed", f"{evidence['analysis']['rows_analysed']:,}")
+        with a3:
+            st.metric("Quality", f"{evidence['quality']['score']:.1f}/100")
+        with a4:
+            st.metric("Confidence", evidence["confidence"])
+
         st.markdown(
             f"""
-            <div class="me-ai-badge">{badge}</div>
+            <div class="me-programme-card">
+                <div class="me-programme-kicker">PROGRAMME MANAGEMENT VIEW</div>
+                <div class="me-programme-title">Evidence-based interpretation of the selected result</div>
+                <div class="me-programme-meta">
+                    X-axis: <strong>{html.escape(evidence['analysis']['x_axis'])}</strong> ·
+                    Aggregation: <strong>{html.escape(evidence['analysis']['aggregation'])}</strong> ·
+                    Indicators: <strong>{html.escape(', '.join(evidence['analysis']['indicators']))}</strong>
+                </div>
+            </div>
             """,
             unsafe_allow_html=True,
         )
-        st.markdown(
-            f'<div class="me-programme-result">{result.get("text", "")}</div>',
-            unsafe_allow_html=True,
-        )
-    else:
-        # Show the deterministic preview immediately; AI is an optional enhancement.
-        preview = build_local_me_programme_interpretation(evidence)
-        with st.expander("📋 Evidence-Based Programme Interpretation", expanded=True):
-            st.markdown(preview)
 
+        if st.button(
+            "🤖 Generate AI M&E Programme Interpretation",
+            key="generate_me_programme_interpretation",
+            use_container_width=True,
+        ):
+            quality_ai = st.session_state.get("dq_ai_interpretation")
+            quality_text = quality_ai.get("text", "") if isinstance(quality_ai, dict) else ""
+            with st.spinner("🤖 Interpreting the analysis for programme managers..."):
+                st.session_state["me_programme_interpretation"] = ask_ai_me_programme_interpretation(
+                    evidence,
+                    quality_interpretation=quality_text,
+                )
 
-
-
-# ============================================================
-# COMPLETE DATASET TABLE — ISOLATED MODULE
-# ============================================================
-
-def render_complete_dataset_table(df, source_url=None):
-    """
-    Display ALL rows and ALL columns from the currently loaded dataset.
-
-    This module does not modify the existing dataframe, charts,
-    aggregation, data-quality calculations, or AI analysis.
-    """
-    if not isinstance(df, pd.DataFrame) or df.empty:
-        st.info("No loaded dataset is available to display.")
-        return
-
-    st.markdown("### 📋 Complete Loaded Dataset")
-    st.caption(
-        f"All data currently loaded from the source: "
-        f"{len(df):,} rows × {len(df.columns):,} columns"
-    )
-
-    c1, c2, c3 = st.columns([2, 1, 1])
-
-    with c1:
-        search_text = st.text_input(
-            "🔎 Search data",
-            value="",
-            placeholder="Search across all columns...",
-            key="complete_dataset_search",
-        )
-
-    with c2:
-        show_rows = st.selectbox(
-            "Rows displayed",
-            options=[100, 500, 1000, 5000, 10000, "All"],
-            index=2,
-            key="complete_dataset_rows",
-        )
-
-    with c3:
-        sort_column = st.selectbox(
-            "Sort by",
-            options=["None"] + [str(c) for c in df.columns],
-            index=0,
-            key="complete_dataset_sort",
-        )
-
-    display_df = df.copy()
-
-    if search_text.strip():
-        search_value = search_text.strip().lower()
-        mask = display_df.astype(str).apply(
-            lambda column: column.str.lower().str.contains(
-                search_value, na=False, regex=False
+        result = st.session_state.get("me_programme_interpretation")
+        if result:
+            source = result.get("source", "LOCAL_RULES")
+            badge = "AI-ASSISTED" if source == "OPENAI" else "EVIDENCE-BASED FALLBACK"
+            st.markdown(
+                f"""
+                <div class="me-ai-badge">{badge}</div>
+                """,
+                unsafe_allow_html=True,
             )
-        ).any(axis=1)
-        display_df = display_df.loc[mask].copy()
+            st.markdown(
+                f'<div class="me-programme-result">{result.get("text", "")}</div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            # Show the deterministic preview immediately; AI is an optional enhancement.
+            preview = build_local_me_programme_interpretation(evidence)
+            with st.expander("📋 Evidence-Based Programme Interpretation", expanded=True):
+                st.markdown(preview)
 
-    if sort_column != "None" and sort_column in display_df.columns:
-        try:
-            display_df = display_df.sort_values(by=sort_column, kind="stable")
-        except Exception:
-            pass
 
-    filtered_count = len(display_df)
 
-    csv_data = display_df.to_csv(index=False).encode("utf-8")
-    st.download_button(
-        label="⬇️ Download Complete Data as CSV",
-        data=csv_data,
-        file_name="DANIP_complete_loaded_data.csv",
-        mime="text/csv",
-        use_container_width=True,
-        key="download_complete_dataset_csv",
-    )
 
-    if show_rows == "All":
-        table_df = display_df
-        limited = False
-    else:
-        table_df = display_df.head(int(show_rows))
-        limited = len(display_df) > int(show_rows)
+    # ============================================================
+    # COMPLETE DATASET TABLE — ISOLATED MODULE
+    # ============================================================
 
-    if search_text.strip():
-        st.info(
-            f"🔎 Search result: {filtered_count:,} matching rows "
-            f"from {len(df):,} total loaded rows."
-        )
-    else:
-        st.success(
-            f"✅ Complete dataset loaded: {len(df):,} rows × "
-            f"{len(df.columns):,} columns."
-        )
+    def render_complete_dataset_table(df, source_url=None):
+        """
+        Display ALL rows and ALL columns from the currently loaded dataset.
 
-    if limited:
+        This module does not modify the existing dataframe, charts,
+        aggregation, data-quality calculations, or AI analysis.
+        """
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            st.info("No loaded dataset is available to display.")
+            return
+
+        st.markdown("### 📋 Complete Loaded Dataset")
         st.caption(
-            f"Displaying the first {len(table_df):,} rows of "
-            f"{filtered_count:,} matching rows. Select 'All' to display every matching row."
+            f"All data currently loaded from the source: "
+            f"{len(df):,} rows × {len(df.columns):,} columns"
         )
-    else:
-        st.caption(f"Displaying all {len(table_df):,} matching rows.")
 
-    st.dataframe(
-        table_df,
-        use_container_width=True,
-        hide_index=True,
-        height=600,
-    )
+        c1, c2, c3 = st.columns([2, 1, 1])
 
-    with st.expander("📊 Dataset Information", expanded=False):
-        info_col1, info_col2, info_col3, info_col4 = st.columns(4)
+        with c1:
+            search_text = st.text_input(
+                "🔎 Search data",
+                value="",
+                placeholder="Search across all columns...",
+                key="complete_dataset_search",
+            )
 
-        with info_col1:
-            st.metric("Total Loaded Rows", f"{len(df):,}")
-        with info_col2:
-            st.metric("Columns", f"{len(df.columns):,}")
-        with info_col3:
-            st.metric("Rows After Search", f"{filtered_count:,}")
-        with info_col4:
-            st.metric("Missing Cells", f"{int(df.isna().sum().sum()):,}")
+        with c2:
+            show_rows = st.selectbox(
+                "Rows displayed",
+                options=[100, 500, 1000, 5000, 10000, "All"],
+                index=2,
+                key="complete_dataset_rows",
+            )
 
-        st.markdown("#### Columns")
-        column_info = pd.DataFrame({
-            "Column": [str(c) for c in df.columns],
-            "Data Type": [str(df[c].dtype) for c in df.columns],
-            "Non-Missing": [int(df[c].notna().sum()) for c in df.columns],
-            "Missing": [int(df[c].isna().sum()) for c in df.columns],
-        })
-        st.dataframe(column_info, use_container_width=True, hide_index=True)
+        with c3:
+            sort_column = st.selectbox(
+                "Sort by",
+                options=["None"] + [str(c) for c in df.columns],
+                index=0,
+                key="complete_dataset_sort",
+            )
+
+        display_df = df.copy()
+
+        if search_text.strip():
+            search_value = search_text.strip().lower()
+            mask = display_df.astype(str).apply(
+                lambda column: column.str.lower().str.contains(
+                    search_value, na=False, regex=False
+                )
+            ).any(axis=1)
+            display_df = display_df.loc[mask].copy()
+
+        if sort_column != "None" and sort_column in display_df.columns:
+            try:
+                display_df = display_df.sort_values(by=sort_column, kind="stable")
+            except Exception:
+                pass
+
+        filtered_count = len(display_df)
+
+        csv_data = display_df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="⬇️ Download Complete Data as CSV",
+            data=csv_data,
+            file_name="DANIP_complete_loaded_data.csv",
+            mime="text/csv",
+            use_container_width=True,
+            key="download_complete_dataset_csv",
+        )
+
+        if show_rows == "All":
+            table_df = display_df
+            limited = False
+        else:
+            table_df = display_df.head(int(show_rows))
+            limited = len(display_df) > int(show_rows)
+
+        if search_text.strip():
+            st.info(
+                f"🔎 Search result: {filtered_count:,} matching rows "
+                f"from {len(df):,} total loaded rows."
+            )
+        else:
+            st.success(
+                f"✅ Complete dataset loaded: {len(df):,} rows × "
+                f"{len(df.columns):,} columns."
+            )
+
+        if limited:
+            st.caption(
+                f"Displaying the first {len(table_df):,} rows of "
+                f"{filtered_count:,} matching rows. Select 'All' to display every matching row."
+            )
+        else:
+            st.caption(f"Displaying all {len(table_df):,} matching rows.")
+
+        st.dataframe(
+            table_df,
+            use_container_width=True,
+            hide_index=True,
+            height=600,
+        )
+
+        with st.expander("📊 Dataset Information", expanded=False):
+            info_col1, info_col2, info_col3, info_col4 = st.columns(4)
+
+            with info_col1:
+                st.metric("Total Loaded Rows", f"{len(df):,}")
+            with info_col2:
+                st.metric("Columns", f"{len(df.columns):,}")
+            with info_col3:
+                st.metric("Rows After Search", f"{filtered_count:,}")
+            with info_col4:
+                st.metric("Missing Cells", f"{int(df.isna().sum().sum()):,}")
+
+            st.markdown("#### Columns")
+            column_info = pd.DataFrame({
+                "Column": [str(c) for c in df.columns],
+                "Data Type": [str(df[c].dtype) for c in df.columns],
+                "Non-Missing": [int(df[c].notna().sum()) for c in df.columns],
+                "Missing": [int(df[c].isna().sum()) for c in df.columns],
+            })
+            st.dataframe(column_info, use_container_width=True, hide_index=True)
 
 
 
-# ============================================================
-# MEAL INTELLIGENCE LAYER — ADDITIVE MODULE
-# ============================================================
-# This section is intentionally self-contained.
-# It reads the loaded dataframe and stores MEAL registers in
-# Streamlit session state only. It does not alter existing
-# DHIS2 retrieval, calculations, charts, quality scores or AI.
-# ============================================================
+    # ============================================================
+    # MEAL INTELLIGENCE LAYER — ADDITIVE MODULE
+    # ============================================================
+    # This section is intentionally self-contained.
+    # It reads the loaded dataframe and stores MEAL registers in
+    # Streamlit session state only. It does not alter existing
+    # DHIS2 retrieval, calculations, charts, quality scores or AI.
+    # ============================================================
 
-def _meal_col(df, patterns, exclude=None):
-    exclude = set(exclude or [])
-    for c in df.columns:
-        if c in exclude:
-            continue
-        n = re.sub(r"[^a-z0-9]+", " ", str(c).lower()).strip()
-        if any(re.search(p, n) for p in patterns):
-            return c
-    return None
-
-
-def _meal_num(s):
-    return pd.to_numeric(s, errors="coerce")
-
-
-def _meal_pct(a, t):
-    try:
-        a, t = float(a), float(t)
-        return None if t == 0 else a / t * 100
-    except Exception:
+    def _meal_col(df, patterns, exclude=None):
+        exclude = set(exclude or [])
+        for c in df.columns:
+            if c in exclude:
+                continue
+            n = re.sub(r"[^a-z0-9]+", " ", str(c).lower()).strip()
+            if any(re.search(p, n) for p in patterns):
+                return c
         return None
 
 
-def _meal_status(pct, direction="Higher is better"):
-    if pct is None or not pd.notna(pct):
-        return "⚪ No target"
-    if direction == "Lower is better":
-        if pct <= 100:
+    def _meal_num(s):
+        return pd.to_numeric(s, errors="coerce")
+
+
+    def _meal_pct(a, t):
+        try:
+            a, t = float(a), float(t)
+            return None if t == 0 else a / t * 100
+        except Exception:
+            return None
+
+
+    def _meal_status(pct, direction="Higher is better"):
+        if pct is None or not pd.notna(pct):
+            return "⚪ No target"
+        if direction == "Lower is better":
+            if pct <= 100:
+                return "🟢 On track"
+            if pct <= 120:
+                return "🟡 Attention"
+            return "🔴 Off track"
+        if pct >= 90:
             return "🟢 On track"
-        if pct <= 120:
+        if pct >= 75:
             return "🟡 Attention"
         return "🔴 Off track"
-    if pct >= 90:
-        return "🟢 On track"
-    if pct >= 75:
-        return "🟡 Attention"
-    return "🔴 Off track"
 
 
-def _meal_period_column(df):
-    return find_period_column(df) or _meal_col(
-        df, [r"month", r"reporting date", r"event date", r"year"]
-    )
-
-
-# ============================================================
-# MEAL PERSISTENT STORAGE — SQLITE
-# ============================================================
-# Session state is only a UI cache. SQLite is the persistent source
-# for manually maintained MEAL registers, so records survive refresh,
-# browser reloads and Streamlit reruns.
-MEAL_DB_PATH = os.path.join(BASE_DIR, "danip_meal.db")
-
-_MEAL_TABLE_COLUMNS = {
-    "meal_results_framework": [
-        "Indicator", "Result Level", "Baseline", "Target",
-        "Direction", "Frequency", "Responsible", "Definition", "Status"
-    ],
-    "meal_actions": [
-        "Finding", "Action", "Owner", "Due Date", "Priority", "Status"
-    ],
-    "meal_learning": [
-        "Learning", "Evidence", "Decision", "Adaptation", "Owner", "Date", "Status"
-    ],
-    "meal_feedback": [
-        "Date", "Location", "Category", "Priority", "Feedback",
-        "Owner", "Response Date", "Status", "Resolution"
-    ],
-    "meal_risks": [
-        "Risk / Assumption", "Evidence", "Likelihood", "Impact",
-        "Mitigation", "Owner", "Status"
-    ],
-    "meal_project_context": [
-        "Programme / Project", "Country / Location", "Reporting Period",
-        "Donor / Funding", "Prepared By", "Programme Context",
-        "Executive Summary", "Key Challenges", "Key Recommendations",
-        "Management Conclusion"
-    ],
-}
-
-
-def _meal_db_connect():
-    conn = sqlite3.connect(MEAL_DB_PATH, timeout=15)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS meal_registers (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            register TEXT NOT NULL,
-            payload TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+    def _meal_period_column(df):
+        return find_period_column(df) or _meal_col(
+            df, [r"month", r"reporting date", r"event date", r"year"]
         )
-    """)
-    conn.commit()
-    return conn
 
 
-def _meal_db_load(register):
-    columns = _MEAL_TABLE_COLUMNS[register]
-    try:
-        conn = _meal_db_connect()
-        rows = conn.execute(
-            "SELECT id, payload FROM meal_registers WHERE register=? ORDER BY id",
-            (register,)
-        ).fetchall()
-        conn.close()
-        if not rows:
+    # ============================================================
+    # MEAL PERSISTENT STORAGE — SQLITE
+    # ============================================================
+    # Session state is only a UI cache. SQLite is the persistent source
+    # for manually maintained MEAL registers, so records survive refresh,
+    # browser reloads and Streamlit reruns.
+    MEAL_DB_PATH = os.path.join(BASE_DIR, "danip_meal.db")
+
+    _MEAL_TABLE_COLUMNS = {
+        "meal_results_framework": [
+            "Indicator", "Result Level", "Baseline", "Target",
+            "Direction", "Frequency", "Responsible", "Definition", "Status"
+        ],
+        "meal_actions": [
+            "Finding", "Action", "Owner", "Due Date", "Priority", "Status"
+        ],
+        "meal_learning": [
+            "Learning", "Evidence", "Decision", "Adaptation", "Owner", "Date", "Status"
+        ],
+        "meal_feedback": [
+            "Date", "Location", "Category", "Priority", "Feedback",
+            "Owner", "Response Date", "Status", "Resolution"
+        ],
+        "meal_risks": [
+            "Risk / Assumption", "Evidence", "Likelihood", "Impact",
+            "Mitigation", "Owner", "Status"
+        ],
+        "meal_project_context": [
+            "Programme / Project", "Country / Location", "Reporting Period",
+            "Donor / Funding", "Prepared By", "Programme Context",
+            "Executive Summary", "Key Challenges", "Key Recommendations",
+            "Management Conclusion"
+        ],
+    }
+
+
+    def _meal_db_connect():
+        conn = sqlite3.connect(MEAL_DB_PATH, timeout=15)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS meal_registers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                register TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        conn.commit()
+        return conn
+
+
+    def _meal_db_load(register):
+        columns = _MEAL_TABLE_COLUMNS[register]
+        try:
+            conn = _meal_db_connect()
+            rows = conn.execute(
+                "SELECT id, payload FROM meal_registers WHERE register=? ORDER BY id",
+                (register,)
+            ).fetchall()
+            conn.close()
+            if not rows:
+                return pd.DataFrame(columns=columns)
+
+            data = []
+            for record_id, payload in rows:
+                try:
+                    item = json.loads(payload)
+                except Exception:
+                    item = {}
+                item = {c: item.get(c, "") for c in columns}
+                item["_MEAL_ID"] = record_id
+                data.append(item)
+            return pd.DataFrame(data, columns=["_MEAL_ID"] + columns)
+        except Exception as exc:
+            st.warning(f"MEAL persistent storage could not be loaded: {exc}")
             return pd.DataFrame(columns=columns)
 
-        data = []
-        for record_id, payload in rows:
-            try:
-                item = json.loads(payload)
-            except Exception:
-                item = {}
-            item = {c: item.get(c, "") for c in columns}
-            item["_MEAL_ID"] = record_id
-            data.append(item)
-        return pd.DataFrame(data, columns=["_MEAL_ID"] + columns)
-    except Exception as exc:
-        st.warning(f"MEAL persistent storage could not be loaded: {exc}")
-        return pd.DataFrame(columns=columns)
+
+    def _meal_db_replace(register, df):
+        """Persist the complete current register while retaining stable IDs when possible."""
+        columns = _MEAL_TABLE_COLUMNS[register]
+        work = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame(columns=columns)
+        for c in columns:
+            if c not in work.columns:
+                work[c] = ""
+        work = work[columns + (["_MEAL_ID"] if "_MEAL_ID" in work.columns else [])].copy()
+
+        now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        try:
+            conn = _meal_db_connect()
+            existing_ids = set(
+                r[0] for r in conn.execute(
+                    "SELECT id FROM meal_registers WHERE register=?", (register,)
+                ).fetchall()
+            )
+            kept_ids = set()
+
+            for _, row in work.iterrows():
+                payload = {}
+                for c in columns:
+                    value = row.get(c, "")
+                    if pd.isna(value):
+                        value = ""
+                    payload[c] = str(value)
+
+                rid = row.get("_MEAL_ID", None)
+                try:
+                    rid = int(rid) if pd.notna(rid) else None
+                except Exception:
+                    rid = None
+
+                if rid and rid in existing_ids:
+                    conn.execute(
+                        "UPDATE meal_registers SET payload=?, updated_at=? WHERE id=? AND register=?",
+                        (json.dumps(payload, ensure_ascii=False), now, rid, register),
+                    )
+                    kept_ids.add(rid)
+                else:
+                    cur = conn.execute(
+                        "INSERT INTO meal_registers(register,payload,created_at,updated_at) VALUES(?,?,?,?)",
+                        (register, json.dumps(payload, ensure_ascii=False), now, now),
+                    )
+                    kept_ids.add(cur.lastrowid)
+
+            for rid in existing_ids - kept_ids:
+                conn.execute("DELETE FROM meal_registers WHERE id=? AND register=?", (rid, register))
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            st.error(f"Unable to save MEAL register '{register}': {exc}")
 
 
-def _meal_db_replace(register, df):
-    """Persist the complete current register while retaining stable IDs when possible."""
-    columns = _MEAL_TABLE_COLUMNS[register]
-    work = df.copy() if isinstance(df, pd.DataFrame) else pd.DataFrame(columns=columns)
-    for c in columns:
-        if c not in work.columns:
-            work[c] = ""
-    work = work[columns + (["_MEAL_ID"] if "_MEAL_ID" in work.columns else [])].copy()
-
-    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-    try:
-        conn = _meal_db_connect()
-        existing_ids = set(
-            r[0] for r in conn.execute(
-                "SELECT id FROM meal_registers WHERE register=?", (register,)
-            ).fetchall()
-        )
-        kept_ids = set()
-
-        for _, row in work.iterrows():
-            payload = {}
-            for c in columns:
-                value = row.get(c, "")
-                if pd.isna(value):
-                    value = ""
-                payload[c] = str(value)
-
-            rid = row.get("_MEAL_ID", None)
-            try:
-                rid = int(rid) if pd.notna(rid) else None
-            except Exception:
-                rid = None
-
-            if rid and rid in existing_ids:
-                conn.execute(
-                    "UPDATE meal_registers SET payload=?, updated_at=? WHERE id=? AND register=?",
-                    (json.dumps(payload, ensure_ascii=False), now, rid, register),
-                )
-                kept_ids.add(rid)
-            else:
-                cur = conn.execute(
-                    "INSERT INTO meal_registers(register,payload,created_at,updated_at) VALUES(?,?,?,?)",
-                    (register, json.dumps(payload, ensure_ascii=False), now, now),
-                )
-                kept_ids.add(cur.lastrowid)
-
-        for rid in existing_ids - kept_ids:
-            conn.execute("DELETE FROM meal_registers WHERE id=? AND register=?", (rid, register))
-        conn.commit()
-        conn.close()
-    except Exception as exc:
-        st.error(f"Unable to save MEAL register '{register}': {exc}")
-
-
-def _meal_db_add(register, record):
-    """Insert one MEAL record and return its database ID."""
-    columns = _MEAL_TABLE_COLUMNS[register]
-    payload = {}
-    for c in columns:
-        value = record.get(c, "")
-        if pd.isna(value):
-            value = ""
-        payload[c] = str(value)
-    now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-    try:
-        conn = _meal_db_connect()
-        cur = conn.execute(
-            "INSERT INTO meal_registers(register,payload,created_at,updated_at) VALUES(?,?,?,?)",
-            (register, json.dumps(payload, ensure_ascii=False), now, now),
-        )
-        conn.commit()
-        rid = cur.lastrowid
-        conn.close()
-        return rid
-    except Exception as exc:
-        st.error(f"Unable to save MEAL record: {exc}")
-        return None
-
-
-def _meal_persistent_df(register):
-    return _meal_db_load(register)
-
-
-def _meal_init_state():
-    defaults = {
-        "meal_results_framework": pd.DataFrame(columns=_MEAL_TABLE_COLUMNS["meal_results_framework"]),
-        "meal_actions": pd.DataFrame(columns=_MEAL_TABLE_COLUMNS["meal_actions"]),
-        "meal_learning": pd.DataFrame(columns=_MEAL_TABLE_COLUMNS["meal_learning"]),
-        "meal_feedback": pd.DataFrame(columns=_MEAL_TABLE_COLUMNS["meal_feedback"]),
-        "meal_risks": pd.DataFrame(columns=_MEAL_TABLE_COLUMNS["meal_risks"]),
-        "meal_project_context": pd.DataFrame(columns=_MEAL_TABLE_COLUMNS["meal_project_context"]),
-    }
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            stored = _meal_persistent_df(key)
-            st.session_state[key] = stored if not stored.empty else value.copy()
-
-
-def build_meal_performance(df):
-    if df.empty:
-        return pd.DataFrame(), {}
-    target = _meal_col(df, [
-        r"^target$", r"annual target", r"monthly target",
-        r"quarter target", r"planned", r"goal"
-    ])
-    actual = _meal_col(df, [
-        r"^actual$", r"achievement", r"result", r"reported value",
-        r"actual value", r"^value$"
-    ], exclude=[target] if target else [])
-    if not target or not actual:
-        return pd.DataFrame(), {
-            "target": target, "actual": actual, "status": "NOT_AVAILABLE"
-        }
-
-    work = pd.DataFrame({
-        "Target": _meal_num(df[target]),
-        "Actual": _meal_num(df[actual]),
-    }).dropna()
-
-    if work.empty:
-        return pd.DataFrame(), {
-            "target": target, "actual": actual, "status": "NO_VALID_DATA"
-        }
-
-    work["Achievement %"] = [
-        _meal_pct(a, t) for a, t in zip(work["Actual"], work["Target"])
-    ]
-    work["Gap"] = work["Actual"] - work["Target"]
-    work["Status"] = work["Achievement %"].apply(_meal_status)
-    return work, {
-        "target": str(target), "actual": str(actual),
-        "status": "SUCCESS", "records": len(work)
-    }
-
-
-def build_meal_equity(df):
-    dimensions = {
-        "Sex / Gender": [r"^sex$", r"gender"],
-        "Age / Age Group": [r"^age$", r"age group", r"age_group"],
-        "Geography": [
-            r"district", r"region", r"province", r"county",
-            r"zone", r"woreda", r"location"
-        ],
-        "Organisation Unit": [
-            r"organisation unit", r"organization unit",
-            r"org unit", r"orgunit", r"facility"
-        ],
-        "Population Group": [
-            r"population group", r"beneficiary group", r"target group"
-        ],
-        "Disability": [r"disability", r"functional difficulty"],
-        "Vulnerability": [r"vulnerab", r"refugee", r"displaced", r"migrant"],
-    }
-    return {
-        label: _meal_col(df, pats)
-        for label, pats in dimensions.items()
-        if _meal_col(df, pats)
-    }
-
-
-def build_meal_outcome_change(df):
-    period = _meal_period_column(df)
-    if not period:
-        return pd.DataFrame(), "NO_PERIOD"
-
-    work = df.copy()
-    parsed = pd.to_datetime(work[period], errors="coerce")
-
-    # Support common DHIS2 monthly period codes such as 2025Jan.
-    if parsed.notna().sum() < 2:
-        parsed = pd.to_datetime(
-            work[period].astype(str).str.replace(
-                r"^(\d{4})([A-Za-z]{3})$", r"\1-\2-01", regex=True
-            ),
-            errors="coerce"
-        )
-
-    work["__meal_date"] = parsed
-    work = work.dropna(subset=["__meal_date"]).sort_values("__meal_date")
-    if work.empty or work["__meal_date"].nunique() < 2:
-        return pd.DataFrame(), "INSUFFICIENT_PERIODS"
-
-    first_date = work["__meal_date"].min()
-    last_date = work["__meal_date"].max()
-    first = work[work["__meal_date"] == first_date]
-    last = work[work["__meal_date"] == last_date]
-
-    rows = []
-    for c in get_numeric_columns(df):
-        a = _meal_num(first[c]).dropna()
-        b = _meal_num(last[c]).dropna()
-        if a.empty or b.empty:
-            continue
-        av, bv = float(a.mean()), float(b.mean())
-        rows.append({
-            "Indicator / Field": str(c),
-            "First Period": str(first_date.date()),
-            "Latest Period": str(last_date.date()),
-            "First Value": av,
-            "Latest Value": bv,
-            "Absolute Change": bv - av,
-            "% Change": ((bv - av) / abs(av) * 100) if av else None,
-            "Direction": "Improved" if bv > av else "Declined" if bv < av else "No change",
-        })
-    return pd.DataFrame(rows), "SUCCESS" if rows else "NO_NUMERIC_INDICATORS"
-
-
-def build_meal_indicator_registry(df):
-    numeric = get_numeric_columns(df)
-    period = _meal_period_column(df)
-    ou = find_ou_column(df)
-    source = _meal_col(df, [r"data source", r"source"])
-    numerator = _meal_col(df, [r"numerator"])
-    denominator = _meal_col(df, [r"denominator"])
-
-    rows = []
-    for c in numeric:
-        rows.append({
-            "Indicator / Field": str(c),
-            "Numeric": "Yes",
-            "Reporting Period": str(period) if period else "Not detected",
-            "Organisation Unit": str(ou) if ou else "Not detected",
-            "Data Source": str(source) if source else "Not detected",
-            "Numerator": str(numerator) if numerator else "Not detected",
-            "Denominator": str(denominator) if denominator else "Not detected",
-            "Definition": "User/configuration required",
-        })
-    return pd.DataFrame(rows)
-
-
-def _meal_download(df, filename, label):
-    if isinstance(df, pd.DataFrame) and not df.empty:
-        st.download_button(
-            label, df.to_csv(index=False).encode("utf-8"),
-            filename, "text/csv", use_container_width=True,
-            key=f"meal_dl_{filename.replace('.', '_')}"
-        )
-
-
-
-def _meal_context_record():
-    """Return the single persistent project/programme context record."""
-    stored = _meal_persistent_df("meal_project_context")
-    if stored.empty:
-        return {c: "" for c in _MEAL_TABLE_COLUMNS["meal_project_context"]}
-    row = stored.iloc[0].to_dict()
-    return {c: ("" if pd.isna(row.get(c, "")) else str(row.get(c, ""))) for c in _MEAL_TABLE_COLUMNS["meal_project_context"]}
-
-
-def _meal_save_context(record):
-    """Persist project/programme reporting context as a single editable record."""
-    context_df = pd.DataFrame([record], columns=_MEAL_TABLE_COLUMNS["meal_project_context"])
-    _meal_db_replace("meal_project_context", context_df)
-    st.session_state["meal_project_context"] = _meal_persistent_df("meal_project_context")
-
-
-def _meal_build_excel_bytes(sheets):
-    """Build an editable multi-sheet Excel MEAL report."""
-    output = BytesIO()
-    try:
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            for name, frame in sheets.items():
-                safe_name = re.sub(r"[\\/*?:\[\]]", "-", str(name))[:31] or "Sheet"
-                data = frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame(frame)
-                data.to_excel(writer, sheet_name=safe_name, index=False)
-                ws = writer.book[safe_name]
-                ws.freeze_panes = "A2"
-                for col_cells in ws.columns:
-                    max_len = 0
-                    col_letter = col_cells[0].column_letter
-                    for cell in col_cells[:200]:
-                        value = "" if cell.value is None else str(cell.value)
-                        max_len = max(max_len, len(value))
-                    ws.column_dimensions[col_letter].width = min(max(max_len + 2, 12), 45)
-    except Exception as exc:
-        raise RuntimeError(f"Excel export failed: {exc}") from exc
-    return output.getvalue()
-
-
-def _meal_add_word_table(doc, title, frame, max_rows=200):
-    """Add a readable editable Word table from a dataframe."""
-    if not isinstance(frame, pd.DataFrame):
-        frame = pd.DataFrame(frame)
-    doc.add_heading(str(title), level=2)
-    if frame.empty:
-        doc.add_paragraph("No records available.")
-        return
-    display = frame.drop(columns=["_MEAL_ID"], errors="ignore").copy().head(max_rows)
-    table = doc.add_table(rows=1, cols=len(display.columns))
-    table.style = "Table Grid"
-    for i, col in enumerate(display.columns):
-        table.rows[0].cells[i].text = str(col)
-    for _, row in display.iterrows():
-        cells = table.add_row().cells
-        for i, col in enumerate(display.columns):
-            value = row.get(col, "")
+    def _meal_db_add(register, record):
+        """Insert one MEAL record and return its database ID."""
+        columns = _MEAL_TABLE_COLUMNS[register]
+        payload = {}
+        for c in columns:
+            value = record.get(c, "")
             if pd.isna(value):
                 value = ""
-            cells[i].text = str(value)
-    if len(frame) > max_rows:
-        doc.add_paragraph(f"Note: Word table limited to first {max_rows:,} rows. Full data is available in the Excel export.")
-
-
-def _meal_build_word_bytes(context, report, performance, results_framework, outcome,
-                           equity_tables, registry, feedback, learning, actions, risks,
-                           quality_issues, complete_data=None):
-    """Build an editable Word MEAL report containing context, findings and registers."""
-    if not WORD_EXPORT_AVAILABLE:
-        raise RuntimeError("Word export requires python-docx. Install it with: pip install python-docx")
-
-    doc = Document()
-    section = doc.sections[0]
-    section.top_margin = Inches(0.65)
-    section.bottom_margin = Inches(0.65)
-    section.left_margin = Inches(0.65)
-    section.right_margin = Inches(0.65)
-
-    title = doc.add_heading("NEXUS AI — MEAL Intelligence & Programme Management Report", 0)
-    title.runs[0].font.size = Pt(20)
-
-    programme = context.get("Programme / Project", "") or "Programme / Project"
-    period = context.get("Reporting Period", "")
-    location = context.get("Country / Location", "")
-    doc.add_paragraph(f"Programme/Project: {programme}")
-    if location:
-        doc.add_paragraph(f"Country / Location: {location}")
-    if period:
-        doc.add_paragraph(f"Reporting Period: {period}")
-    if context.get("Donor / Funding"):
-        doc.add_paragraph(f"Donor / Funding: {context['Donor / Funding']}")
-    if context.get("Prepared By"):
-        doc.add_paragraph(f"Prepared By: {context['Prepared By']}")
-
-    doc.add_heading("1. Programme Context", level=1)
-    doc.add_paragraph(context.get("Programme Context", "Edit this section to describe the programme context, implementation setting, target population and reporting purpose."))
-
-    doc.add_heading("2. Executive Summary", level=1)
-    doc.add_paragraph(context.get("Executive Summary", "Edit this section to provide the programme-specific management summary."))
-
-    _meal_add_word_table(doc, "3. Evidence Snapshot", report, max_rows=50)
-    _meal_add_word_table(doc, "4. Target vs Actual Performance", performance, max_rows=200)
-    _meal_add_word_table(doc, "5. Results Framework / Logframe", results_framework, max_rows=200)
-    _meal_add_word_table(doc, "6. Outcome Monitoring & Change", outcome, max_rows=200)
-
-    doc.add_heading("7. Equity & Disaggregation", level=1)
-    if equity_tables:
-        for name, frame in equity_tables.items():
-            _meal_add_word_table(doc, name, frame, max_rows=100)
-    else:
-        doc.add_paragraph("No standard equity/disaggregation fields were detected.")
-
-    _meal_add_word_table(doc, "8. Indicator Registry", registry, max_rows=300)
-    _meal_add_word_table(doc, "9. Accountability / Feedback", feedback, max_rows=200)
-    _meal_add_word_table(doc, "10. Learning & Adaptation", learning, max_rows=200)
-    _meal_add_word_table(doc, "11. Action Tracker", actions, max_rows=200)
-    _meal_add_word_table(doc, "12. Risks & Assumptions", risks, max_rows=200)
-
-    doc.add_heading("13. Data Quality Findings", level=1)
-    if quality_issues:
-        _meal_add_word_table(doc, "Priority Data Quality Issues", pd.DataFrame(quality_issues), max_rows=100)
-    else:
-        doc.add_paragraph("No priority data-quality findings were supplied to the MEAL report.")
-
-    doc.add_heading("14. Programme-Specific Challenges", level=1)
-    doc.add_paragraph(context.get("Key Challenges", "Edit this section to capture contextual implementation challenges."))
-    doc.add_heading("15. Key Recommendations", level=1)
-    doc.add_paragraph(context.get("Key Recommendations", "Edit this section to capture programme-specific recommendations and management decisions."))
-    doc.add_heading("16. Management Conclusion", level=1)
-    doc.add_paragraph(context.get("Management Conclusion", "Edit this conclusion based on programme context, evidence and decisions."))
-
-    doc.add_paragraph("\nGenerated by NEXUS AI. Analytical values are evidence summaries; causal interpretation should use appropriate evaluation evidence.")
-
-    output = BytesIO()
-    doc.save(output)
-    return output.getvalue()
-
-
-def _meal_export_bundle(df, performance, registry, outcome, equity, report, quality_issues):
-    """Create the full editable Excel + Word reporting bundle."""
-    context = _meal_context_record()
-    rf = st.session_state.get("meal_results_framework", pd.DataFrame())
-    feedback = st.session_state.get("meal_feedback", pd.DataFrame())
-    learning = st.session_state.get("meal_learning", pd.DataFrame())
-    actions = st.session_state.get("meal_actions", pd.DataFrame())
-    risks = st.session_state.get("meal_risks", pd.DataFrame())
-
-    equity_tables = {}
-    for dim, col in (equity or {}).items():
-        counts = (
-            df[col].astype("string").fillna("Missing / blank")
-            .value_counts(dropna=False)
-            .rename_axis(dim).reset_index(name="Records")
-        )
-        counts["Share %"] = counts["Records"] / max(len(df), 1) * 100
-        equity_tables[f"Equity - {dim}"] = counts
-
-    sheets = {
-        "Project Context": pd.DataFrame([context]),
-        "Executive Review": report,
-        "Performance": performance,
-        "Results Framework": rf.drop(columns=["_MEAL_ID"], errors="ignore"),
-        "Outcomes": outcome,
-        **equity_tables,
-        "Indicator Registry": registry,
-        "Accountability": feedback.drop(columns=["_MEAL_ID"], errors="ignore"),
-        "Learning": learning.drop(columns=["_MEAL_ID"], errors="ignore"),
-        "Actions": actions.drop(columns=["_MEAL_ID"], errors="ignore"),
-        "Risks Assumptions": risks.drop(columns=["_MEAL_ID"], errors="ignore"),
-        "DQ Findings": pd.DataFrame(quality_issues or []),
-    }
-
-    # Keep the full dataset in Excel when it fits within Excel's row limit.
-    excel_max_rows = 1_048_000
-    if isinstance(df, pd.DataFrame):
-        sheets["Complete Data"] = df.head(excel_max_rows).copy()
-        if len(df) > excel_max_rows:
-            sheets["Project Context"] = pd.concat([
-                sheets["Project Context"],
-                pd.DataFrame([{"Programme / Project": f"Complete Data note: {len(df):,} records loaded; Excel export includes first {excel_max_rows:,} rows due to Excel row limits."}])
-            ], ignore_index=True)
-
-    excel_bytes = _meal_build_excel_bytes(sheets)
-    word_bytes = _meal_build_word_bytes(
-        context, report, performance, rf, outcome, equity_tables, registry,
-        feedback, learning, actions, risks, quality_issues, complete_data=df
-    )
-    return excel_bytes, word_bytes
-
-
-def render_meal_intelligence_layer(df, quality_issues=None, quality_summary=None):
-    """Render all additional MEAL functionality without changing the core app."""
-    if not isinstance(df, pd.DataFrame) or df.empty:
-        return
-
-    _meal_init_state()
-
-    performance, pmeta = build_meal_performance(df)
-    equity = build_meal_equity(df)
-    outcome, outcome_status = build_meal_outcome_change(df)
-    registry = build_meal_indicator_registry(df)
-
-    st.markdown("---")
-    st.markdown("## 🧭 MEAL Intelligence & Programme Management")
-    st.caption(
-        "Additive MEAL layer for results monitoring, indicator management, "
-        "equity, outcome change, accountability, learning, action tracking "
-        "and risk/assumption management."
-    )
-    st.caption(f"💾 Persistent MEAL storage: `{os.path.basename(MEAL_DB_PATH)}` — manual MEAL records survive refresh and app reruns.")
-
-    # Executive KPI strip
-    high_q = sum(
-        1 for i in (quality_issues or [])
-        if str(i.get("Priority", "")).upper() == "HIGH"
-    )
-    k = st.columns(6)
-    k[0].metric("MEAL records", f"{len(df):,}")
-    k[1].metric("Indicators", f"{len(registry):,}")
-    k[2].metric("Equity dimensions", f"{len(equity):,}")
-    k[3].metric("Actions", f"{len(st.session_state['meal_actions']):,}")
-    k[4].metric("Learning", f"{len(st.session_state['meal_learning']):,}")
-    k[5].metric("High DQ findings", f"{high_q:,}")
-
-    tabs = st.tabs([
-        "🎯 Performance", "🧩 Results Framework", "📊 Outcomes",
-        "⚖️ Equity", "📖 Indicator Registry", "📣 Accountability",
-        "💡 Learning", "✅ Actions", "⚠️ Risks & Assumptions",
-        "📄 MEAL Report"
-    ])
-
-    # 1 Performance
-    with tabs[0]:
-        st.markdown("### Target vs Actual Performance")
-        if pmeta.get("status") == "SUCCESS":
-            st.caption(
-                f"Detected target: **{pmeta['target']}** | "
-                f"actual: **{pmeta['actual']}**"
+            payload[c] = str(value)
+        now = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        try:
+            conn = _meal_db_connect()
+            cur = conn.execute(
+                "INSERT INTO meal_registers(register,payload,created_at,updated_at) VALUES(?,?,?,?)",
+                (register, json.dumps(payload, ensure_ascii=False), now, now),
             )
-            avg = performance["Achievement %"].dropna().mean()
-            a, b, c, d = st.columns(4)
-            a.metric("Average achievement", f"{avg:.1f}%")
-            b.metric("On track", int(performance["Status"].eq("🟢 On track").sum()))
-            c.metric("Attention", int(performance["Status"].eq("🟡 Attention").sum()))
-            d.metric("Off track", int(performance["Status"].eq("🔴 Off track").sum()))
-            st.dataframe(
-                performance.style.format({
-                    "Target": "{:,.2f}", "Actual": "{:,.2f}",
-                    "Achievement %": "{:,.1f}%", "Gap": "{:,.2f}"
-                }),
-                use_container_width=True, hide_index=True
+            conn.commit()
+            rid = cur.lastrowid
+            conn.close()
+            return rid
+        except Exception as exc:
+            st.error(f"Unable to save MEAL record: {exc}")
+            return None
+
+
+    def _meal_persistent_df(register):
+        return _meal_db_load(register)
+
+
+    def _meal_init_state():
+        defaults = {
+            "meal_results_framework": pd.DataFrame(columns=_MEAL_TABLE_COLUMNS["meal_results_framework"]),
+            "meal_actions": pd.DataFrame(columns=_MEAL_TABLE_COLUMNS["meal_actions"]),
+            "meal_learning": pd.DataFrame(columns=_MEAL_TABLE_COLUMNS["meal_learning"]),
+            "meal_feedback": pd.DataFrame(columns=_MEAL_TABLE_COLUMNS["meal_feedback"]),
+            "meal_risks": pd.DataFrame(columns=_MEAL_TABLE_COLUMNS["meal_risks"]),
+            "meal_project_context": pd.DataFrame(columns=_MEAL_TABLE_COLUMNS["meal_project_context"]),
+        }
+        for key, value in defaults.items():
+            if key not in st.session_state:
+                stored = _meal_persistent_df(key)
+                st.session_state[key] = stored if not stored.empty else value.copy()
+
+
+    def build_meal_performance(df):
+        if df.empty:
+            return pd.DataFrame(), {}
+        target = _meal_col(df, [
+            r"^target$", r"annual target", r"monthly target",
+            r"quarter target", r"planned", r"goal"
+        ])
+        actual = _meal_col(df, [
+            r"^actual$", r"achievement", r"result", r"reported value",
+            r"actual value", r"^value$"
+        ], exclude=[target] if target else [])
+        if not target or not actual:
+            return pd.DataFrame(), {
+                "target": target, "actual": actual, "status": "NOT_AVAILABLE"
+            }
+
+        work = pd.DataFrame({
+            "Target": _meal_num(df[target]),
+            "Actual": _meal_num(df[actual]),
+        }).dropna()
+
+        if work.empty:
+            return pd.DataFrame(), {
+                "target": target, "actual": actual, "status": "NO_VALID_DATA"
+            }
+
+        work["Achievement %"] = [
+            _meal_pct(a, t) for a, t in zip(work["Actual"], work["Target"])
+        ]
+        work["Gap"] = work["Actual"] - work["Target"]
+        work["Status"] = work["Achievement %"].apply(_meal_status)
+        return work, {
+            "target": str(target), "actual": str(actual),
+            "status": "SUCCESS", "records": len(work)
+        }
+
+
+    def build_meal_equity(df):
+        dimensions = {
+            "Sex / Gender": [r"^sex$", r"gender"],
+            "Age / Age Group": [r"^age$", r"age group", r"age_group"],
+            "Geography": [
+                r"district", r"region", r"province", r"county",
+                r"zone", r"woreda", r"location"
+            ],
+            "Organisation Unit": [
+                r"organisation unit", r"organization unit",
+                r"org unit", r"orgunit", r"facility"
+            ],
+            "Population Group": [
+                r"population group", r"beneficiary group", r"target group"
+            ],
+            "Disability": [r"disability", r"functional difficulty"],
+            "Vulnerability": [r"vulnerab", r"refugee", r"displaced", r"migrant"],
+        }
+        return {
+            label: _meal_col(df, pats)
+            for label, pats in dimensions.items()
+            if _meal_col(df, pats)
+        }
+
+
+    def build_meal_outcome_change(df):
+        period = _meal_period_column(df)
+        if not period:
+            return pd.DataFrame(), "NO_PERIOD"
+
+        work = df.copy()
+        parsed = pd.to_datetime(work[period], errors="coerce")
+
+        # Support common DHIS2 monthly period codes such as 2025Jan.
+        if parsed.notna().sum() < 2:
+            parsed = pd.to_datetime(
+                work[period].astype(str).str.replace(
+                    r"^(\d{4})([A-Za-z]{3})$", r"\1-\2-01", regex=True
+                ),
+                errors="coerce"
             )
-            _meal_download(performance, "DANIP_MEAL_Performance.csv", "⬇️ Export Performance")
+
+        work["__meal_date"] = parsed
+        work = work.dropna(subset=["__meal_date"]).sort_values("__meal_date")
+        if work.empty or work["__meal_date"].nunique() < 2:
+            return pd.DataFrame(), "INSUFFICIENT_PERIODS"
+
+        first_date = work["__meal_date"].min()
+        last_date = work["__meal_date"].max()
+        first = work[work["__meal_date"] == first_date]
+        last = work[work["__meal_date"] == last_date]
+
+        rows = []
+        for c in get_numeric_columns(df):
+            a = _meal_num(first[c]).dropna()
+            b = _meal_num(last[c]).dropna()
+            if a.empty or b.empty:
+                continue
+            av, bv = float(a.mean()), float(b.mean())
+            rows.append({
+                "Indicator / Field": str(c),
+                "First Period": str(first_date.date()),
+                "Latest Period": str(last_date.date()),
+                "First Value": av,
+                "Latest Value": bv,
+                "Absolute Change": bv - av,
+                "% Change": ((bv - av) / abs(av) * 100) if av else None,
+                "Direction": "Improved" if bv > av else "Declined" if bv < av else "No change",
+            })
+        return pd.DataFrame(rows), "SUCCESS" if rows else "NO_NUMERIC_INDICATORS"
+
+
+    def build_meal_indicator_registry(df):
+        numeric = get_numeric_columns(df)
+        period = _meal_period_column(df)
+        ou = find_ou_column(df)
+        source = _meal_col(df, [r"data source", r"source"])
+        numerator = _meal_col(df, [r"numerator"])
+        denominator = _meal_col(df, [r"denominator"])
+
+        rows = []
+        for c in numeric:
+            rows.append({
+                "Indicator / Field": str(c),
+                "Numeric": "Yes",
+                "Reporting Period": str(period) if period else "Not detected",
+                "Organisation Unit": str(ou) if ou else "Not detected",
+                "Data Source": str(source) if source else "Not detected",
+                "Numerator": str(numerator) if numerator else "Not detected",
+                "Denominator": str(denominator) if denominator else "Not detected",
+                "Definition": "User/configuration required",
+            })
+        return pd.DataFrame(rows)
+
+
+    def _meal_download(df, filename, label):
+        if isinstance(df, pd.DataFrame) and not df.empty:
+            st.download_button(
+                label, df.to_csv(index=False).encode("utf-8"),
+                filename, "text/csv", use_container_width=True,
+                key=f"meal_dl_{filename.replace('.', '_')}"
+            )
+
+
+
+    def _meal_context_record():
+        """Return the single persistent project/programme context record."""
+        stored = _meal_persistent_df("meal_project_context")
+        if stored.empty:
+            return {c: "" for c in _MEAL_TABLE_COLUMNS["meal_project_context"]}
+        row = stored.iloc[0].to_dict()
+        return {c: ("" if pd.isna(row.get(c, "")) else str(row.get(c, ""))) for c in _MEAL_TABLE_COLUMNS["meal_project_context"]}
+
+
+    def _meal_save_context(record):
+        """Persist project/programme reporting context as a single editable record."""
+        context_df = pd.DataFrame([record], columns=_MEAL_TABLE_COLUMNS["meal_project_context"])
+        _meal_db_replace("meal_project_context", context_df)
+        st.session_state["meal_project_context"] = _meal_persistent_df("meal_project_context")
+
+
+    def _meal_build_excel_bytes(sheets):
+        """Build an editable multi-sheet Excel MEAL report."""
+        output = BytesIO()
+        try:
+            with pd.ExcelWriter(output, engine="openpyxl") as writer:
+                for name, frame in sheets.items():
+                    safe_name = re.sub(r"[\\/*?:\[\]]", "-", str(name))[:31] or "Sheet"
+                    data = frame.copy() if isinstance(frame, pd.DataFrame) else pd.DataFrame(frame)
+                    data.to_excel(writer, sheet_name=safe_name, index=False)
+                    ws = writer.book[safe_name]
+                    ws.freeze_panes = "A2"
+                    for col_cells in ws.columns:
+                        max_len = 0
+                        col_letter = col_cells[0].column_letter
+                        for cell in col_cells[:200]:
+                            value = "" if cell.value is None else str(cell.value)
+                            max_len = max(max_len, len(value))
+                        ws.column_dimensions[col_letter].width = min(max(max_len + 2, 12), 45)
+        except Exception as exc:
+            raise RuntimeError(f"Excel export failed: {exc}") from exc
+        return output.getvalue()
+
+
+    def _meal_add_word_table(doc, title, frame, max_rows=200):
+        """Add a readable editable Word table from a dataframe."""
+        if not isinstance(frame, pd.DataFrame):
+            frame = pd.DataFrame(frame)
+        doc.add_heading(str(title), level=2)
+        if frame.empty:
+            doc.add_paragraph("No records available.")
+            return
+        display = frame.drop(columns=["_MEAL_ID"], errors="ignore").copy().head(max_rows)
+        table = doc.add_table(rows=1, cols=len(display.columns))
+        table.style = "Table Grid"
+        for i, col in enumerate(display.columns):
+            table.rows[0].cells[i].text = str(col)
+        for _, row in display.iterrows():
+            cells = table.add_row().cells
+            for i, col in enumerate(display.columns):
+                value = row.get(col, "")
+                if pd.isna(value):
+                    value = ""
+                cells[i].text = str(value)
+        if len(frame) > max_rows:
+            doc.add_paragraph(f"Note: Word table limited to first {max_rows:,} rows. Full data is available in the Excel export.")
+
+
+    def _meal_build_word_bytes(context, report, performance, results_framework, outcome,
+                               equity_tables, registry, feedback, learning, actions, risks,
+                               quality_issues, complete_data=None):
+        """Build an editable Word MEAL report containing context, findings and registers."""
+        if not WORD_EXPORT_AVAILABLE:
+            raise RuntimeError("Word export requires python-docx. Install it with: pip install python-docx")
+
+        doc = Document()
+        section = doc.sections[0]
+        section.top_margin = Inches(0.65)
+        section.bottom_margin = Inches(0.65)
+        section.left_margin = Inches(0.65)
+        section.right_margin = Inches(0.65)
+
+        title = doc.add_heading("NEXUS AI — MEAL Intelligence & Programme Management Report", 0)
+        title.runs[0].font.size = Pt(20)
+
+        programme = context.get("Programme / Project", "") or "Programme / Project"
+        period = context.get("Reporting Period", "")
+        location = context.get("Country / Location", "")
+        doc.add_paragraph(f"Programme/Project: {programme}")
+        if location:
+            doc.add_paragraph(f"Country / Location: {location}")
+        if period:
+            doc.add_paragraph(f"Reporting Period: {period}")
+        if context.get("Donor / Funding"):
+            doc.add_paragraph(f"Donor / Funding: {context['Donor / Funding']}")
+        if context.get("Prepared By"):
+            doc.add_paragraph(f"Prepared By: {context['Prepared By']}")
+
+        doc.add_heading("1. Programme Context", level=1)
+        doc.add_paragraph(context.get("Programme Context", "Edit this section to describe the programme context, implementation setting, target population and reporting purpose."))
+
+        doc.add_heading("2. Executive Summary", level=1)
+        doc.add_paragraph(context.get("Executive Summary", "Edit this section to provide the programme-specific management summary."))
+
+        _meal_add_word_table(doc, "3. Evidence Snapshot", report, max_rows=50)
+        _meal_add_word_table(doc, "4. Target vs Actual Performance", performance, max_rows=200)
+        _meal_add_word_table(doc, "5. Results Framework / Logframe", results_framework, max_rows=200)
+        _meal_add_word_table(doc, "6. Outcome Monitoring & Change", outcome, max_rows=200)
+
+        doc.add_heading("7. Equity & Disaggregation", level=1)
+        if equity_tables:
+            for name, frame in equity_tables.items():
+                _meal_add_word_table(doc, name, frame, max_rows=100)
         else:
-            st.info(
-                "Target/actual performance is not automatically available in this "
-                "dataset. Configure targets in the Results Framework tab."
-            )
+            doc.add_paragraph("No standard equity/disaggregation fields were detected.")
 
-    # 2 Results Framework
-    with tabs[1]:
-        st.markdown("### Results Framework / Logframe")
-        st.caption(
-            "Map indicators to Impact, Outcome, Output or Activity and document "
-            "baseline, target, direction, frequency and accountability."
-        )
-        existing = st.session_state["meal_results_framework"]
-        display_existing = existing.drop(columns=["_MEAL_ID"], errors="ignore")
-        edited = st.data_editor(
-            display_existing,
-            num_rows="dynamic",
-            use_container_width=True,
-            key="meal_results_framework_editor"
-        )
-        # Preserve stable database IDs for existing rows and persist edits.
-        edited = edited.copy()
-        if "_MEAL_ID" in existing.columns:
-            old_ids = existing["_MEAL_ID"].tolist()
-            ids = old_ids[:len(edited)] + [None] * max(0, len(edited) - len(old_ids))
-            edited.insert(0, "_MEAL_ID", ids[:len(edited)])
-        st.session_state["meal_results_framework"] = edited.copy()
-        _meal_db_replace("meal_results_framework", edited)
-        _meal_download(edited.drop(columns=["_MEAL_ID"], errors="ignore"), "DANIP_MEAL_Results_Framework.csv", "⬇️ Export Results Framework")
+        _meal_add_word_table(doc, "8. Indicator Registry", registry, max_rows=300)
+        _meal_add_word_table(doc, "9. Accountability / Feedback", feedback, max_rows=200)
+        _meal_add_word_table(doc, "10. Learning & Adaptation", learning, max_rows=200)
+        _meal_add_word_table(doc, "11. Action Tracker", actions, max_rows=200)
+        _meal_add_word_table(doc, "12. Risks & Assumptions", risks, max_rows=200)
 
-    # 3 Outcomes
-    with tabs[2]:
-        st.markdown("### Outcome Monitoring & Change")
-        if outcome_status == "SUCCESS":
-            st.dataframe(
-                outcome.style.format({
-                    "First Value": "{:,.2f}",
-                    "Latest Value": "{:,.2f}",
-                    "Absolute Change": "{:,.2f}",
-                    "% Change": "{:,.1f}%"
-                }),
-                use_container_width=True, hide_index=True
-            )
-            st.caption(
-                "Descriptive first-versus-latest comparison only. "
-                "It does not establish attribution or causal impact."
-            )
-            _meal_download(outcome, "DANIP_MEAL_Outcome_Change.csv", "⬇️ Export Outcome Analysis")
+        doc.add_heading("13. Data Quality Findings", level=1)
+        if quality_issues:
+            _meal_add_word_table(doc, "Priority Data Quality Issues", pd.DataFrame(quality_issues), max_rows=100)
         else:
-            st.info(f"Outcome change analysis: {outcome_status}.")
-        st.markdown("#### MEAL Evaluation Questions")
-        st.markdown(
-            "- What changed from baseline/earliest observation to the latest observation?\n"
-            "- Which results are on track, off track or uncertain?\n"
-            "- Which population groups or locations show different patterns?\n"
-            "- What additional qualitative or evaluation evidence is required before making causal claims?"
-        )
+            doc.add_paragraph("No priority data-quality findings were supplied to the MEAL report.")
 
-    # 4 Equity
-    with tabs[3]:
-        st.markdown("### Equity, Inclusion & Disaggregation")
-        if equity:
-            selected = st.selectbox(
-                "Dimension", list(equity.keys()), key="meal_equity_dimension"
-            )
-            c = equity[selected]
+        doc.add_heading("14. Programme-Specific Challenges", level=1)
+        doc.add_paragraph(context.get("Key Challenges", "Edit this section to capture contextual implementation challenges."))
+        doc.add_heading("15. Key Recommendations", level=1)
+        doc.add_paragraph(context.get("Key Recommendations", "Edit this section to capture programme-specific recommendations and management decisions."))
+        doc.add_heading("16. Management Conclusion", level=1)
+        doc.add_paragraph(context.get("Management Conclusion", "Edit this conclusion based on programme context, evidence and decisions."))
+
+        doc.add_paragraph("\nGenerated by NEXUS AI. Analytical values are evidence summaries; causal interpretation should use appropriate evaluation evidence.")
+
+        output = BytesIO()
+        doc.save(output)
+        return output.getvalue()
+
+
+    def _meal_export_bundle(df, performance, registry, outcome, equity, report, quality_issues):
+        """Create the full editable Excel + Word reporting bundle."""
+        context = _meal_context_record()
+        rf = st.session_state.get("meal_results_framework", pd.DataFrame())
+        feedback = st.session_state.get("meal_feedback", pd.DataFrame())
+        learning = st.session_state.get("meal_learning", pd.DataFrame())
+        actions = st.session_state.get("meal_actions", pd.DataFrame())
+        risks = st.session_state.get("meal_risks", pd.DataFrame())
+
+        equity_tables = {}
+        for dim, col in (equity or {}).items():
             counts = (
-                df[c].astype("string").fillna("Missing / blank")
+                df[col].astype("string").fillna("Missing / blank")
                 .value_counts(dropna=False)
-                .rename_axis(selected).reset_index(name="Records")
+                .rename_axis(dim).reset_index(name="Records")
             )
             counts["Share %"] = counts["Records"] / max(len(df), 1) * 100
-            st.dataframe(counts, use_container_width=True, hide_index=True)
-            st.caption(
-                "Record shares are descriptive. Equity gaps should be assessed against "
-                "population denominators, programme targets and context."
-            )
-        else:
-            st.info("No standard disaggregation fields were detected.")
+            equity_tables[f"Equity - {dim}"] = counts
 
-    # 5 Indicator registry
-    with tabs[4]:
-        st.markdown("### Indicator Registry / Data Dictionary")
-        st.dataframe(registry, use_container_width=True, hide_index=True)
-        _meal_download(registry, "DANIP_MEAL_Indicator_Registry.csv", "⬇️ Export Indicator Registry")
-        st.info(
-            "The registry detects available technical fields from the live dataset. "
-            "Definitions, calculation methods, source and targets should be maintained "
-            "by the MEAL team rather than invented by the application."
+        sheets = {
+            "Project Context": pd.DataFrame([context]),
+            "Executive Review": report,
+            "Performance": performance,
+            "Results Framework": rf.drop(columns=["_MEAL_ID"], errors="ignore"),
+            "Outcomes": outcome,
+            **equity_tables,
+            "Indicator Registry": registry,
+            "Accountability": feedback.drop(columns=["_MEAL_ID"], errors="ignore"),
+            "Learning": learning.drop(columns=["_MEAL_ID"], errors="ignore"),
+            "Actions": actions.drop(columns=["_MEAL_ID"], errors="ignore"),
+            "Risks Assumptions": risks.drop(columns=["_MEAL_ID"], errors="ignore"),
+            "DQ Findings": pd.DataFrame(quality_issues or []),
+        }
+
+        # Keep the full dataset in Excel when it fits within Excel's row limit.
+        excel_max_rows = 1_048_000
+        if isinstance(df, pd.DataFrame):
+            sheets["Complete Data"] = df.head(excel_max_rows).copy()
+            if len(df) > excel_max_rows:
+                sheets["Project Context"] = pd.concat([
+                    sheets["Project Context"],
+                    pd.DataFrame([{"Programme / Project": f"Complete Data note: {len(df):,} records loaded; Excel export includes first {excel_max_rows:,} rows due to Excel row limits."}])
+                ], ignore_index=True)
+
+        excel_bytes = _meal_build_excel_bytes(sheets)
+        word_bytes = _meal_build_word_bytes(
+            context, report, performance, rf, outcome, equity_tables, registry,
+            feedback, learning, actions, risks, quality_issues, complete_data=df
         )
+        return excel_bytes, word_bytes
 
-    # 6 Accountability
-    with tabs[5]:
-        st.markdown("### Accountability, Feedback & Complaints")
-        feedback = st.session_state["meal_feedback"]
-        resolved = feedback["Status"].astype(str).str.lower().isin(
-            ["resolved", "closed"]
-        ).sum() if not feedback.empty else 0
-        a, b, c = st.columns(3)
-        a.metric("Cases", len(feedback))
-        b.metric("Open", len(feedback) - int(resolved))
-        c.metric("Resolution rate", f"{(resolved/len(feedback)*100) if len(feedback) else 0:.1f}%")
 
-        with st.form("meal_feedback_add", clear_on_submit=True):
-            x1, x2, x3 = st.columns(3)
-            with x1:
-                fdate = st.date_input("Date")
-                flocation = st.text_input("Location")
-                fcat = st.selectbox("Category", ["Feedback", "Complaint", "Suggestion", "Request", "Safeguarding", "Other"])
-            with x2:
-                fpriority = st.selectbox("Priority", ["HIGH", "MEDIUM", "LOW"])
-                fowner = st.text_input("Owner")
-                fresponse = st.date_input("Response date")
-            with x3:
-                fstatus = st.selectbox("Status", ["Open", "In progress", "Resolved", "Closed"])
-                fissue = st.text_area("Feedback / complaint")
-                fresolution = st.text_area("Resolution")
-            if st.form_submit_button("➕ Add case", use_container_width=True):
-                new = pd.DataFrame([{
-                    "Date": str(fdate), "Location": flocation, "Category": fcat,
-                    "Priority": fpriority, "Feedback": fissue, "Owner": fowner,
-                    "Response Date": str(fresponse), "Status": fstatus,
-                    "Resolution": fresolution
-                }])
-                _meal_db_add("meal_feedback", new.iloc[0].to_dict())
-                st.session_state["meal_feedback"] = _meal_persistent_df("meal_feedback")
-                st.rerun()
+    def render_meal_intelligence_layer(df, quality_issues=None, quality_summary=None):
+        """Render all additional MEAL functionality without changing the core app."""
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return
 
-        if not st.session_state["meal_feedback"].empty:
-            st.dataframe(st.session_state["meal_feedback"].drop(columns=["_MEAL_ID"], errors="ignore"), use_container_width=True, hide_index=True)
-            _meal_download(st.session_state["meal_feedback"].drop(columns=["_MEAL_ID"], errors="ignore"), "DANIP_MEAL_Accountability.csv", "⬇️ Export Accountability Register")
+        _meal_init_state()
 
-    # 7 Learning
-    with tabs[6]:
-        st.markdown("### Learning & Adaptation Register")
-        learning = st.session_state["meal_learning"]
-        with st.form("meal_learning_add", clear_on_submit=True):
-            a, b = st.columns(2)
-            with a:
-                lesson = st.text_area("Learning / lesson")
-                evidence = st.text_area("Evidence")
-                decision = st.text_area("Programme decision")
-            with b:
-                adaptation = st.text_area("Adaptation / change")
-                owner = st.text_input("Owner")
-                ldate = st.date_input("Date")
-                status = st.selectbox("Status", ["Identified", "Under review", "Applied", "Closed"])
-            if st.form_submit_button("➕ Add learning", use_container_width=True):
-                new = pd.DataFrame([{
-                    "Learning": lesson, "Evidence": evidence,
-                    "Decision": decision, "Adaptation": adaptation,
-                    "Owner": owner, "Date": str(ldate), "Status": status
-                }])
-                _meal_db_add("meal_learning", new.iloc[0].to_dict())
-                st.session_state["meal_learning"] = _meal_persistent_df("meal_learning")
-                st.rerun()
-        if not st.session_state["meal_learning"].empty:
-            st.dataframe(st.session_state["meal_learning"].drop(columns=["_MEAL_ID"], errors="ignore"), use_container_width=True, hide_index=True)
-            _meal_download(st.session_state["meal_learning"].drop(columns=["_MEAL_ID"], errors="ignore"), "DANIP_MEAL_Learning.csv", "⬇️ Export Learning Register")
+        performance, pmeta = build_meal_performance(df)
+        equity = build_meal_equity(df)
+        outcome, outcome_status = build_meal_outcome_change(df)
+        registry = build_meal_indicator_registry(df)
 
-    # 8 Actions
-    with tabs[7]:
-        st.markdown("### MEAL Action Tracker")
-        actions = st.session_state["meal_actions"]
-        if not actions.empty:
-            overdue = int(actions["Status"].astype(str).str.lower().eq("overdue").sum())
-        else:
-            overdue = 0
-        a, b, c = st.columns(3)
-        a.metric("Total actions", len(actions))
-        b.metric("Open / active", int(len(actions) - actions["Status"].astype(str).str.lower().isin(["completed", "closed"]).sum()) if not actions.empty else 0)
-        c.metric("Marked overdue", overdue)
-
-        with st.form("meal_action_add", clear_on_submit=True):
-            a1, a2 = st.columns(2)
-            with a1:
-                finding = st.text_area("Finding")
-                action = st.text_area("Action")
-                owner = st.text_input("Owner")
-            with a2:
-                due = st.date_input("Due date")
-                priority = st.selectbox("Priority", ["HIGH", "MEDIUM", "LOW"])
-                status = st.selectbox("Status", ["Open", "In progress", "Completed", "Overdue"])
-            if st.form_submit_button("➕ Add action", use_container_width=True):
-                new = pd.DataFrame([{
-                    "Finding": finding, "Action": action, "Owner": owner,
-                    "Due Date": str(due), "Priority": priority, "Status": status
-                }])
-                _meal_db_add("meal_actions", new.iloc[0].to_dict())
-                st.session_state["meal_actions"] = _meal_persistent_df("meal_actions")
-                st.rerun()
-        if not st.session_state["meal_actions"].empty:
-            st.dataframe(st.session_state["meal_actions"].drop(columns=["_MEAL_ID"], errors="ignore"), use_container_width=True, hide_index=True)
-            _meal_download(st.session_state["meal_actions"].drop(columns=["_MEAL_ID"], errors="ignore"), "DANIP_MEAL_Action_Tracker.csv", "⬇️ Export Action Tracker")
-
-    # 9 Risks / assumptions
-    with tabs[8]:
-        st.markdown("### Risk, Assumption & Theory-of-Change Register")
+        st.markdown("---")
+        st.markdown("## 🧭 MEAL Intelligence & Programme Management")
         st.caption(
-            "Document risks and assumptions explicitly. The application does not "
-            "infer programme risks from numbers alone."
+            "Additive MEAL layer for results monitoring, indicator management, "
+            "equity, outcome change, accountability, learning, action tracking "
+            "and risk/assumption management."
         )
-        existing_risks = st.session_state["meal_risks"]
-        display_risks = existing_risks.drop(columns=["_MEAL_ID"], errors="ignore")
-        risks = st.data_editor(
-            display_risks,
-            num_rows="dynamic",
-            use_container_width=True,
-            key="meal_risk_editor"
+        st.caption(f"💾 Persistent MEAL storage: `{os.path.basename(MEAL_DB_PATH)}` — manual MEAL records survive refresh and app reruns.")
+
+        # Executive KPI strip
+        high_q = sum(
+            1 for i in (quality_issues or [])
+            if str(i.get("Priority", "")).upper() == "HIGH"
         )
-        risks = risks.copy()
-        if "_MEAL_ID" in existing_risks.columns:
-            old_ids = existing_risks["_MEAL_ID"].tolist()
-            ids = old_ids[:len(risks)] + [None] * max(0, len(risks) - len(old_ids))
-            risks.insert(0, "_MEAL_ID", ids[:len(risks)])
-        st.session_state["meal_risks"] = risks.copy()
-        _meal_db_replace("meal_risks", risks)
-        if not risks.empty:
-            high = int(risks["Impact"].astype(str).str.upper().eq("HIGH").sum())
-            st.metric("High-impact risks", high)
-            _meal_download(risks.drop(columns=["_MEAL_ID"], errors="ignore"), "DANIP_MEAL_Risks_Assumptions.csv", "⬇️ Export Risk Register")
+        k = st.columns(6)
+        k[0].metric("MEAL records", f"{len(df):,}")
+        k[1].metric("Indicators", f"{len(registry):,}")
+        k[2].metric("Equity dimensions", f"{len(equity):,}")
+        k[3].metric("Actions", f"{len(st.session_state['meal_actions']):,}")
+        k[4].metric("Learning", f"{len(st.session_state['meal_learning']):,}")
+        k[5].metric("High DQ findings", f"{high_q:,}")
 
-    # 10 Executive MEAL report
-    with tabs[9]:
-        st.markdown("### Project / Programme Reporting Context")
-        st.caption(
-            "Set the context once. These fields are persistent and are included in the editable Word and Excel reports."
-        )
-        context = _meal_context_record()
-        with st.form("meal_project_context_form"):
-            c1, c2 = st.columns(2)
-            with c1:
-                project_name = st.text_input("Programme / Project", value=context.get("Programme / Project", ""))
-                location = st.text_input("Country / Location", value=context.get("Country / Location", ""))
-                reporting_period = st.text_input("Reporting Period", value=context.get("Reporting Period", ""))
-                donor = st.text_input("Donor / Funding", value=context.get("Donor / Funding", ""))
-                prepared_by = st.text_input("Prepared By", value=context.get("Prepared By", ""))
-            with c2:
-                programme_context = st.text_area("Programme Context", value=context.get("Programme Context", ""), height=110)
-                executive_summary = st.text_area("Executive Summary", value=context.get("Executive Summary", ""), height=110)
-            c3, c4, c5 = st.columns(3)
-            with c3:
-                challenges = st.text_area("Key Challenges", value=context.get("Key Challenges", ""), height=110)
-            with c4:
-                recommendations = st.text_area("Key Recommendations", value=context.get("Key Recommendations", ""), height=110)
-            with c5:
-                conclusion = st.text_area("Management Conclusion", value=context.get("Management Conclusion", ""), height=110)
-            if st.form_submit_button("💾 Save Project / Programme Context", use_container_width=True):
-                _meal_save_context({
-                    "Programme / Project": project_name,
-                    "Country / Location": location,
-                    "Reporting Period": reporting_period,
-                    "Donor / Funding": donor,
-                    "Prepared By": prepared_by,
-                    "Programme Context": programme_context,
-                    "Executive Summary": executive_summary,
-                    "Key Challenges": challenges,
-                    "Key Recommendations": recommendations,
-                    "Management Conclusion": conclusion,
-                })
-                st.success("Project/programme context saved permanently.")
+        tabs = st.tabs([
+            "🎯 Performance", "🧩 Results Framework", "📊 Outcomes",
+            "⚖️ Equity", "📖 Indicator Registry", "📣 Accountability",
+            "💡 Learning", "✅ Actions", "⚠️ Risks & Assumptions",
+            "📄 MEAL Report"
+        ])
 
-        st.markdown("### MEAL Executive Review")
-        qscore = (quality_summary or {}).get("score")
-        qrating = (quality_summary or {}).get("rating", "Unknown")
-        perf_avg = performance["Achievement %"].dropna().mean() if not performance.empty else None
-
-        st.markdown("#### Evidence Snapshot")
-        report = pd.DataFrame([{
-            "Measure": "Loaded records",
-            "Value": f"{len(df):,}",
-            "Interpretation": "Complete dataset currently loaded"
-        }, {
-            "Measure": "Data quality score",
-            "Value": f"{float(qscore):.1f}/100" if qscore is not None else "Not available",
-            "Interpretation": str(qrating)
-        }, {
-            "Measure": "Average target achievement",
-            "Value": f"{perf_avg:.1f}%" if perf_avg is not None and pd.notna(perf_avg) else "Not available",
-            "Interpretation": "Detected target/actual fields"
-        }, {
-            "Measure": "High-priority DQ findings",
-            "Value": f"{high_q:,}",
-            "Interpretation": "Findings requiring MEAL attention"
-        }, {
-            "Measure": "Open actions",
-            "Value": str(int(len(st.session_state["meal_actions"]) - st.session_state["meal_actions"]["Status"].astype(str).str.lower().isin(["completed", "closed"]).sum()) if not st.session_state["meal_actions"].empty else 0),
-            "Interpretation": "Items requiring follow-up"
-        }])
-        st.dataframe(report, use_container_width=True, hide_index=True)
-
-        st.markdown("#### Recommended MEAL Review Questions")
-        st.markdown(
-            "1. **Performance:** Which indicators are below target and why?\n"
-            "2. **Quality:** Which data-quality findings could materially affect decisions?\n"
-            "3. **Equity:** Which groups or locations require deeper analysis?\n"
-            "4. **Outcomes:** What has changed over time, and what additional evidence is needed?\n"
-            "5. **Accountability:** Are feedback and complaints being responded to on time?\n"
-            "6. **Learning:** What evidence should trigger programme adaptation?\n"
-            "7. **Action:** Who owns each decision and when is follow-up due?\n"
-            "8. **Risk:** Which assumptions or contextual risks need active monitoring?"
-        )
-
-        export = pd.concat([
-            report,
-            pd.DataFrame([{
-                "Measure": "Actions registered",
-                "Value": len(st.session_state["meal_actions"]),
-                "Interpretation": "Session register"
-            }])
-        ], ignore_index=True)
-        _meal_download(export, "DANIP_MEAL_Executive_Review.csv", "⬇️ Export MEAL Executive Review")
-
-        st.markdown("### 📦 Full Editable MEAL Report")
-        st.caption(
-            "Excel contains separate editable sheets for the project context, executive review, performance, results framework, outcomes, equity, indicator registry, accountability, learning, actions, risks, data quality and complete data. Word contains an editable narrative report with the same MEAL evidence and registers."
-        )
-        try:
-            excel_bytes, word_bytes = _meal_export_bundle(
-                df=df,
-                performance=performance,
-                registry=registry,
-                outcome=outcome,
-                equity=equity,
-                report=report,
-                quality_issues=quality_issues,
-            )
-            e1, e2 = st.columns(2)
-            with e1:
-                st.download_button(
-                    "📊 Download Full MEAL Report — Excel",
-                    excel_bytes,
-                    "DANIP_AI_Full_MEAL_Report.xlsx",
-                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    use_container_width=True,
-                    key="meal_full_excel_export",
+        # 1 Performance
+        with tabs[0]:
+            st.markdown("### Target vs Actual Performance")
+            if pmeta.get("status") == "SUCCESS":
+                st.caption(
+                    f"Detected target: **{pmeta['target']}** | "
+                    f"actual: **{pmeta['actual']}**"
                 )
-            with e2:
-                if WORD_EXPORT_AVAILABLE:
-                    st.download_button(
-                        "📝 Download Full MEAL Report — Word",
-                        word_bytes,
-                        "DANIP_AI_Full_MEAL_Report.docx",
-                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                        use_container_width=True,
-                        key="meal_full_word_export",
-                    )
-                else:
-                    st.warning("Word export requires python-docx. Run: pip install python-docx")
-        except Exception as exc:
-            st.error(f"Full MEAL report export is unavailable: {exc}")
+                avg = performance["Achievement %"].dropna().mean()
+                a, b, c, d = st.columns(4)
+                a.metric("Average achievement", f"{avg:.1f}%")
+                b.metric("On track", int(performance["Status"].eq("🟢 On track").sum()))
+                c.metric("Attention", int(performance["Status"].eq("🟡 Attention").sum()))
+                d.metric("Off track", int(performance["Status"].eq("🔴 Off track").sum()))
+                st.dataframe(
+                    performance.style.format({
+                        "Target": "{:,.2f}", "Actual": "{:,.2f}",
+                        "Achievement %": "{:,.1f}%", "Gap": "{:,.2f}"
+                    }),
+                    use_container_width=True, hide_index=True
+                )
+                _meal_download(performance, "DANIP_MEAL_Performance.csv", "⬇️ Export Performance")
+            else:
+                st.info(
+                    "Target/actual performance is not automatically available in this "
+                    "dataset. Configure targets in the Results Framework tab."
+                )
 
-        st.success(
-            "MEAL layer is additive: the existing complete-data processing, "
-            "user-requested analysis, Data Quality Matrix, visualizations, "
-            "Advanced Analytics, AI interpretation and chatbot are not modified."
-        )
+        # 2 Results Framework
+        with tabs[1]:
+            st.markdown("### Results Framework / Logframe")
+            st.caption(
+                "Map indicators to Impact, Outcome, Output or Activity and document "
+                "baseline, target, direction, frequency and accountability."
+            )
+            existing = st.session_state["meal_results_framework"]
+            display_existing = existing.drop(columns=["_MEAL_ID"], errors="ignore")
+            edited = st.data_editor(
+                display_existing,
+                num_rows="dynamic",
+                use_container_width=True,
+                key="meal_results_framework_editor"
+            )
+            # Preserve stable database IDs for existing rows and persist edits.
+            edited = edited.copy()
+            if "_MEAL_ID" in existing.columns:
+                old_ids = existing["_MEAL_ID"].tolist()
+                ids = old_ids[:len(edited)] + [None] * max(0, len(edited) - len(old_ids))
+                edited.insert(0, "_MEAL_ID", ids[:len(edited)])
+            st.session_state["meal_results_framework"] = edited.copy()
+            _meal_db_replace("meal_results_framework", edited)
+            _meal_download(edited.drop(columns=["_MEAL_ID"], errors="ignore"), "DANIP_MEAL_Results_Framework.csv", "⬇️ Export Results Framework")
 
+        # 3 Outcomes
+        with tabs[2]:
+            st.markdown("### Outcome Monitoring & Change")
+            if outcome_status == "SUCCESS":
+                st.dataframe(
+                    outcome.style.format({
+                        "First Value": "{:,.2f}",
+                        "Latest Value": "{:,.2f}",
+                        "Absolute Change": "{:,.2f}",
+                        "% Change": "{:,.1f}%"
+                    }),
+                    use_container_width=True, hide_index=True
+                )
+                st.caption(
+                    "Descriptive first-versus-latest comparison only. "
+                    "It does not establish attribution or causal impact."
+                )
+                _meal_download(outcome, "DANIP_MEAL_Outcome_Change.csv", "⬇️ Export Outcome Analysis")
+            else:
+                st.info(f"Outcome change analysis: {outcome_status}.")
+            st.markdown("#### MEAL Evaluation Questions")
+            st.markdown(
+                "- What changed from baseline/earliest observation to the latest observation?\n"
+                "- Which results are on track, off track or uncertain?\n"
+                "- Which population groups or locations show different patterns?\n"
+                "- What additional qualitative or evaluation evidence is required before making causal claims?"
+            )
 
-# ============================================================
-# MAIN
-# ============================================================
+        # 4 Equity
+        with tabs[3]:
+            st.markdown("### Equity, Inclusion & Disaggregation")
+            if equity:
+                selected = st.selectbox(
+                    "Dimension", list(equity.keys()), key="meal_equity_dimension"
+                )
+                c = equity[selected]
+                counts = (
+                    df[c].astype("string").fillna("Missing / blank")
+                    .value_counts(dropna=False)
+                    .rename_axis(selected).reset_index(name="Records")
+                )
+                counts["Share %"] = counts["Records"] / max(len(df), 1) * 100
+                st.dataframe(counts, use_container_width=True, hide_index=True)
+                st.caption(
+                    "Record shares are descriptive. Equity gaps should be assessed against "
+                    "population denominators, programme targets and context."
+                )
+            else:
+                st.info("No standard disaggregation fields were detected.")
 
-if automatic_analysis or st.session_state.get("data_loaded", False):
+        # 5 Indicator registry
+        with tabs[4]:
+            st.markdown("### Indicator Registry / Data Dictionary")
+            st.dataframe(registry, use_container_width=True, hide_index=True)
+            _meal_download(registry, "DANIP_MEAL_Indicator_Registry.csv", "⬇️ Export Indicator Registry")
+            st.info(
+                "The registry detects available technical fields from the live dataset. "
+                "Definitions, calculation methods, source and targets should be maintained "
+                "by the MEAL team rather than invented by the application."
+            )
 
-    if not user_url.strip():
-        st.warning(
-            "Please paste a DHIS2 URL."
-        )
-        st.stop()
+        # 6 Accountability
+        with tabs[5]:
+            st.markdown("### Accountability, Feedback & Complaints")
+            feedback = st.session_state["meal_feedback"]
+            resolved = feedback["Status"].astype(str).str.lower().isin(
+                ["resolved", "closed"]
+            ).sum() if not feedback.empty else 0
+            a, b, c = st.columns(3)
+            a.metric("Cases", len(feedback))
+            b.metric("Open", len(feedback) - int(resolved))
+            c.metric("Resolution rate", f"{(resolved/len(feedback)*100) if len(feedback) else 0:.1f}%")
 
-    source_url = user_url.strip()
+            with st.form("meal_feedback_add", clear_on_submit=True):
+                x1, x2, x3 = st.columns(3)
+                with x1:
+                    fdate = st.date_input("Date")
+                    flocation = st.text_input("Location")
+                    fcat = st.selectbox("Category", ["Feedback", "Complaint", "Suggestion", "Request", "Safeguarding", "Other"])
+                with x2:
+                    fpriority = st.selectbox("Priority", ["HIGH", "MEDIUM", "LOW"])
+                    fowner = st.text_input("Owner")
+                    fresponse = st.date_input("Response date")
+                with x3:
+                    fstatus = st.selectbox("Status", ["Open", "In progress", "Resolved", "Closed"])
+                    fissue = st.text_area("Feedback / complaint")
+                    fresolution = st.text_area("Resolution")
+                if st.form_submit_button("➕ Add case", use_container_width=True):
+                    new = pd.DataFrame([{
+                        "Date": str(fdate), "Location": flocation, "Category": fcat,
+                        "Priority": fpriority, "Feedback": fissue, "Owner": fowner,
+                        "Response Date": str(fresponse), "Status": fstatus,
+                        "Resolution": fresolution
+                    }])
+                    _meal_db_add("meal_feedback", new.iloc[0].to_dict())
+                    st.session_state["meal_feedback"] = _meal_persistent_df("meal_feedback")
+                    st.rerun()
 
-    previous_url = st.session_state.get(
-        "last_analyzed_url"
-    )
+            if not st.session_state["meal_feedback"].empty:
+                st.dataframe(st.session_state["meal_feedback"].drop(columns=["_MEAL_ID"], errors="ignore"), use_container_width=True, hide_index=True)
+                _meal_download(st.session_state["meal_feedback"].drop(columns=["_MEAL_ID"], errors="ignore"), "DANIP_MEAL_Accountability.csv", "⬇️ Export Accountability Register")
 
-    url_changed = (
-        previous_url != source_url
-    )
+        # 7 Learning
+        with tabs[6]:
+            st.markdown("### Learning & Adaptation Register")
+            learning = st.session_state["meal_learning"]
+            with st.form("meal_learning_add", clear_on_submit=True):
+                a, b = st.columns(2)
+                with a:
+                    lesson = st.text_area("Learning / lesson")
+                    evidence = st.text_area("Evidence")
+                    decision = st.text_area("Programme decision")
+                with b:
+                    adaptation = st.text_area("Adaptation / change")
+                    owner = st.text_input("Owner")
+                    ldate = st.date_input("Date")
+                    status = st.selectbox("Status", ["Identified", "Under review", "Applied", "Closed"])
+                if st.form_submit_button("➕ Add learning", use_container_width=True):
+                    new = pd.DataFrame([{
+                        "Learning": lesson, "Evidence": evidence,
+                        "Decision": decision, "Adaptation": adaptation,
+                        "Owner": owner, "Date": str(ldate), "Status": status
+                    }])
+                    _meal_db_add("meal_learning", new.iloc[0].to_dict())
+                    st.session_state["meal_learning"] = _meal_persistent_df("meal_learning")
+                    st.rerun()
+            if not st.session_state["meal_learning"].empty:
+                st.dataframe(st.session_state["meal_learning"].drop(columns=["_MEAL_ID"], errors="ignore"), use_container_width=True, hide_index=True)
+                _meal_download(st.session_state["meal_learning"].drop(columns=["_MEAL_ID"], errors="ignore"), "DANIP_MEAL_Learning.csv", "⬇️ Export Learning Register")
 
-    st.session_state[
-        "last_analyzed_url"
-    ] = source_url
+        # 8 Actions
+        with tabs[7]:
+            st.markdown("### MEAL Action Tracker")
+            actions = st.session_state["meal_actions"]
+            if not actions.empty:
+                overdue = int(actions["Status"].astype(str).str.lower().eq("overdue").sum())
+            else:
+                overdue = 0
+            a, b, c = st.columns(3)
+            a.metric("Total actions", len(actions))
+            b.metric("Open / active", int(len(actions) - actions["Status"].astype(str).str.lower().isin(["completed", "closed"]).sum()) if not actions.empty else 0)
+            c.metric("Marked overdue", overdue)
 
-    if url_changed:
-        st.session_state["last_chart_plan"] = None
-        st.session_state["data_loaded"] = False
+            with st.form("meal_action_add", clear_on_submit=True):
+                a1, a2 = st.columns(2)
+                with a1:
+                    finding = st.text_area("Finding")
+                    action = st.text_area("Action")
+                    owner = st.text_input("Owner")
+                with a2:
+                    due = st.date_input("Due date")
+                    priority = st.selectbox("Priority", ["HIGH", "MEDIUM", "LOW"])
+                    status = st.selectbox("Status", ["Open", "In progress", "Completed", "Overdue"])
+                if st.form_submit_button("➕ Add action", use_container_width=True):
+                    new = pd.DataFrame([{
+                        "Finding": finding, "Action": action, "Owner": owner,
+                        "Due Date": str(due), "Priority": priority, "Status": status
+                    }])
+                    _meal_db_add("meal_actions", new.iloc[0].to_dict())
+                    st.session_state["meal_actions"] = _meal_persistent_df("meal_actions")
+                    st.rerun()
+            if not st.session_state["meal_actions"].empty:
+                st.dataframe(st.session_state["meal_actions"].drop(columns=["_MEAL_ID"], errors="ignore"), use_container_width=True, hide_index=True)
+                _meal_download(st.session_state["meal_actions"].drop(columns=["_MEAL_ID"], errors="ignore"), "DANIP_MEAL_Action_Tracker.csv", "⬇️ Export Action Tracker")
 
-    source_type = identify_url_type(
-        source_url
-    )
+        # 9 Risks / assumptions
+        with tabs[8]:
+            st.markdown("### Risk, Assumption & Theory-of-Change Register")
+            st.caption(
+                "Document risks and assumptions explicitly. The application does not "
+                "infer programme risks from numbers alone."
+            )
+            existing_risks = st.session_state["meal_risks"]
+            display_risks = existing_risks.drop(columns=["_MEAL_ID"], errors="ignore")
+            risks = st.data_editor(
+                display_risks,
+                num_rows="dynamic",
+                use_container_width=True,
+                key="meal_risk_editor"
+            )
+            risks = risks.copy()
+            if "_MEAL_ID" in existing_risks.columns:
+                old_ids = existing_risks["_MEAL_ID"].tolist()
+                ids = old_ids[:len(risks)] + [None] * max(0, len(risks) - len(old_ids))
+                risks.insert(0, "_MEAL_ID", ids[:len(risks)])
+            st.session_state["meal_risks"] = risks.copy()
+            _meal_db_replace("meal_risks", risks)
+            if not risks.empty:
+                high = int(risks["Impact"].astype(str).str.upper().eq("HIGH").sum())
+                st.metric("High-impact risks", high)
+                _meal_download(risks.drop(columns=["_MEAL_ID"], errors="ignore"), "DANIP_MEAL_Risks_Assumptions.csv", "⬇️ Export Risk Register")
 
-    st.info(
-        f"Detected source: **{source_type}**"
-    )
+        # 10 Executive MEAL report
+        with tabs[9]:
+            st.markdown("### Project / Programme Reporting Context")
+            st.caption(
+                "Set the context once. These fields are persistent and are included in the editable Word and Excel reports."
+            )
+            context = _meal_context_record()
+            with st.form("meal_project_context_form"):
+                c1, c2 = st.columns(2)
+                with c1:
+                    project_name = st.text_input("Programme / Project", value=context.get("Programme / Project", ""))
+                    location = st.text_input("Country / Location", value=context.get("Country / Location", ""))
+                    reporting_period = st.text_input("Reporting Period", value=context.get("Reporting Period", ""))
+                    donor = st.text_input("Donor / Funding", value=context.get("Donor / Funding", ""))
+                    prepared_by = st.text_input("Prepared By", value=context.get("Prepared By", ""))
+                with c2:
+                    programme_context = st.text_area("Programme Context", value=context.get("Programme Context", ""), height=110)
+                    executive_summary = st.text_area("Executive Summary", value=context.get("Executive Summary", ""), height=110)
+                c3, c4, c5 = st.columns(3)
+                with c3:
+                    challenges = st.text_area("Key Challenges", value=context.get("Key Challenges", ""), height=110)
+                with c4:
+                    recommendations = st.text_area("Key Recommendations", value=context.get("Key Recommendations", ""), height=110)
+                with c5:
+                    conclusion = st.text_area("Management Conclusion", value=context.get("Management Conclusion", ""), height=110)
+                if st.form_submit_button("💾 Save Project / Programme Context", use_container_width=True):
+                    _meal_save_context({
+                        "Programme / Project": project_name,
+                        "Country / Location": location,
+                        "Reporting Period": reporting_period,
+                        "Donor / Funding": donor,
+                        "Prepared By": prepared_by,
+                        "Programme Context": programme_context,
+                        "Executive Summary": executive_summary,
+                        "Key Challenges": challenges,
+                        "Key Recommendations": recommendations,
+                        "Management Conclusion": conclusion,
+                    })
+                    st.success("Project/programme context saved permanently.")
 
-    # ========================================================
-    # RETRIEVE / REUSE CURRENT DATASET
-    # ========================================================
+            st.markdown("### MEAL Executive Review")
+            qscore = (quality_summary or {}).get("score")
+            qrating = (quality_summary or {}).get("rating", "Unknown")
+            perf_avg = performance["Achievement %"].dropna().mean() if not performance.empty else None
 
-    if (
-        st.session_state.get("data_loaded", False)
-        and st.session_state.get("loaded_source_url") == source_url
-        and isinstance(st.session_state.get("loaded_df"), pd.DataFrame)
-    ):
-        df = st.session_state["loaded_df"].copy()
-        st.info("♻️ Using the already loaded dataset for automatic NEXUS AI analysis.")
-    else:
-        with st.spinner("📥 Retrieving the complete dataset..."):
+            st.markdown("#### Evidence Snapshot")
+            report = pd.DataFrame([{
+                "Measure": "Loaded records",
+                "Value": f"{len(df):,}",
+                "Interpretation": "Complete dataset currently loaded"
+            }, {
+                "Measure": "Data quality score",
+                "Value": f"{float(qscore):.1f}/100" if qscore is not None else "Not available",
+                "Interpretation": str(qrating)
+            }, {
+                "Measure": "Average target achievement",
+                "Value": f"{perf_avg:.1f}%" if perf_avg is not None and pd.notna(perf_avg) else "Not available",
+                "Interpretation": "Detected target/actual fields"
+            }, {
+                "Measure": "High-priority DQ findings",
+                "Value": f"{high_q:,}",
+                "Interpretation": "Findings requiring MEAL attention"
+            }, {
+                "Measure": "Open actions",
+                "Value": str(int(len(st.session_state["meal_actions"]) - st.session_state["meal_actions"]["Status"].astype(str).str.lower().isin(["completed", "closed"]).sum()) if not st.session_state["meal_actions"].empty else 0),
+                "Interpretation": "Items requiring follow-up"
+            }])
+            st.dataframe(report, use_container_width=True, hide_index=True)
+
+            st.markdown("#### Recommended MEAL Review Questions")
+            st.markdown(
+                "1. **Performance:** Which indicators are below target and why?\n"
+                "2. **Quality:** Which data-quality findings could materially affect decisions?\n"
+                "3. **Equity:** Which groups or locations require deeper analysis?\n"
+                "4. **Outcomes:** What has changed over time, and what additional evidence is needed?\n"
+                "5. **Accountability:** Are feedback and complaints being responded to on time?\n"
+                "6. **Learning:** What evidence should trigger programme adaptation?\n"
+                "7. **Action:** Who owns each decision and when is follow-up due?\n"
+                "8. **Risk:** Which assumptions or contextual risks need active monitoring?"
+            )
+
+            export = pd.concat([
+                report,
+                pd.DataFrame([{
+                    "Measure": "Actions registered",
+                    "Value": len(st.session_state["meal_actions"]),
+                    "Interpretation": "Session register"
+                }])
+            ], ignore_index=True)
+            _meal_download(export, "DANIP_MEAL_Executive_Review.csv", "⬇️ Export MEAL Executive Review")
+
+            st.markdown("### 📦 Full Editable MEAL Report")
+            st.caption(
+                "Excel contains separate editable sheets for the project context, executive review, performance, results framework, outcomes, equity, indicator registry, accountability, learning, actions, risks, data quality and complete data. Word contains an editable narrative report with the same MEAL evidence and registers."
+            )
             try:
-                request_url = refresh_data_url(source_url)
-                raw_data = get_direct_api_data(request_url)
-            except Exception:
-                try:
-                    raw_data = get_direct_api_data(source_url)
-                except Exception as retry_error:
-                    st.error("Unable to retrieve DHIS2 data.")
-                    st.code(str(retry_error))
-                    st.stop()
+                excel_bytes, word_bytes = _meal_export_bundle(
+                    df=df,
+                    performance=performance,
+                    registry=registry,
+                    outcome=outcome,
+                    equity=equity,
+                    report=report,
+                    quality_issues=quality_issues,
+                )
+                e1, e2 = st.columns(2)
+                with e1:
+                    st.download_button(
+                        "📊 Download Full MEAL Report — Excel",
+                        excel_bytes,
+                        "DANIP_AI_Full_MEAL_Report.xlsx",
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        use_container_width=True,
+                        key="meal_full_excel_export",
+                    )
+                with e2:
+                    if WORD_EXPORT_AVAILABLE:
+                        st.download_button(
+                            "📝 Download Full MEAL Report — Word",
+                            word_bytes,
+                            "DANIP_AI_Full_MEAL_Report.docx",
+                            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            use_container_width=True,
+                            key="meal_full_word_export",
+                        )
+                    else:
+                        st.warning("Word export requires python-docx. Run: pip install python-docx")
+            except Exception as exc:
+                st.error(f"Full MEAL report export is unavailable: {exc}")
 
-        df = normalize_dataframe(raw_data)
+            st.success(
+                "MEAL layer is additive: the existing complete-data processing, "
+                "user-requested analysis, Data Quality Matrix, visualizations, "
+                "Advanced Analytics, AI interpretation and chatbot are not modified."
+            )
 
-        if df.empty:
-            st.error("DHIS2 returned data, but no tabular data could be identified.")
-            if isinstance(raw_data, dict):
-                st.json(raw_data)
+
+    # ============================================================
+    # MAIN
+    # ============================================================
+
+    if automatic_analysis or st.session_state.get("data_loaded", False):
+
+        if not user_url.strip():
+            st.warning(
+                "Please paste a DHIS2 URL."
+            )
             st.stop()
 
-        st.session_state["loaded_df"] = df.copy()
-        st.session_state["loaded_source_url"] = source_url
-        st.session_state["data_loaded"] = True
+        source_url = user_url.strip()
 
-    # ========================================================
-    # DATA LOADED
-    # ========================================================
+        previous_url = st.session_state.get(
+            "last_analyzed_url"
+        )
 
-    st.success(
-        f"Successfully retrieved {len(df):,} records. "
-        "ALL retrieved rows are available for analysis."
-    )
+        url_changed = (
+            previous_url != source_url
+        )
 
-    st.caption(
-        f"🔄 Current source: {source_url} • "
-        f"Complete dataset: "
-        f"{len(df):,} rows × {len(df.columns):,} columns"
-    )
+        st.session_state[
+            "last_analyzed_url"
+        ] = source_url
 
+        if url_changed:
+            st.session_state["last_chart_plan"] = None
+            st.session_state["data_loaded"] = False
 
-    # ========================================================
-    # COMPLETE DATASET TABLE
-    # ========================================================
+        source_type = identify_url_type(
+            source_url
+        )
 
-    render_complete_dataset_table(
-        df=df,
-        source_url=source_url,
-    )
+        st.info(
+            f"Detected source: **{source_type}**"
+        )
 
-    # ========================================================
-    # DATA QUALITY — CALCULATE ON THE COMPLETE DATASET
-    # ========================================================
+        # ========================================================
+        # RETRIEVE / REUSE CURRENT DATASET
+        # ========================================================
 
-    with st.spinner("🛡️ Running the Data Quality Matrix across the complete dataset..."):
-        top_quality_issues, top_quality_matrix, top_quality_summary = build_quality_matrix(df)
+        if (
+            st.session_state.get("data_loaded", False)
+            and st.session_state.get("loaded_source_url") == source_url
+            and isinstance(st.session_state.get("loaded_df"), pd.DataFrame)
+        ):
+            df = st.session_state["loaded_df"].copy()
+            st.info("♻️ Using the already loaded dataset for automatic NEXUS AI analysis.")
+        else:
+            with st.spinner("📥 Retrieving the complete dataset..."):
+                try:
+                    request_url = refresh_data_url(source_url)
+                    raw_data = get_direct_api_data(request_url)
+                except Exception:
+                    try:
+                        raw_data = get_direct_api_data(source_url)
+                    except Exception as retry_error:
+                        st.error("Unable to retrieve DHIS2 data.")
+                        st.code(str(retry_error))
+                        st.stop()
 
-    # ========================================================
-    # USER-REQUESTED ANALYSIS ONLY
-    # ========================================================
+            df = normalize_dataframe(raw_data)
 
-    st.subheader("🎯 User-Requested Analysis")
+            if df.empty:
+                st.error("DHIS2 returned data, but no tabular data could be identified.")
+                if isinstance(raw_data, dict):
+                    st.json(raw_data)
+                st.stop()
 
-    selected_plan = guided_analysis_ui(
-        df=df,
-        user_question="User-requested analysis",
-        initial_plan=None,
-    )
+            st.session_state["loaded_df"] = df.copy()
+            st.session_state["loaded_source_url"] = source_url
+            st.session_state["data_loaded"] = True
 
-    live_visual_plan = st.session_state.get("guided_preview_plan")
+        # ========================================================
+        # DATA LOADED
+        # ========================================================
 
-    # Use the confirmed plan only on the button-click rerun. Otherwise use the
-    # live plan so changing Analysis Type or Aggregation immediately updates
-    # the calculation/visualization instead of leaving the previous Sum result.
-    chart_plan = selected_plan if selected_plan is not None else live_visual_plan
-
-    if selected_plan is not None:
         st.success(
-            "✅ User-selected analysis confirmed. The selected indicators, X-axis, "
-            "graph type, analysis type and aggregation will be used against the complete dataset."
+            f"Successfully retrieved {len(df):,} records. "
+            "ALL retrieved rows are available for analysis."
         )
 
-    # ========================================================
-    # REQUESTED VISUALIZATION — ONLY THE GRAPH SELECTED BY USER
-    # ========================================================
+        st.caption(
+            f"🔄 Current source: {source_url} • "
+            f"Complete dataset: "
+            f"{len(df):,} rows × {len(df.columns):,} columns"
+        )
 
-    if chart_plan and chart_plan.get("chart_requested"):
-        render_requested_visualizations(
+
+        # ========================================================
+        # COMPLETE DATASET TABLE
+        # ========================================================
+
+        render_complete_dataset_table(
             df=df,
-            plan=chart_plan,
+            source_url=source_url,
         )
 
-        # ====================================================
-        # M&E PROGRAMME MANAGER INTERPRETATION
-        # ====================================================
-        render_me_programme_narration(
+        # ========================================================
+        # DATA QUALITY — CALCULATE ON THE COMPLETE DATASET
+        # ========================================================
+
+        with st.spinner("🛡️ Running the Data Quality Matrix across the complete dataset..."):
+            top_quality_issues, top_quality_matrix, top_quality_summary = build_quality_matrix(df)
+
+        # Share the deterministic DQ results with the separate M&E Management Hub.
+        # This does not alter the existing DQ engine or its calculations.
+        st.session_state["danip_api_quality_issues"] = top_quality_issues
+        st.session_state["danip_api_quality_summary"] = top_quality_summary
+
+        # ========================================================
+        # USER-REQUESTED ANALYSIS ONLY
+        # ========================================================
+
+        st.subheader("🎯 User-Requested Analysis")
+
+        selected_plan = guided_analysis_ui(
             df=df,
-            plan=chart_plan,
-            quality_issues=top_quality_issues,
-            quality_matrix=top_quality_matrix,
-            quality_summary=top_quality_summary,
+            user_question="User-requested analysis",
+            initial_plan=None,
         )
 
-    # ========================================================
-    # DATA QUALITY MATRIX
-    # ========================================================
+        live_visual_plan = st.session_state.get("guided_preview_plan")
 
-    quality_issues, quality_matrix, quality_summary = (top_quality_issues, top_quality_matrix, top_quality_summary)
+        # Use the confirmed plan only on the button-click rerun. Otherwise use the
+        # live plan so changing Analysis Type or Aggregation immediately updates
+        # the calculation/visualization instead of leaving the previous Sum result.
+        chart_plan = selected_plan if selected_plan is not None else live_visual_plan
 
-    selected_quality_indicators = (
-        chart_plan.get("y_columns", [])
-        if chart_plan
-        else []
-    )
+        if selected_plan is not None:
+            st.success(
+                "✅ User-selected analysis confirmed. The selected indicators, X-axis, "
+                "graph type, analysis type and aggregation will be used against the complete dataset."
+            )
 
-    render_quality_dashboard(
-        df=df,
-        quality_issues=quality_issues,
-        quality_matrix=quality_matrix,
-        quality_summary=quality_summary,
-        selected_indicators=selected_quality_indicators,
-    )
+        # ========================================================
+        # REQUESTED VISUALIZATION — ONLY THE GRAPH SELECTED BY USER
+        # ========================================================
 
-    # ========================================================
+        if chart_plan and chart_plan.get("chart_requested"):
+            render_requested_visualizations(
+                df=df,
+                plan=chart_plan,
+            )
 
-    # ========================================================
-    # CONVERSATIONAL ANALYSIS CHATBOT
-    # ========================================================
-    # New isolated module. It uses the same loaded dataframe/source and
-    # does not modify any existing analysis, chart or quality calculation.
-    render_analysis_chatbot(
-        df=df,
-        source_url=source_url,
-        chart_plan=chart_plan,
-        quality_issues=quality_issues,
-        quality_matrix=quality_matrix,
-        quality_summary=quality_summary,
-    )
+            # ====================================================
+            # M&E PROGRAMME MANAGER INTERPRETATION
+            # ====================================================
+            render_me_programme_narration(
+                df=df,
+                plan=chart_plan,
+                quality_issues=top_quality_issues,
+                quality_matrix=top_quality_matrix,
+                quality_summary=top_quality_summary,
+            )
 
-    # ========================================================
-    # MEAL INTELLIGENCE LAYER — ADDITIVE MODULE
-    # ========================================================
-    # Uses the same complete loaded dataset and existing DQ outputs.
-    # It does not replace or modify the existing analysis, charts,
-    # data-quality calculations, AI interpretation or chatbot.
-    render_meal_intelligence_layer(
-        df=df,
-        quality_issues=quality_issues,
-        quality_summary=quality_summary,
-    )
+        # ========================================================
+        # DATA QUALITY MATRIX
+        # ========================================================
+
+        quality_issues, quality_matrix, quality_summary = (top_quality_issues, top_quality_matrix, top_quality_summary)
+
+        selected_quality_indicators = (
+            chart_plan.get("y_columns", [])
+            if chart_plan
+            else []
+        )
+
+        render_quality_dashboard(
+            df=df,
+            quality_issues=quality_issues,
+            quality_matrix=quality_matrix,
+            quality_summary=quality_summary,
+            selected_indicators=selected_quality_indicators,
+        )
+
+        # ========================================================
+
+        # ========================================================
+        # CONVERSATIONAL ANALYSIS CHATBOT
+        # ========================================================
+        # New isolated module. It uses the same loaded dataframe/source and
+        # does not modify any existing analysis, chart or quality calculation.
+        render_analysis_chatbot(
+            df=df,
+            source_url=source_url,
+            chart_plan=chart_plan,
+            quality_issues=quality_issues,
+            quality_matrix=quality_matrix,
+            quality_summary=quality_summary,
+        )
+
+        # ========================================================
+        # MEAL INTELLIGENCE LAYER — ADDITIVE MODULE
+        # ========================================================
+        # Uses the same complete loaded dataset and existing DQ outputs.
+        # It does not replace or modify the existing analysis, charts,
+        # data-quality calculations, AI interpretation or chatbot.
+        render_meal_intelligence_layer(
+            df=df,
+            quality_issues=quality_issues,
+            quality_summary=quality_summary,
+        )
+
+
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
 
 # ============================================================
-# END — DANIP-AI ANALYSIS + DATA QUALITY + MEAL INTELLIGENCE LAYER
+# COMMON SIDEBAR — SHARED BY BOTH WORKSPACES
+# ============================================================
+render_common_sidebar()
+
+
+st.markdown(
+    """
+<style>
+/* ============================================================
+   DANIP WORKSPACE TABS — TRANSPARENT ADMIN NAVIGATION
+   No filled background. Active workspace uses red indicator.
+   ============================================================ */
+
+/* Horizontal workspace selector */
+div[data-testid="stRadio"] {
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+/* Remove the radio group's default visual label spacing */
+div[data-testid="stRadio"] > label {
+    display: none !important;
+}
+
+/* The horizontal option row */
+div[data-testid="stRadio"] div[role="radiogroup"] {
+    display: flex !important;
+    flex-direction: row !important;
+    align-items: center !important;
+    gap: 0 !important;
+    width: 100% !important;
+    min-height: 46px !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    background: transparent !important;
+    border: 0 !important;
+    box-shadow: none !important;
+    overflow-x: auto !important;
+    scrollbar-width: none !important;
+}
+div[data-testid="stRadio"] div[role="radiogroup"]::-webkit-scrollbar {
+    display: none !important;
+}
+
+/* Each workspace option */
+div[data-testid="stRadio"] div[role="radiogroup"] > label {
+    position: relative !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    flex: 0 0 auto !important;
+    min-height: 46px !important;
+    padding: 0 22px !important;
+    margin: 0 !important;
+    background: transparent !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    color: #17374b !important;
+    -webkit-text-fill-color: #17374b !important;
+    font-weight: 650 !important;
+    font-size: 0.92rem !important;
+    cursor: pointer !important;
+    white-space: nowrap !important;
+    transition: color .15s ease, background .15s ease !important;
+}
+
+/* Kill Streamlit's selected filled background */
+div[data-testid="stRadio"] div[role="radiogroup"] > label,
+div[data-testid="stRadio"] div[role="radiogroup"] > label:hover,
+div[data-testid="stRadio"] div[role="radiogroup"] > label:has(input:checked) {
+    background: transparent !important;
+}
+
+/* Text inside options */
+div[data-testid="stRadio"] div[role="radiogroup"] > label p,
+div[data-testid="stRadio"] div[role="radiogroup"] > label span,
+div[data-testid="stRadio"] div[role="radiogroup"] > label div {
+    color: #17374b !important;
+    -webkit-text-fill-color: #17374b !important;
+}
+
+/* Native radio indicator — white/transparent by default */
+div[data-testid="stRadio"] div[role="radiogroup"] > label input {
+    accent-color: #b03a2e !important;
+}
+
+/* Active red indicator and red text */
+div[data-testid="stRadio"] div[role="radiogroup"] > label:has(input:checked) {
+    color: #17374b !important;
+    -webkit-text-fill-color: #17374b !important;
+}
+
+/* Red underline for active workspace, like the reference */
+div[data-testid="stRadio"] div[role="radiogroup"] > label:has(input:checked)::after {
+    content: "" !important;
+    position: absolute !important;
+    left: 14px !important;
+    right: 14px !important;
+    bottom: 0 !important;
+    height: 3px !important;
+    background: #b03a2e !important;
+    border-radius: 0 !important;
+}
+
+/* ============================================================
+   NO HOVER / NO FOCUS BACKGROUND
+   Workspace navigation stays transparent at all times.
+   Only the active workspace gets the red underline.
+   ============================================================ */
+div[data-testid="stRadio"],
+div[data-testid="stRadio"] > div,
+div[data-testid="stRadio"] > div > div,
+div[data-testid="stRadio"] div[role="radiogroup"],
+div[data-testid="stRadio"] div[role="radiogroup"] > label,
+div[data-testid="stRadio"] div[role="radiogroup"] > label:hover,
+div[data-testid="stRadio"] div[role="radiogroup"] > label:focus,
+div[data-testid="stRadio"] div[role="radiogroup"] > label:focus-within,
+div[data-testid="stRadio"] div[role="radiogroup"] > label:active,
+div[data-testid="stRadio"] div[role="radiogroup"] > label:has(input:checked),
+div[data-testid="stRadio"] div[role="radiogroup"] > label:has(input:checked):hover,
+div[data-testid="stRadio"] div[role="radiogroup"] > label:has(input:checked):focus,
+div[data-testid="stRadio"] div[role="radiogroup"] > label:has(input:checked):focus-within {
+    background: transparent !important;
+    background-color: transparent !important;
+    box-shadow: none !important;
+    outline: none !important;
+}
+
+div[data-testid="stRadio"] div[role="radiogroup"] > label:hover,
+div[data-testid="stRadio"] div[role="radiogroup"] > label:focus,
+div[data-testid="stRadio"] div[role="radiogroup"] > label:focus-within,
+div[data-testid="stRadio"] div[role="radiogroup"] > label:active {
+    color: #17374b !important;
+    -webkit-text-fill-color: #17374b !important;
+    filter: none !important;
+    transform: none !important;
+}
+
+div[data-testid="stRadio"] div[role="radiogroup"] > label:hover p,
+div[data-testid="stRadio"] div[role="radiogroup"] > label:hover span,
+div[data-testid="stRadio"] div[role="radiogroup"] > label:hover div,
+div[data-testid="stRadio"] div[role="radiogroup"] > label:focus p,
+div[data-testid="stRadio"] div[role="radiogroup"] > label:focus span,
+div[data-testid="stRadio"] div[role="radiogroup"] > label:focus div,
+div[data-testid="stRadio"] div[role="radiogroup"] > label:focus-within p,
+div[data-testid="stRadio"] div[role="radiogroup"] > label:focus-within span,
+div[data-testid="stRadio"] div[role="radiogroup"] > label:focus-within div {
+    color: #17374b !important;
+    -webkit-text-fill-color: #17374b !important;
+    background: transparent !important;
+}
+
+/* Remove Streamlit's focus ring / keyboard highlight */
+div[data-testid="stRadio"] input:focus,
+div[data-testid="stRadio"] input:focus-visible {
+    outline: none !important;
+    box-shadow: none !important;
+}
+
+/* Mobile */
+@media (max-width: 700px) {
+    div[data-testid="stRadio"] div[role="radiogroup"] > label {
+        padding: 0 14px !important;
+        font-size: 0.84rem !important;
+    }
+}
+</style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+# ============================================================
+# TOP-LEVEL DANIP WORKSPACE NAVIGATION
+# ============================================================
+# Use a horizontal Streamlit radio as the workspace switcher rather than
+# st.tabs. This gives us reliable full-width admin-style styling across
+# Streamlit versions while keeping the two workspaces completely separate.
+
+workspace = st.radio(
+    "DANIP workspace",
+    [
+        "🤖 DANIP AI Data Analyst",
+        "🧭 DANIP M&E Management Hub",
+    ],
+    horizontal=True,
+    label_visibility="collapsed",
+    key="danip_workspace_selector",
+)
+
+if workspace == "🤖 DANIP AI Data Analyst":
+    render_existing_danip_ai_app()
+else:
+    render_danip_me_management_hub()
+
+# ============================================================
+# END — DANIP AI + SEPARATE DANIP M&E MANAGEMENT HUB
 # ============================================================
