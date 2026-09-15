@@ -96,16 +96,14 @@ st.markdown(
         padding: 1.1rem 2rem 3rem 2rem;
     }
 
-  .app-hero {
-    position: relative !important;
-    overflow: hidden !important;
-    border: 1px solid rgba(255,255,255,.7) !important;
-    border-radius: 26px !important;
-    padding: 1.8rem 1.9rem 1.55rem !important;
-    background: #9d2130 !important;
-    box-shadow: 0 20px 50px rgba(16,24,40,.16) !important;
-    margin-bottom: 1.35rem !important;
-}
+    .app-hero {
+        padding: 1.2rem 1.35rem;
+        border-radius: 18px;
+        border: 1px solid rgba(148,163,184,.18);
+        background: #ffffff;
+        box-shadow: 0 1px 4px rgba(15,23,42,.06);
+        margin-bottom: 1rem;
+    }
 
     .app-title {
         font-size: clamp(1.6rem, 3vw, 2.35rem);
@@ -1224,31 +1222,6 @@ st.markdown(
         .app-title { font-size: 2rem !important; }
         .app-subtitle { font-size: .88rem !important; }
     }
-    /* =========================================================
-   NEXUS DANIP AI — FINAL HEADER BRAND COLOR
-   ========================================================= */
-
-.app-hero {
-    background: #17374b !important;
-    background-image: none !important;
-    border-color: #9d2130 !important;
-}
-
-.app-hero::before,
-.app-hero::after {
-    display: none !important;
-    background: none !important;
-}
-
-.app-hero .app-title,
-.app-hero .app-subtitle {
-    color: #ffffff !important;
-    -webkit-text-fill-color: #ffffff !important;
-}
-[data-testid="stSidebar"] {
-    background-color: #17374b !important;
-    background: #17374b !important;
-}
     </style>
     """,
     unsafe_allow_html=True,
@@ -8839,7 +8812,7 @@ def _me_hub_responsive_css():
     @media(max-width:680px){.block-container{padding-left:.6rem!important;padding-right:.6rem!important}.mh-admin-top{height:46px}.mh-logo{height:64px}.mh-logo-placeholder{height:38px;width:92%}.mehub-statusbar{padding:8px 10px}}
     @media(max-width:520px){[data-testid="stHorizontalBlock"]{flex-wrap:wrap!important;gap:.4rem!important}[data-testid="stHorizontalBlock"]>[data-testid="column"]{min-width:100%!important;flex-basis:100%!important}}
     /* ---------- COMMON SIDEBAR SHARED BY AI + M&E ---------- */
-    [data-testid="stSidebar"]{display:block!important;background:linear-gradient(180deg,#0a1020 0%,#111827 100%)!important;border-right:1px solid rgba(255,255,255,.10)!important}
+    [data-testid="stSidebar"]{display:block!important;background:#17374b!important;background-color:#17374b!important;border-right:1px solid rgba(255,255,255,.10)!important}
     [data-testid="stSidebar"] [data-testid="stMarkdownContainer"], [data-testid="stSidebar"] label, [data-testid="stSidebar"] p, [data-testid="stSidebar"] span{color:#e5e7eb!important;-webkit-text-fill-color:#e5e7eb!important}
     [data-testid="stSidebar"] .stCaption, [data-testid="stSidebar"] small{color:#94a3b8!important;-webkit-text-fill-color:#94a3b8!important}
     .common-sidebar-brand{display:flex;align-items:center;gap:10px;padding:4px 2px 14px;border-bottom:1px solid rgba(255,255,255,.10);margin-bottom:12px;font-weight:800;color:#fff!important;-webkit-text-fill-color:#fff!important}
@@ -9689,6 +9662,43 @@ def render_common_sidebar():
             f'<small>Current workspace</small></div></div>',
             unsafe_allow_html=True,
         )
+
+        # -----------------------------------------------------
+        # SYSTEM CONTROL
+        # -----------------------------------------------------
+        st.markdown('<div class="common-sidebar-section">SYSTEM CONTROL</div>', unsafe_allow_html=True)
+        st.markdown(
+            '<div class="nexus-reset-card">'
+            '<div class="nexus-reset-title">🔄 Start from the beginning</div>'
+            '<div class="nexus-reset-text">'
+            'Clear the current session, dataset selections, analysis state and temporary settings. '
+            'Your persistent M&amp;E records remain stored in the application database.'
+            '</div></div>',
+            unsafe_allow_html=True,
+        )
+
+        st.markdown('<div class="nexus-reset-button">', unsafe_allow_html=True)
+        reset_clicked = st.button(
+            '🔄 Refresh & Start from Beginning',
+            use_container_width=True,
+            key='nexus_reset_application',
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        if reset_clicked:
+            # Full application reset: clear the current workspace, dataset,
+            # analysis state AND the pasted API/Data URL. Persistent MEAL
+            # records in danip_meal.db are intentionally preserved.
+            st.session_state.clear()
+            st.session_state["data_url_input"] = ""
+            st.session_state["last_analyzed_url"] = ""
+            st.session_state["loaded_source_url"] = ""
+            st.session_state["data_loaded"] = False
+            try:
+                st.query_params.clear()
+            except Exception:
+                pass
+            st.rerun()
 
 def render_existing_danip_ai_app():
     # ============================================================
@@ -12777,6 +12787,44 @@ section[data-testid="stSidebar"] > div:first-child {
 .status-dot.orange { background:#f59e0b !important; box-shadow:0 0 0 3px rgba(245,158,11,.13) !important; }
 .status-dot.blue { background:#60a5fa !important; box-shadow:0 0 0 3px rgba(96,165,250,.13) !important; }
 
+/* System control / restart */
+.nexus-reset-card {
+    padding:10px 11px !important;
+    border-radius:10px !important;
+    background:rgba(255,255,255,.055) !important;
+    border:1px solid rgba(255,255,255,.10) !important;
+}
+.nexus-reset-title {
+    color:#ffffff !important;
+    -webkit-text-fill-color:#ffffff !important;
+    font-size:.76rem !important;
+    font-weight:850 !important;
+    line-height:1.25 !important;
+}
+.nexus-reset-text {
+    margin-top:4px !important;
+    color:#c5d1df !important;
+    -webkit-text-fill-color:#c5d1df !important;
+    font-size:.64rem !important;
+    line-height:1.4 !important;
+}
+[data-testid="stSidebar"] .nexus-reset-button button {
+    width:100% !important;
+    min-height:38px !important;
+    border-radius:8px !important;
+    border:1px solid rgba(255,255,255,.18) !important;
+    background:#ffffff !important;
+    color:#17374b !important;
+    -webkit-text-fill-color:#17374b !important;
+    font-weight:850 !important;
+    font-size:.72rem !important;
+}
+[data-testid="stSidebar"] .nexus-reset-button button:hover {
+    border-color:#ffffff !important;
+    background:#f3f7fa !important;
+    color:#17374b !important;
+}
+
 /* Workspace navigation */
 .sidebar-nav-card {
     padding:7px !important;
@@ -12924,7 +12972,9 @@ section[data-testid="stSidebar"] > div:first-child {
     margin-bottom:9px !important;
 }
 .nexus-live-kicker {
-    color:#64748b !important;
+    color:#000000 !important;
+    -webkit-text-fill-color:#000000 !important;
+    font-weight:900 !important;
     font-size:.58rem !important;
     line-height:1.2 !important;
     font-weight:900 !important;
@@ -13017,6 +13067,40 @@ section[data-testid="stSidebar"] > div:first-child {
     line-height:1.25 !important;
 }
 
+/* =========================================================
+   HIGH-CONTRAST LIVE SYSTEM MONITOR
+   Force ALL monitor text to solid black and bold.
+   This overrides Streamlit/theme inherited text colors.
+   ========================================================= */
+.nexus-live-monitor,
+.nexus-live-monitor * {
+    opacity:1 !important;
+}
+
+.nexus-live-monitor .nexus-live-kicker,
+.nexus-live-monitor .nexus-live-title,
+.nexus-live-monitor .nexus-live-clock,
+.nexus-live-monitor .nexus-live-activity,
+.nexus-live-monitor .nexus-live-detail,
+.nexus-live-monitor .nexus-live-stage,
+.nexus-live-monitor .nexus-live-pipeline,
+.nexus-live-monitor .nexus-live-pipeline-row,
+.nexus-live-monitor .nexus-live-pipeline-row span,
+.nexus-live-monitor .nexus-live-pipeline-row b,
+.nexus-live-monitor .nexus-live-footer,
+.nexus-live-monitor .nexus-live-footer span {
+    color:#000000 !important;
+    -webkit-text-fill-color:#000000 !important;
+    text-shadow:none !important;
+    font-weight:900 !important;
+    opacity:1 !important;
+}
+
+/* Keep the status dots colored while keeping their text black. */
+.nexus-live-monitor .nexus-live-pipeline-row > span:first-child {
+    -webkit-text-fill-color:initial !important;
+}
+
 /* Responsive sidebar sizes */
 @media (max-width: 1100px) {
     section[data-testid="stSidebar"] { width:300px !important; min-width:300px !important; }
@@ -13033,102 +13117,6 @@ section[data-testid="stSidebar"] > div:first-child {
     section[data-testid="stSidebar"] > div:first-child { padding:.75rem .65rem 1rem .65rem !important; }
     .common-sidebar-section { margin-top:12px !important; }
 }
-
-/* ============================================================
-   NEXUS LIVE SIDEBAR — HIGH CONTRAST TEXT
-   Typography-only override for the system monitor.
-   ============================================================ */
-.nexus-live-monitor,
-.nexus-live-monitor * {
-    opacity: 1 !important;
-}
-
-.nexus-live-kicker,
-.nexus-live-title,
-.nexus-live-clock,
-.nexus-live-activity,
-.nexus-live-detail,
-.nexus-live-stage,
-.nexus-live-pipeline-row,
-.nexus-live-pipeline-row span,
-.nexus-live-pipeline-row b,
-.nexus-live-footer,
-.nexus-live-footer span {
-    color: #000000 !important;
-    -webkit-text-fill-color: #000000 !important;
-    text-shadow: none !important;
-}
-
-.nexus-live-kicker {
-    font-weight: 900 !important;
-    font-size: .62rem !important;
-}
-
-.nexus-live-title {
-    font-weight: 900 !important;
-    font-size: .98rem !important;
-}
-
-.nexus-live-clock {
-    font-weight: 800 !important;
-    font-size: .60rem !important;
-}
-
-.nexus-live-activity {
-    font-weight: 900 !important;
-    font-size: .76rem !important;
-    line-height: 1.45 !important;
-}
-
-.nexus-live-detail {
-    color: #000000 !important;
-    -webkit-text-fill-color: #000000 !important;
-    font-weight: 700 !important;
-    font-size: .64rem !important;
-    line-height: 1.45 !important;
-}
-
-.nexus-live-stage {
-    color: #000000 !important;
-    -webkit-text-fill-color: #000000 !important;
-    font-weight: 900 !important;
-    font-size: .58rem !important;
-}
-
-.nexus-live-pipeline-row {
-    color: #000000 !important;
-    -webkit-text-fill-color: #000000 !important;
-    font-weight: 800 !important;
-    font-size: .68rem !important;
-}
-
-.nexus-live-pipeline-row b {
-    color: #000000 !important;
-    -webkit-text-fill-color: #000000 !important;
-    font-weight: 900 !important;
-    font-size: .56rem !important;
-}
-
-.nexus-live-footer {
-    color: #000000 !important;
-    -webkit-text-fill-color: #000000 !important;
-    font-weight: 800 !important;
-    font-size: .59rem !important;
-}
-
-.nexus-live-footer span {
-    color: #000000 !important;
-    -webkit-text-fill-color: #000000 !important;
-    font-weight: 800 !important;
-}
-
-@media (max-width: 480px) {
-    .nexus-live-title { font-size: .92rem !important; }
-    .nexus-live-activity { font-size: .72rem !important; }
-    .nexus-live-detail { font-size: .62rem !important; }
-    .nexus-live-pipeline-row { font-size: .66rem !important; }
-}
-
 </style>
     """,
     unsafe_allow_html=True,
@@ -13310,19 +13298,62 @@ div[data-testid="stRadio"] input:focus-visible {
 # TOP-LEVEL DANIP WORKSPACE NAVIGATION
 # ============================================================
 # Use a horizontal Streamlit radio as the workspace switcher rather than
-# st.tabs. This gives us reliable full-width admin-style styling across
-# Streamlit versions while keeping the two workspaces completely separate.
+# st.tabs. The refresh control is placed beside the workspace selector so
+# users can restart the application without using the browser refresh icon.
 
-workspace = st.radio(
-    "DANIP workspace",
-    [
-        "🤖 DANIP AI Data Analyst",
-        "🧭 DANIP M&E Management Hub",
-    ],
-    horizontal=True,
-    label_visibility="collapsed",
-    key="danip_workspace_selector",
-)
+nav_col, refresh_col = st.columns([8.5, 1.5], gap="small", vertical_alignment="center")
+
+with nav_col:
+    workspace = st.radio(
+        "DANIP workspace",
+        [
+            "🤖 DANIP AI Data Analyst",
+            "🧭 DANIP M&E Management Hub",
+        ],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="danip_workspace_selector",
+    )
+
+with refresh_col:
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stButton"] > button.nexus-top-refresh {
+            min-height: 38px !important;
+            height: 38px !important;
+            border: 1px solid #17374b !important;
+            border-radius: 6px !important;
+            background: #17374b !important;
+            color: #ffffff !important;
+            font-size: 0.82rem !important;
+            font-weight: 650 !important;
+            padding: 0 12px !important;
+            white-space: nowrap !important;
+        }
+        div[data-testid="stButton"] > button.nexus-top-refresh:hover {
+            background: #244f66 !important;
+            border-color: #244f66 !important;
+            color: #ffffff !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    if st.button("🔄 Refresh", key="nexus_top_refresh", use_container_width=True):
+        # Full application reset: also remove the pasted API/Data URL so the
+        # user returns to a completely blank starting point. Persistent MEAL
+        # records in danip_meal.db are intentionally preserved.
+        st.session_state.clear()
+        st.session_state["data_url_input"] = ""
+        st.session_state["last_analyzed_url"] = ""
+        st.session_state["loaded_source_url"] = ""
+        st.session_state["data_loaded"] = False
+        try:
+            st.query_params.clear()
+        except Exception:
+            pass
+        st.rerun()
 
 if workspace == "🤖 DANIP AI Data Analyst":
     render_existing_danip_ai_app()
