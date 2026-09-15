@@ -96,14 +96,16 @@ st.markdown(
         padding: 1.1rem 2rem 3rem 2rem;
     }
 
-    .app-hero {
-        padding: 1.2rem 1.35rem;
-        border-radius: 18px;
-        border: 1px solid rgba(148,163,184,.18);
-        background: #ffffff;
-        box-shadow: 0 1px 4px rgba(15,23,42,.06);
-        margin-bottom: 1rem;
-    }
+  .app-hero {
+    position: relative !important;
+    overflow: hidden !important;
+    border: 1px solid rgba(255,255,255,.7) !important;
+    border-radius: 26px !important;
+    padding: 1.8rem 1.9rem 1.55rem !important;
+    background: #9d2130 !important;
+    box-shadow: 0 20px 50px rgba(16,24,40,.16) !important;
+    margin-bottom: 1.35rem !important;
+}
 
     .app-title {
         font-size: clamp(1.6rem, 3vw, 2.35rem);
@@ -1222,6 +1224,31 @@ st.markdown(
         .app-title { font-size: 2rem !important; }
         .app-subtitle { font-size: .88rem !important; }
     }
+    /* =========================================================
+   NEXUS DANIP AI — FINAL HEADER BRAND COLOR
+   ========================================================= */
+
+.app-hero {
+    background: #17374b !important;
+    background-image: none !important;
+    border-color: #9d2130 !important;
+}
+
+.app-hero::before,
+.app-hero::after {
+    display: none !important;
+    background: none !important;
+}
+
+.app-hero .app-title,
+.app-hero .app-subtitle {
+    color: #ffffff !important;
+    -webkit-text-fill-color: #ffffff !important;
+}
+[data-testid="stSidebar"] {
+    background-color: #17374b !important;
+    background: #17374b !important;
+}
     </style>
     """,
     unsafe_allow_html=True,
