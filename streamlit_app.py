@@ -9422,44 +9422,246 @@ def render_danip_me_management_hub():
 
 
 
-def render_common_sidebar():
-    """Render one common sidebar shared by the DANIP AI and M&E Hub tabs."""
-    with st.sidebar:
+def _nexus_sidebar_status(message, state="running", stage=None, detail=None):
+    """Update the live sidebar monitor without changing the application's core logic."""
+    now = datetime.now().strftime("%H:%M:%S")
+    state = str(state or "running").lower()
+
+    state_map = {
+        "online": ("🟢", "SYSTEM ONLINE", "#16a34a"),
+        "running": ("🔵", "PROCESSING", "#2563eb"),
+        "success": ("🟢", "COMPLETED", "#16a34a"),
+        "warning": ("🟠", "ATTENTION", "#d97706"),
+        "error": ("🔴", "ERROR", "#dc2626"),
+        "idle": ("⚪", "READY", "#64748b"),
+    }
+    icon, label, accent = state_map.get(state, state_map["running"])
+
+    st.session_state["nexus_system_activity"] = str(message)
+    st.session_state["nexus_system_state"] = state
+    st.session_state["nexus_system_stage"] = str(stage or message)
+    st.session_state["nexus_system_detail"] = str(detail or "")
+    st.session_state["nexus_last_operation"] = str(message)
+    st.session_state["nexus_operation_time"] = now
+
+    history = st.session_state.setdefault("nexus_system_history", [])
+    history.append({"time": now, "message": str(message), "state": state})
+    st.session_state["nexus_system_history"] = history[-10:]
+
+    placeholder = st.session_state.get("nexus_sidebar_live_placeholder")
+    if placeholder is None:
+        return
+
+    loaded = st.session_state.get("loaded_df")
+    has_data = isinstance(loaded, pd.DataFrame) and not loaded.empty
+    records = len(loaded) if has_data else 0
+
+    try:
+        dq = st.session_state.get("danip_api_quality_summary") or {}
+        dq_score = dq.get("score", dq.get("Overall Score", None))
+    except Exception:
+        dq_score = None
+
+    ai_ready = bool(OPENAI_API_KEY)
+    dhis_ready = bool(DHIS2_USERNAME and DHIS2_PASSWORD)
+
+    def dot(ok, active=False, warning=False):
+        if warning:
+            return "🟠"
+        if active:
+            return "🔵"
+        return "🟢" if ok else "⚪"
+
+    pipeline = [
+        (dot(True), "Application", "READY"),
+        (dot(dhis_ready, active=(state == "running" and "DHIS2" in str(message))), "DHIS2 / API", "READY" if dhis_ready else "CONFIG"),
+        (dot(has_data, active=(state == "running" and "data" in str(message).lower())), "Dataset", "LOADED" if has_data else "WAITING"),
+        (dot(bool(dq_score is not None), active=(state == "running" and "quality" in str(message).lower())), "Data Quality", "ASSESSED" if dq_score is not None else "PENDING"),
+        (dot(ai_ready, active=(state == "running" and ("AI" in str(message) or "interpret" in str(message).lower()))), "NEXUS AI", "READY" if ai_ready else "OPTIONAL"),
+    ]
+
+    pipeline_html = "".join(
+        f'<div class="nexus-live-pipeline-row"><span>{i}</span><span>{html.escape(name)}</span><b>{html.escape(status)}</b></div>'
+        for i, name, status in pipeline
+    )
+
+    detail_html = (
+        f'<div class="nexus-live-detail">{html.escape(str(detail))}</div>'
+        if detail else ""
+    )
+
+    with placeholder.container():
         st.markdown(
-            '<div class="common-sidebar-brand"><div class="common-sidebar-mark">D</div>'
-            '<div>NEXUS DANIP<br><span style="font-weight:500;font-size:.67rem">Data + M&E Intelligence</span></div></div>',
+            f"""
+            <div class="nexus-live-monitor" style="--nexus-accent:{accent};">
+                <div class="nexus-live-head">
+                    <div>
+                        <div class="nexus-live-kicker">LIVE SYSTEM MONITOR</div>
+                        <div class="nexus-live-title">{icon} {label}</div>
+                    </div>
+                    <div class="nexus-live-clock">{now}</div>
+                </div>
+                <div class="nexus-live-current">
+                    <div class="nexus-live-pulse"></div>
+                    <div>
+                        <div class="nexus-live-activity">{html.escape(str(message))}</div>
+                        {detail_html}
+                    </div>
+                </div>
+                <div class="nexus-live-stage">CURRENT STAGE · {html.escape(str(stage or message))}</div>
+                <div class="nexus-live-pipeline">{pipeline_html}</div>
+                <div class="nexus-live-footer">
+                    <span>{records:,} records in memory</span>
+                    <span>{'AI enabled' if ai_ready else 'AI optional'}</span>
+                </div>
+            </div>
+            """,
             unsafe_allow_html=True,
         )
+
+
+def render_common_sidebar():
+    """Render a responsive, readable common sidebar with a live system monitor."""
+    with st.sidebar:
+        live_placeholder = st.empty()
+        st.session_state["nexus_sidebar_live_placeholder"] = live_placeholder
+
+        defaults = {
+            "nexus_system_history": [],
+            "nexus_system_activity": "Waiting for user action",
+            "nexus_system_state": "online",
+            "nexus_system_stage": "System ready",
+            "nexus_system_detail": "NEXUS is ready for the next operation.",
+            "nexus_last_operation": "System initialized",
+            "nexus_operation_time": datetime.now().strftime("%H:%M:%S"),
+        }
+        for key, value in defaults.items():
+            if key not in st.session_state:
+                st.session_state[key] = value
+
+        _nexus_sidebar_status(
+            st.session_state["nexus_system_activity"],
+            st.session_state["nexus_system_state"],
+            st.session_state["nexus_system_stage"],
+            st.session_state["nexus_system_detail"],
+        )
+
+        # -----------------------------------------------------
+        # BRAND
+        # -----------------------------------------------------
+        st.markdown(
+            '<div class="common-sidebar-brand">'
+            '<div class="common-sidebar-mark">D</div>'
+            '<div class="common-sidebar-brand-text">'
+            '<div class="common-sidebar-name">NEXUS DANIP</div>'
+            '<div class="common-sidebar-subtitle">Data + M&amp;E Intelligence</div>'
+            '</div></div>',
+            unsafe_allow_html=True,
+        )
+
         loaded = st.session_state.get("loaded_df")
         has_data = isinstance(loaded, pd.DataFrame) and not loaded.empty
+
+        # -----------------------------------------------------
+        # LIVE DATASET CARD
+        # -----------------------------------------------------
         if has_data:
             st.markdown(
-                f'<div class="common-sidebar-card common-sidebar-live">🟢 <b>Live dataset ready</b><br>{len(loaded):,} records shared by both workspaces.</div>',
+                f'<div class="common-sidebar-card common-sidebar-live">'
+                f'<div class="sidebar-card-title"><span class="status-dot green"></span>Dataset available</div>'
+                f'<div class="sidebar-card-text">{len(loaded):,} records are available to both DANIP workspaces.</div>'
+                f'</div>',
                 unsafe_allow_html=True,
             )
         else:
             st.markdown(
-                '<div class="common-sidebar-card">🟠 <b>Waiting for data</b><br>Load a DHIS2/API dataset in the AI workspace.</div>',
+                '<div class="common-sidebar-card common-sidebar-waiting">'
+                '<div class="sidebar-card-title"><span class="status-dot orange"></span>Waiting for data</div>'
+                '<div class="sidebar-card-text">Paste a DHIS2/API dataset URL in the AI workspace to begin.</div>'
+                '</div>',
                 unsafe_allow_html=True,
             )
-        st.markdown('<div class="common-sidebar-section">Navigation</div>', unsafe_allow_html=True)
+
+        # -----------------------------------------------------
+        # NAVIGATION
+        # -----------------------------------------------------
+        st.markdown('<div class="common-sidebar-section">WORKSPACES</div>', unsafe_allow_html=True)
         st.markdown(
-            '<div class="common-sidebar-card">🤖 <b>DANIP AI Data Analyst</b><br>Natural-language analysis, DQ, charts and AI interpretation.<br><br>🧭 <b>DANIP M&E Management Hub</b><br>Indicator monitoring, performance, trends and M&E management.</div>',
+            '<div class="sidebar-nav-card">'
+            '<div class="sidebar-nav-item"><span class="sidebar-nav-icon">🤖</span>'
+            '<div><b>DANIP AI Data Analyst</b><small>Analysis · DQ · charts · AI interpretation</small></div></div>'
+            '<div class="sidebar-nav-item"><span class="sidebar-nav-icon">🧭</span>'
+            '<div><b>DANIP M&amp;E Management Hub</b><small>Indicators · performance · trends · management</small></div></div>'
+            '</div>',
             unsafe_allow_html=True,
         )
+
+        # -----------------------------------------------------
+        # DATASET STATUS
+        # -----------------------------------------------------
         if has_data:
-            period_col = find_period_column(loaded)
-            ou_col = find_ou_column(loaded)
-            indicator_cols = _me_hub_indicator_columns(loaded)
-            periods = int(loaded[period_col].nunique(dropna=True)) if period_col else 0
-            ous = int(loaded[ou_col].nunique(dropna=True)) if ou_col else 0
-            st.markdown('<div class="common-sidebar-section">Dataset status</div>', unsafe_allow_html=True)
-            st.markdown(
-                f'<div class="common-sidebar-card"><b>Records:</b> {len(loaded):,}<br><b>Indicators:</b> {len(indicator_cols):,}<br><b>Organisation units:</b> {ous:,}<br><b>Periods:</b> {periods:,}</div>',
-                unsafe_allow_html=True,
-            )
-        st.markdown('<div class="common-sidebar-section">Workspace status</div>', unsafe_allow_html=True)
-        st.caption("The same API dataset is available to both tabs. M&E filters refresh the dashboard automatically.")
+            try:
+                period_col = find_period_column(loaded)
+                ou_col = find_ou_column(loaded)
+                indicator_cols = _me_hub_indicator_columns(loaded)
+                periods = int(loaded[period_col].nunique(dropna=True)) if period_col else 0
+                ous = int(loaded[ou_col].nunique(dropna=True)) if ou_col else 0
+
+                st.markdown('<div class="common-sidebar-section">DATASET INTELLIGENCE</div>', unsafe_allow_html=True)
+                st.markdown(
+                    f'<div class="sidebar-metric-grid">'
+                    f'<div class="sidebar-metric"><span>Records</span><b>{len(loaded):,}</b></div>'
+                    f'<div class="sidebar-metric"><span>Indicators</span><b>{len(indicator_cols):,}</b></div>'
+                    f'<div class="sidebar-metric"><span>Org units</span><b>{ous:,}</b></div>'
+                    f'<div class="sidebar-metric"><span>Periods</span><b>{periods:,}</b></div>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
+            except Exception:
+                pass
+
+        # -----------------------------------------------------
+        # RECENT ACTIVITY
+        # -----------------------------------------------------
+        history = st.session_state.get("nexus_system_history", [])[-5:]
+        st.markdown('<div class="common-sidebar-section">RECENT ACTIVITY</div>', unsafe_allow_html=True)
+
+        if history:
+            rows = []
+            for item in reversed(history):
+                state = str(item.get("state", "online")).lower()
+                icon = {
+                    "running": "🔵",
+                    "success": "🟢",
+                    "warning": "🟠",
+                    "error": "🔴",
+                    "online": "🟢",
+                    "idle": "⚪",
+                }.get(state, "⚪")
+                rows.append(
+                    '<div class="nexus-history-row">'
+                    f'<span class="nexus-history-icon">{icon}</span>'
+                    '<div class="nexus-history-content">'
+                    f'<div class="nexus-history-message">{html.escape(str(item.get("message", "")))}</div>'
+                    f'<div class="nexus-history-time">{html.escape(str(item.get("time", "")))}</div>'
+                    '</div></div>'
+                )
+            st.markdown('<div class="nexus-history">' + "".join(rows) + '</div>', unsafe_allow_html=True)
+        else:
+            st.markdown('<div class="sidebar-empty-activity">No activity yet — NEXUS is ready.</div>', unsafe_allow_html=True)
+
+        # -----------------------------------------------------
+        # WORKSPACE STATUS
+        # -----------------------------------------------------
+        st.markdown('<div class="common-sidebar-section">WORKSPACE STATUS</div>', unsafe_allow_html=True)
+        current_workspace = st.session_state.get("danip_workspace_selector", "DANIP AI Data Analyst")
+        short_workspace = str(current_workspace).replace("🤖 ", "").replace("🧭 ", "")
+        st.markdown(
+            f'<div class="sidebar-workspace-card">'
+            f'<span class="status-dot blue"></span><div><b>{html.escape(short_workspace)}</b>'
+            f'<small>Current workspace</small></div></div>',
+            unsafe_allow_html=True,
+        )
 
 def render_existing_danip_ai_app():
     # ============================================================
@@ -12197,9 +12399,21 @@ def render_existing_danip_ai_app():
             and st.session_state.get("loaded_source_url") == source_url
             and isinstance(st.session_state.get("loaded_df"), pd.DataFrame)
         ):
+            _nexus_sidebar_status(
+                "Reusing the loaded dataset",
+                "running",
+                "DATASET CACHE",
+                "NEXUS found the current source in memory and is preparing it for analysis.",
+            )
             df = st.session_state["loaded_df"].copy()
             st.info("♻️ Using the already loaded dataset for automatic NEXUS AI analysis.")
         else:
+            _nexus_sidebar_status(
+                "Connecting to the data source",
+                "running",
+                "DHIS2 / API CONNECTION",
+                f"Reading the requested {source_type} source and retrieving the complete dataset.",
+            )
             with st.spinner("📥 Retrieving the complete dataset..."):
                 try:
                     request_url = refresh_data_url(source_url)
@@ -12212,6 +12426,12 @@ def render_existing_danip_ai_app():
                         st.code(str(retry_error))
                         st.stop()
 
+            _nexus_sidebar_status(
+                "Normalizing the retrieved dataset",
+                "running",
+                "DATA NORMALIZATION",
+                "Converting the source response into a consistent analytical table.",
+            )
             df = normalize_dataframe(raw_data)
 
             if df.empty:
@@ -12223,6 +12443,13 @@ def render_existing_danip_ai_app():
             st.session_state["loaded_df"] = df.copy()
             st.session_state["loaded_source_url"] = source_url
             st.session_state["data_loaded"] = True
+
+            _nexus_sidebar_status(
+                f"Dataset loaded successfully — {len(df):,} records",
+                "success",
+                "DATASET LOADED",
+                f"Complete dataset available: {len(df):,} rows × {len(df.columns):,} columns.",
+            )
 
         # ========================================================
         # DATA LOADED
@@ -12253,8 +12480,21 @@ def render_existing_danip_ai_app():
         # DATA QUALITY — CALCULATE ON THE COMPLETE DATASET
         # ========================================================
 
+        _nexus_sidebar_status(
+            "Running Data Quality Matrix",
+            "running",
+            "DATA QUALITY ASSESSMENT",
+            "Checking completeness, validity, plausibility, timeliness, integrity, consistency and other implemented controls.",
+        )
         with st.spinner("🛡️ Running the Data Quality Matrix across the complete dataset..."):
             top_quality_issues, top_quality_matrix, top_quality_summary = build_quality_matrix(df)
+
+        _nexus_sidebar_status(
+            "Data Quality assessment completed",
+            "success",
+            "DATA QUALITY COMPLETE",
+            f"Quality score: {top_quality_summary.get('score', 'N/A')}/100 · {len(top_quality_issues):,} findings.",
+        )
 
         # Share the deterministic DQ results with the separate M&E Management Hub.
         # This does not alter the existing DQ engine or its calculations.
@@ -12329,6 +12569,13 @@ def render_existing_danip_ai_app():
 
         # ========================================================
 
+        _nexus_sidebar_status(
+            "Preparing the requested analysis",
+            "running",
+            "USER ANALYSIS",
+            "Applying the confirmed indicators, dimension, graph type, analysis type and aggregation to the complete dataset.",
+        )
+
         # ========================================================
         # CONVERSATIONAL ANALYSIS CHATBOT
         # ========================================================
@@ -12343,6 +12590,13 @@ def render_existing_danip_ai_app():
             quality_summary=quality_summary,
         )
 
+        _nexus_sidebar_status(
+            "Analysis workspace is ready",
+            "success",
+            "ANALYSIS READY",
+            "The deterministic evidence, data-quality results and available AI interpretation are ready for review.",
+        )
+
         # ========================================================
         # MEAL INTELLIGENCE LAYER — ADDITIVE MODULE
         # ========================================================
@@ -12355,6 +12609,13 @@ def render_existing_danip_ai_app():
             quality_summary=quality_summary,
         )
 
+        _nexus_sidebar_status(
+            "NEXUS processing completed",
+            "success",
+            "SYSTEM READY",
+            "All current dataset, DQ, analysis, visualization and M&E intelligence modules are available.",
+        )
+
 
 
     st.markdown("</div>", unsafe_allow_html=True)
@@ -12363,6 +12624,489 @@ def render_existing_danip_ai_app():
 # ============================================================
 # COMMON SIDEBAR — SHARED BY BOTH WORKSPACES
 # ============================================================
+# Live monitor styling is isolated to the sidebar monitor.
+st.markdown(
+    """
+    <style>
+/* =========================================================
+   NEXUS RESPONSIVE SIDEBAR — VISUAL ONLY
+   Keeps the existing application logic unchanged.
+   ========================================================= */
+section[data-testid="stSidebar"] {
+    width: 330px !important;
+    min-width: 330px !important;
+    max-width: 360px !important;
+}
+section[data-testid="stSidebar"] > div:first-child {
+    width: 100% !important;
+    padding: 1rem .85rem 1.2rem .85rem !important;
+}
+
+[data-testid="stSidebar"] .block-container,
+[data-testid="stSidebar"] [data-testid="stVerticalBlock"] {
+    max-width: 100% !important;
+}
+
+[data-testid="stSidebar"] .stMarkdown,
+[data-testid="stSidebar"] .stCaption {
+    width: 100% !important;
+}
+
+.common-sidebar-brand {
+    display:flex !important;
+    align-items:center !important;
+    gap:11px !important;
+    padding:3px 2px 13px !important;
+    margin-bottom:12px !important;
+    border-bottom:1px solid rgba(255,255,255,.12) !important;
+}
+.common-sidebar-mark {
+    width:38px !important;
+    height:38px !important;
+    min-width:38px !important;
+    border-radius:10px !important;
+    background:#2563eb !important;
+    color:#fff !important;
+    display:flex !important;
+    align-items:center !important;
+    justify-content:center !important;
+    font-size:1.05rem !important;
+    font-weight:900 !important;
+}
+.common-sidebar-name {
+    color:#fff !important;
+    -webkit-text-fill-color:#fff !important;
+    font-size:.88rem !important;
+    line-height:1.15 !important;
+    font-weight:900 !important;
+}
+.common-sidebar-subtitle {
+    color:#b9c7d8 !important;
+    -webkit-text-fill-color:#b9c7d8 !important;
+    font-size:.69rem !important;
+    line-height:1.25 !important;
+    margin-top:3px !important;
+}
+
+.common-sidebar-section {
+    margin:15px 2px 7px !important;
+    color:#9fb0c4 !important;
+    -webkit-text-fill-color:#9fb0c4 !important;
+    font-size:.64rem !important;
+    line-height:1.2 !important;
+    font-weight:900 !important;
+    letter-spacing:.10em !important;
+    text-transform:uppercase !important;
+}
+
+.common-sidebar-card,
+.sidebar-nav-card,
+.sidebar-workspace-card,
+.sidebar-empty-activity {
+    width:100% !important;
+    box-sizing:border-box !important;
+    border-radius:10px !important;
+}
+.common-sidebar-card {
+    padding:10px 11px !important;
+    background:rgba(255,255,255,.065) !important;
+    border:1px solid rgba(255,255,255,.10) !important;
+    color:#e8eef6 !important;
+    -webkit-text-fill-color:#e8eef6 !important;
+}
+.common-sidebar-live {
+    background:rgba(34,197,94,.10) !important;
+    border-color:rgba(34,197,94,.28) !important;
+}
+.common-sidebar-waiting {
+    background:rgba(245,158,11,.08) !important;
+    border-color:rgba(245,158,11,.22) !important;
+}
+.sidebar-card-title {
+    font-size:.78rem !important;
+    font-weight:850 !important;
+    line-height:1.25 !important;
+    color:#fff !important;
+    -webkit-text-fill-color:#fff !important;
+    display:flex !important;
+    align-items:center !important;
+    gap:7px !important;
+}
+.sidebar-card-text {
+    margin-top:4px !important;
+    font-size:.70rem !important;
+    line-height:1.45 !important;
+    color:#c5d1df !important;
+    -webkit-text-fill-color:#c5d1df !important;
+}
+.status-dot {
+    width:8px !important;
+    height:8px !important;
+    min-width:8px !important;
+    display:inline-block !important;
+    border-radius:50% !important;
+}
+.status-dot.green { background:#22c55e !important; box-shadow:0 0 0 3px rgba(34,197,94,.13) !important; }
+.status-dot.orange { background:#f59e0b !important; box-shadow:0 0 0 3px rgba(245,158,11,.13) !important; }
+.status-dot.blue { background:#60a5fa !important; box-shadow:0 0 0 3px rgba(96,165,250,.13) !important; }
+
+/* Workspace navigation */
+.sidebar-nav-card {
+    padding:7px !important;
+    background:rgba(255,255,255,.045) !important;
+    border:1px solid rgba(255,255,255,.08) !important;
+}
+.sidebar-nav-item {
+    display:flex !important;
+    gap:9px !important;
+    align-items:flex-start !important;
+    padding:8px !important;
+    border-radius:8px !important;
+    background:rgba(255,255,255,.035) !important;
+}
+.sidebar-nav-item + .sidebar-nav-item { margin-top:5px !important; }
+.sidebar-nav-icon { font-size:.88rem !important; line-height:1.25 !important; }
+.sidebar-nav-item b {
+    display:block !important;
+    color:#f8fafc !important;
+    -webkit-text-fill-color:#f8fafc !important;
+    font-size:.72rem !important;
+    line-height:1.3 !important;
+}
+.sidebar-nav-item small {
+    display:block !important;
+    margin-top:3px !important;
+    color:#aebdce !important;
+    -webkit-text-fill-color:#aebdce !important;
+    font-size:.64rem !important;
+    line-height:1.35 !important;
+}
+
+/* Dataset metrics */
+.sidebar-metric-grid {
+    display:grid !important;
+    grid-template-columns:repeat(2,minmax(0,1fr)) !important;
+    gap:6px !important;
+}
+.sidebar-metric {
+    min-width:0 !important;
+    padding:8px 9px !important;
+    border-radius:8px !important;
+    background:rgba(255,255,255,.055) !important;
+    border:1px solid rgba(255,255,255,.08) !important;
+}
+.sidebar-metric span {
+    display:block !important;
+    color:#9fb0c4 !important;
+    -webkit-text-fill-color:#9fb0c4 !important;
+    font-size:.59rem !important;
+    line-height:1.2 !important;
+}
+.sidebar-metric b {
+    display:block !important;
+    margin-top:3px !important;
+    color:#f8fafc !important;
+    -webkit-text-fill-color:#f8fafc !important;
+    font-size:.82rem !important;
+    line-height:1.2 !important;
+}
+
+/* Recent activity */
+.nexus-history {
+    display:flex !important;
+    flex-direction:column !important;
+    gap:5px !important;
+}
+.nexus-history-row {
+    display:flex !important;
+    align-items:flex-start !important;
+    gap:7px !important;
+    width:100% !important;
+    box-sizing:border-box !important;
+    padding:7px 8px !important;
+    border:1px solid rgba(255,255,255,.09) !important;
+    border-radius:8px !important;
+    background:rgba(255,255,255,.045) !important;
+}
+.nexus-history-icon { font-size:.68rem !important; line-height:1.35 !important; }
+.nexus-history-content { min-width:0 !important; flex:1 !important; }
+.nexus-history-message {
+    color:#dce6f2 !important;
+    -webkit-text-fill-color:#dce6f2 !important;
+    font-size:.66rem !important;
+    line-height:1.35 !important;
+    font-weight:650 !important;
+    overflow-wrap:anywhere !important;
+}
+.nexus-history-time {
+    margin-top:2px !important;
+    color:#8294a9 !important;
+    -webkit-text-fill-color:#8294a9 !important;
+    font-size:.56rem !important;
+    line-height:1.2 !important;
+}
+.sidebar-empty-activity {
+    padding:9px 10px !important;
+    color:#aebdce !important;
+    -webkit-text-fill-color:#aebdce !important;
+    background:rgba(255,255,255,.04) !important;
+    border:1px dashed rgba(255,255,255,.12) !important;
+    font-size:.66rem !important;
+    line-height:1.35 !important;
+}
+.sidebar-workspace-card {
+    display:flex !important;
+    align-items:center !important;
+    gap:8px !important;
+    padding:9px 10px !important;
+    background:rgba(37,99,235,.10) !important;
+    border:1px solid rgba(96,165,250,.20) !important;
+}
+.sidebar-workspace-card b {
+    display:block !important;
+    color:#eef6ff !important;
+    -webkit-text-fill-color:#eef6ff !important;
+    font-size:.69rem !important;
+    line-height:1.25 !important;
+}
+.sidebar-workspace-card small {
+    display:block !important;
+    margin-top:2px !important;
+    color:#9fb0c4 !important;
+    -webkit-text-fill-color:#9fb0c4 !important;
+    font-size:.58rem !important;
+}
+
+/* Live monitor */
+.nexus-live-monitor {
+    width:100% !important;
+    box-sizing:border-box !important;
+    border:1px solid #dbe4ef !important;
+    border-left:4px solid var(--nexus-accent,#2563eb) !important;
+    border-radius:12px !important;
+    background:#fff !important;
+    padding:12px !important;
+    margin:0 0 12px 0 !important;
+    box-shadow:0 4px 14px rgba(15,23,42,.08) !important;
+}
+.nexus-live-head {
+    display:flex !important;
+    align-items:flex-start !important;
+    justify-content:space-between !important;
+    gap:8px !important;
+    margin-bottom:9px !important;
+}
+.nexus-live-kicker {
+    color:#64748b !important;
+    font-size:.58rem !important;
+    line-height:1.2 !important;
+    font-weight:900 !important;
+    letter-spacing:.09em !important;
+}
+.nexus-live-title {
+    margin-top:3px !important;
+    color:#172033 !important;
+    font-size:.92rem !important;
+    line-height:1.2 !important;
+    font-weight:900 !important;
+}
+.nexus-live-clock {
+    flex:0 0 auto !important;
+    color:#64748b !important;
+    font-size:.59rem !important;
+    line-height:1.2 !important;
+    font-variant-numeric:tabular-nums !important;
+}
+.nexus-live-current {
+    display:flex !important;
+    align-items:flex-start !important;
+    gap:9px !important;
+    padding:9px !important;
+    background:#f8fafc !important;
+    border:1px solid #e5eaf0 !important;
+    border-radius:9px !important;
+}
+.nexus-live-pulse {
+    width:9px !important;
+    height:9px !important;
+    min-width:9px !important;
+    margin-top:4px !important;
+    border-radius:50% !important;
+    background:var(--nexus-accent,#2563eb) !important;
+    box-shadow:0 0 0 4px rgba(37,99,235,.10) !important;
+}
+.nexus-live-activity {
+    color:#172033 !important;
+    font-size:.72rem !important;
+    line-height:1.4 !important;
+    font-weight:850 !important;
+    overflow-wrap:anywhere !important;
+}
+.nexus-live-detail {
+    margin-top:3px !important;
+    color:#64748b !important;
+    font-size:.61rem !important;
+    line-height:1.4 !important;
+    overflow-wrap:anywhere !important;
+}
+.nexus-live-stage {
+    margin:9px 1px 6px !important;
+    color:#64748b !important;
+    font-size:.56rem !important;
+    line-height:1.25 !important;
+    font-weight:900 !important;
+    letter-spacing:.06em !important;
+}
+.nexus-live-pipeline {
+    padding-top:3px !important;
+    border-top:1px solid #e5eaf0 !important;
+}
+.nexus-live-pipeline-row {
+    display:grid !important;
+    grid-template-columns:15px minmax(0,1fr) auto !important;
+    align-items:center !important;
+    gap:5px !important;
+    padding:4px 0 !important;
+    color:#334155 !important;
+    font-size:.64rem !important;
+    line-height:1.2 !important;
+}
+.nexus-live-pipeline-row b {
+    color:#64748b !important;
+    font-size:.52rem !important;
+    line-height:1.2 !important;
+    font-weight:850 !important;
+}
+.nexus-live-footer {
+    display:flex !important;
+    flex-wrap:wrap !important;
+    justify-content:space-between !important;
+    gap:5px !important;
+    margin-top:6px !important;
+    padding-top:7px !important;
+    border-top:1px solid #e5eaf0 !important;
+    color:#64748b !important;
+    font-size:.56rem !important;
+    line-height:1.25 !important;
+}
+
+/* Responsive sidebar sizes */
+@media (max-width: 1100px) {
+    section[data-testid="stSidebar"] { width:300px !important; min-width:300px !important; }
+    section[data-testid="stSidebar"] > div:first-child { padding-left:.75rem !important; padding-right:.75rem !important; }
+}
+@media (max-width: 760px) {
+    section[data-testid="stSidebar"] { width:285px !important; min-width:285px !important; }
+    .nexus-live-monitor { padding:10px !important; }
+    .nexus-live-title { font-size:.84rem !important; }
+    .sidebar-nav-item b { font-size:.69rem !important; }
+}
+@media (max-width: 480px) {
+    section[data-testid="stSidebar"] { width:275px !important; min-width:275px !important; }
+    section[data-testid="stSidebar"] > div:first-child { padding:.75rem .65rem 1rem .65rem !important; }
+    .common-sidebar-section { margin-top:12px !important; }
+}
+
+/* ============================================================
+   NEXUS LIVE SIDEBAR — HIGH CONTRAST TEXT
+   Typography-only override for the system monitor.
+   ============================================================ */
+.nexus-live-monitor,
+.nexus-live-monitor * {
+    opacity: 1 !important;
+}
+
+.nexus-live-kicker,
+.nexus-live-title,
+.nexus-live-clock,
+.nexus-live-activity,
+.nexus-live-detail,
+.nexus-live-stage,
+.nexus-live-pipeline-row,
+.nexus-live-pipeline-row span,
+.nexus-live-pipeline-row b,
+.nexus-live-footer,
+.nexus-live-footer span {
+    color: #000000 !important;
+    -webkit-text-fill-color: #000000 !important;
+    text-shadow: none !important;
+}
+
+.nexus-live-kicker {
+    font-weight: 900 !important;
+    font-size: .62rem !important;
+}
+
+.nexus-live-title {
+    font-weight: 900 !important;
+    font-size: .98rem !important;
+}
+
+.nexus-live-clock {
+    font-weight: 800 !important;
+    font-size: .60rem !important;
+}
+
+.nexus-live-activity {
+    font-weight: 900 !important;
+    font-size: .76rem !important;
+    line-height: 1.45 !important;
+}
+
+.nexus-live-detail {
+    color: #000000 !important;
+    -webkit-text-fill-color: #000000 !important;
+    font-weight: 700 !important;
+    font-size: .64rem !important;
+    line-height: 1.45 !important;
+}
+
+.nexus-live-stage {
+    color: #000000 !important;
+    -webkit-text-fill-color: #000000 !important;
+    font-weight: 900 !important;
+    font-size: .58rem !important;
+}
+
+.nexus-live-pipeline-row {
+    color: #000000 !important;
+    -webkit-text-fill-color: #000000 !important;
+    font-weight: 800 !important;
+    font-size: .68rem !important;
+}
+
+.nexus-live-pipeline-row b {
+    color: #000000 !important;
+    -webkit-text-fill-color: #000000 !important;
+    font-weight: 900 !important;
+    font-size: .56rem !important;
+}
+
+.nexus-live-footer {
+    color: #000000 !important;
+    -webkit-text-fill-color: #000000 !important;
+    font-weight: 800 !important;
+    font-size: .59rem !important;
+}
+
+.nexus-live-footer span {
+    color: #000000 !important;
+    -webkit-text-fill-color: #000000 !important;
+    font-weight: 800 !important;
+}
+
+@media (max-width: 480px) {
+    .nexus-live-title { font-size: .92rem !important; }
+    .nexus-live-activity { font-size: .72rem !important; }
+    .nexus-live-detail { font-size: .62rem !important; }
+    .nexus-live-pipeline-row { font-size: .66rem !important; }
+}
+
+</style>
+    """,
+    unsafe_allow_html=True,
+)
+
 render_common_sidebar()
 
 
