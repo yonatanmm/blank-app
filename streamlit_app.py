@@ -1180,33 +1180,7 @@ st.markdown(
         box-shadow: 0 6px 18px rgba(16,24,40,.09) !important;
     }
 
-    /* ---------- Chat ---------- */
-    .danip-analysis-chat {
-        border: 1px solid rgba(109,93,252,.35) !important;
-        border-radius: 20px !important;
-        background: linear-gradient(135deg, #0a1020 0%, #162746 58%, #263c68 100%) !important;
-        box-shadow: 0 14px 34px rgba(16,24,40,.12) !important;
-        padding: 1.15rem 1.2rem !important;
-    }
-    .danip-analysis-chat .chat-kicker {
-        color: #aeb7ff !important;
-        -webkit-text-fill-color: #aeb7ff !important;
-        letter-spacing: .12em !important;
-    }
-    .danip-analysis-chat .chat-title {
-        color: #fff !important;
-        -webkit-text-fill-color: #fff !important;
-        font-size: 1.28rem !important;
-    }
-    .danip-analysis-chat .chat-help {
-        color: #cbd5e1 !important;
-        -webkit-text-fill-color: #cbd5e1 !important;
-    }
-    [data-testid="stChatInput"] {
-        border: 1px solid rgba(49,94,251,.55) !important;
-        border-radius: 14px !important;
-        box-shadow: 0 8px 25px rgba(16,24,40,.09) !important;
-    }
+   
 
     /* ---------- Data tables ---------- */
     [data-testid="stDataFrame"] {
@@ -1222,11 +1196,739 @@ st.markdown(
         .app-title { font-size: 2rem !important; }
         .app-subtitle { font-size: .88rem !important; }
     }
+    
     </style>
     """,
     unsafe_allow_html=True,
 )
+# =========================================================
+# RESPONSIVE CHATBOT COMPOSER
+# ONLY CHATBOT — DO NOT CHANGE OTHER UI
+# =========================================================
 
+st.markdown(
+    """
+    <style>
+
+    /* =====================================================
+       CHAT INPUT OUTER POSITION
+       ===================================================== */
+
+    [data-testid="stChatInput"] {
+        width: min(100%, 950px) !important;
+        max-width: 950px !important;
+
+        margin-left: auto !important;
+        margin-right: auto !important;
+
+        box-sizing: border-box !important;
+
+        background: #ffffff !important;
+
+        border: 1px solid #cbd5e1 !important;
+
+        border-radius: 16px !important;
+
+        padding: 4px !important;
+
+        box-shadow:
+            0 4px 18px rgba(15, 23, 42, 0.10) !important;
+
+        transition:
+            border-color .2s ease,
+            box-shadow .2s ease !important;
+    }
+
+
+    /* =====================================================
+       FOCUS
+       ===================================================== */
+
+    [data-testid="stChatInput"]:focus-within {
+        border-color: #2563eb !important;
+
+        box-shadow:
+            0 0 0 3px rgba(37, 99, 235, .10),
+            0 6px 20px rgba(15, 23, 42, .12) !important;
+    }
+
+
+    /* =====================================================
+       INTERNAL FORM
+       ===================================================== */
+
+    [data-testid="stChatInput"] form {
+        width: 100% !important;
+        max-width: 100% !important;
+
+        display: flex !important;
+        align-items: center !important;
+
+        box-sizing: border-box !important;
+    }
+
+
+    /* =====================================================
+       TEXT AREA
+       ===================================================== */
+
+    [data-testid="stChatInput"] textarea {
+        width: 100% !important;
+
+        min-height: 44px !important;
+        max-height: 130px !important;
+
+        box-sizing: border-box !important;
+
+        border: none !important;
+        outline: none !important;
+
+        resize: none !important;
+
+        background: transparent !important;
+
+        color: #111827 !important;
+        -webkit-text-fill-color: #111827 !important;
+
+        font-size: 14px !important;
+        line-height: 1.5 !important;
+
+        padding:
+            10px 48px 10px 14px !important;
+    }
+
+
+    /* =====================================================
+       PLACEHOLDER
+       ===================================================== */
+
+    [data-testid="stChatInput"] textarea::placeholder {
+        color: #64748b !important;
+        -webkit-text-fill-color: #64748b !important;
+
+        opacity: 1 !important;
+    }
+
+
+    /* =====================================================
+       SEND BUTTON
+       ===================================================== */
+
+    [data-testid="stChatInput"] button {
+        width: 38px !important;
+        height: 38px !important;
+
+        min-width: 38px !important;
+        min-height: 38px !important;
+
+        max-width: 38px !important;
+        max-height: 38px !important;
+
+        flex-shrink: 0 !important;
+
+        border-radius: 10px !important;
+
+        background: #2563eb !important;
+
+        border: none !important;
+
+        color: #ffffff !important;
+
+        margin-right: 2px !important;
+
+        transition:
+            background .15s ease,
+            transform .15s ease,
+            box-shadow .15s ease !important;
+    }
+
+
+    [data-testid="stChatInput"] button:hover {
+        background: #1d4ed8 !important;
+
+        transform: translateY(-1px) !important;
+
+        box-shadow:
+            0 4px 12px rgba(37, 99, 235, .25) !important;
+    }
+
+
+    [data-testid="stChatInput"] button:focus {
+        outline: none !important;
+    }
+
+
+    [data-testid="stChatInput"] button svg {
+        color: #ffffff !important;
+
+        fill: currentColor !important;
+    }
+
+
+    /* =====================================================
+       CHAT MESSAGES
+       ===================================================== */
+
+    [data-testid="stChatMessage"] {
+        width: min(100%, 950px) !important;
+        max-width: 950px !important;
+
+        margin-left: auto !important;
+        margin-right: auto !important;
+
+        box-sizing: border-box !important;
+    }
+
+
+    /* =====================================================
+       CHAT RESPONSE
+       ===================================================== */
+
+    .danip-chat-answer {
+        width: 100% !important;
+        max-width: 100% !important;
+
+        box-sizing: border-box !important;
+
+        overflow-wrap: anywhere !important;
+    }
+
+
+    /* =====================================================
+       TABLET
+       ===================================================== */
+
+    @media (max-width: 1000px) {
+
+        [data-testid="stChatInput"] {
+            width: calc(100% - 30px) !important;
+            max-width: none !important;
+        }
+
+        [data-testid="stChatMessage"] {
+            width: calc(100% - 30px) !important;
+            max-width: none !important;
+        }
+    }
+
+
+    /* =====================================================
+       MOBILE
+       ===================================================== */
+
+    @media (max-width: 640px) {
+
+        [data-testid="stChatInput"] {
+            width: calc(100% - 16px) !important;
+
+            margin-left: auto !important;
+            margin-right: auto !important;
+
+            border-radius: 13px !important;
+
+            padding: 3px !important;
+        }
+
+
+        [data-testid="stChatInput"] textarea {
+            min-height: 40px !important;
+
+            max-height: 115px !important;
+
+            font-size: 13px !important;
+
+            padding:
+                8px 44px 8px 11px !important;
+        }
+
+
+        [data-testid="stChatInput"] button {
+            width: 34px !important;
+            height: 34px !important;
+
+            min-width: 34px !important;
+            min-height: 34px !important;
+
+            max-width: 34px !important;
+            max-height: 34px !important;
+
+            border-radius: 9px !important;
+        }
+
+
+        [data-testid="stChatMessage"] {
+            width: calc(100% - 16px) !important;
+
+            max-width: none !important;
+        }
+    }
+
+
+    /* =====================================================
+       SMALL PHONE
+       ===================================================== */
+
+    @media (max-width: 400px) {
+
+        [data-testid="stChatInput"] {
+            width: calc(100% - 10px) !important;
+
+            border-radius: 11px !important;
+        }
+
+
+        [data-testid="stChatInput"] textarea {
+            font-size: 12px !important;
+
+            padding:
+                7px 40px 7px 9px !important;
+        }
+
+
+        [data-testid="stChatInput"] button {
+            width: 31px !important;
+            height: 31px !important;
+
+            min-width: 31px !important;
+            min-height: 31px !important;
+
+            max-width: 31px !important;
+            max-height: 31px !important;
+        }
+    }
+
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+# =========================================================
+# GLOBAL TEXT HOVER COLOR
+# Hover text color: #9d2130
+#
+# UI ONLY
+# Does not change:
+# - Data
+# - AI
+# - DHIS2
+# - API
+# - Charts
+# - Calculations
+# =========================================================
+
+st.markdown(
+    """
+    <style>
+
+    /* =====================================================
+       GLOBAL TEXT HOVER COLOR
+       ===================================================== */
+
+    /* Headings */
+    h1:hover,
+    h2:hover,
+    h3:hover,
+    h4:hover,
+    h5:hover,
+    h6:hover {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* Paragraph text */
+    p:hover {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* Strong / bold text */
+    strong:hover,
+    b:hover {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* Italic text */
+    em:hover,
+    i:hover {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* Labels */
+    label:hover {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* Markdown text */
+    [data-testid="stMarkdownContainer"] p:hover,
+    [data-testid="stMarkdownContainer"] span:hover,
+    [data-testid="stMarkdownContainer"] strong:hover,
+    [data-testid="stMarkdownContainer"] em:hover {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* =====================================================
+       LINKS
+       ===================================================== */
+
+    a:hover {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    [data-testid="stMarkdownContainer"] a:hover {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+
+        text-decoration-color: #9d2130 !important;
+    }
+
+
+    /* =====================================================
+       SIDEBAR TEXT
+       ===================================================== */
+
+    [data-testid="stSidebar"] p:hover,
+    [data-testid="stSidebar"] span:hover,
+    [data-testid="stSidebar"] label:hover,
+    [data-testid="stSidebar"] strong:hover,
+    [data-testid="stSidebar"] b:hover {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* Sidebar markdown */
+    [data-testid="stSidebar"]
+    [data-testid="stMarkdownContainer"]
+    p:hover {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* =====================================================
+       TABS
+       ===================================================== */
+
+    [data-baseweb="tab"]:hover {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    [data-baseweb="tab"] p:hover,
+    [data-baseweb="tab"] span:hover {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* =====================================================
+       EXPANDERS
+       ===================================================== */
+
+    [data-testid="stExpander"] summary:hover,
+    [data-testid="stExpander"] summary:hover span,
+    [data-testid="stExpander"] summary:hover p {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* =====================================================
+       SELECTBOX / MULTISELECT
+       ===================================================== */
+
+    [data-testid="stSelectbox"] label:hover,
+    [data-testid="stMultiSelect"] label:hover {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    [data-testid="stSelectbox"] [data-baseweb="select"]:hover,
+    [data-testid="stMultiSelect"] [data-baseweb="select"]:hover {
+        color: #9d2130 !important;
+    }
+
+
+    /* Dropdown options */
+    [role="option"]:hover,
+    [role="option"]:hover span,
+    [role="option"]:hover div {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* =====================================================
+       RADIO BUTTONS
+       ===================================================== */
+
+    [data-testid="stRadio"] label:hover,
+    [data-testid="stRadio"] label:hover span,
+    [data-testid="stRadio"] label:hover p {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* =====================================================
+       CHECKBOXES
+       ===================================================== */
+
+    [data-testid="stCheckbox"] label:hover,
+    [data-testid="stCheckbox"] label:hover span,
+    [data-testid="stCheckbox"] label:hover p {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* =====================================================
+       SLIDER LABELS
+       ===================================================== */
+
+    [data-testid="stSlider"] label:hover,
+    [data-testid="stSlider"] span:hover {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* =====================================================
+       METRIC TEXT
+       ===================================================== */
+
+    [data-testid="stMetricLabel"]:hover,
+    [data-testid="stMetricValue"]:hover,
+    [data-testid="stMetricDelta"]:hover {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    [data-testid="stMetric"] label:hover,
+    [data-testid="stMetric"] div:hover {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* =====================================================
+       BUTTON TEXT
+       ===================================================== */
+
+    .stButton > button:hover,
+    .stDownloadButton > button:hover {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    .stButton > button:hover *,
+    .stDownloadButton > button:hover * {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* =====================================================
+       CAPTION / SMALL TEXT
+       ===================================================== */
+
+    [data-testid="stCaptionContainer"]:hover,
+    [data-testid="stCaptionContainer"] p:hover,
+    .stCaption:hover {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* =====================================================
+       ALERT TEXT
+       ===================================================== */
+
+    [data-testid="stAlert"] p:hover,
+    [data-testid="stAlert"] span:hover,
+    [data-testid="stAlert"] strong:hover {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* =====================================================
+       CHAT TEXT
+       Included so chatbot follows same global hover color
+       ===================================================== */
+
+    .danip-chat-answer p:hover,
+    .danip-chat-answer span:hover,
+    .danip-chat-answer strong:hover,
+    .danip-chat-answer a:hover {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* =====================================================
+       CUSTOM DASHBOARD TEXT CLASSES
+       ===================================================== */
+
+    .app-title:hover,
+    .app-subtitle:hover,
+    .section-kicker:hover,
+    .section-title:hover,
+    .section-help:hover,
+    .comparison-note:hover,
+    .empty-state:hover,
+    .viz-notes:hover {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* Children inside custom text elements */
+    .app-title:hover *,
+    .app-subtitle:hover *,
+    .section-kicker:hover *,
+    .section-title:hover *,
+    .section-help:hover *,
+    .comparison-note:hover *,
+    .empty-state:hover *,
+    .viz-notes:hover * {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* =====================================================
+       DQ DASHBOARD
+       ===================================================== */
+
+    .dq-audit-title:hover,
+    .dq-audit-subtitle:hover,
+    .dq-domain:hover,
+    .dq-metric:hover,
+    .dq-result:hover,
+    .dq-action:hover {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    .dq-table td:hover,
+    .dq-table td:hover * {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* =====================================================
+       M&E PROGRAMME MANAGER
+       ===================================================== */
+
+    .me-programme-kicker:hover,
+    .me-programme-title:hover,
+    .me-programme-meta:hover,
+    .me-programme-result:hover {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    .me-programme-result:hover * {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* =====================================================
+       REQUESTED VISUALIZATION
+       ===================================================== */
+
+    .requested-viz-card:hover,
+    .requested-viz-card:hover * {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* =====================================================
+       DATA TABLE TEXT
+       ===================================================== */
+
+    .viz-data-table td:hover,
+    .viz-data-table td:hover *,
+    .viz-data-table th:hover,
+    .viz-data-table th:hover * {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* =====================================================
+       STATUS PILLS
+       ===================================================== */
+
+    .status-pill:hover,
+    .status-pill:hover * {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* =====================================================
+       GENERAL MARKDOWN LINKS / TEXT
+       ===================================================== */
+
+    [data-testid="stMarkdownContainer"] li:hover,
+    [data-testid="stMarkdownContainer"] li:hover *,
+    [data-testid="stMarkdownContainer"] blockquote:hover,
+    [data-testid="stMarkdownContainer"] blockquote:hover * {
+        color: #9d2130 !important;
+        -webkit-text-fill-color: #9d2130 !important;
+    }
+
+
+    /* =====================================================
+       DO NOT CHANGE INPUT TEXT WHILE TYPING
+       ===================================================== */
+
+    textarea:hover,
+    input:hover,
+    textarea:focus,
+    input:focus {
+        color: #111827 !important;
+        -webkit-text-fill-color: #111827 !important;
+    }
+
+
+    /* =====================================================
+       DO NOT CHANGE CHAT INPUT WHILE TYPING
+       ===================================================== */
+
+    [data-testid="stChatInput"] textarea:hover,
+    [data-testid="stChatInput"] textarea:focus {
+        color: #111827 !important;
+        -webkit-text-fill-color: #111827 !important;
+    }
+
+
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 # ============================================================
 # HEADER
 # ============================================================
