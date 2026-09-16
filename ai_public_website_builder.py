@@ -214,8 +214,11 @@ def _detect_columns(df: pd.DataFrame):
 
     organisation_priority = [
         "organisation", "organization",
-        "organisationunit", "organisation_unit",
-        "orgunit", "org_unit", "facility",
+        "organisation_name", "organization_name",
+        "organisationunitname", "organisation_unit_name",
+        "organizationunitname", "organization_unit_name",
+        "orgunitname", "org_unit_name", "ou_name", "ouname",
+        "facility",
         "region", "district", "province",
         "state", "location",
     ]
@@ -475,162 +478,142 @@ def _indicator_series(df, indicator):
     )
 
 
-def _trend_analysis(df, profile, indicator):
+def _trend_analysis(df, profile, indicator, organisation=None):
+    """
+    STANDARD DANIP ANALYTICAL MODEL
+
+    X dimensions = Period Name + Organisation Name
+    Y dimension    = selected Indicator
+
+    Organisation is always retained in the analytical grain.
+    """
     period_col = profile.get("period_column")
+    org_col = profile.get("organisation_column")
 
-    if not period_col or indicator not in df.columns:
-        return {
-            "available": False,
-            "reason": "No usable period dimension was detected.",
-        }
+    if not period_col:
+        return {"available": False, "reason": "Period Name is required for analysis."}
+    if not org_col:
+        return {"available": False, "reason": "Organisation Name is required for analysis."}
+    if indicator not in df.columns:
+        return {"available": False, "reason": f"Indicator '{indicator}' was not found."}
 
-    temp = df[
-        [period_col, indicator]
-    ].copy()
+    temp = df[[period_col, org_col, indicator]].copy()
+    temp[indicator] = pd.to_numeric(temp[indicator], errors="coerce")
+    temp = temp.dropna(subset=[period_col, org_col, indicator])
 
-    temp[indicator] = pd.to_numeric(
-        temp[indicator],
-        errors="coerce",
-    )
-
-    temp = temp.dropna(
-        subset=[period_col, indicator]
-    )
+    if organisation is not None:
+        temp = temp[temp[org_col].astype(str) == str(organisation)]
 
     if temp.empty:
         return {
             "available": False,
-            "reason": "No valid period observations were found.",
+            "reason": "No valid Period × Organisation × Indicator observations were found.",
         }
 
     grouped = (
-        temp.groupby(
-            period_col,
-            dropna=False,
-        )[indicator]
-        .agg(
-            value="sum",
-            observations="count",
-        )
+        temp.groupby([period_col, org_col], dropna=False)[indicator]
+        .agg(value="sum", observations="count")
         .reset_index()
     )
 
-    grouped["_sort"] = grouped[
-        period_col
-    ].astype(str).map(
-        _period_sort_key
-    )
-
+    grouped["_period_sort"] = grouped[period_col].astype(str).map(_period_sort_key)
     grouped = grouped.sort_values(
-        "_sort"
-    ).drop(
-        columns=["_sort"]
-    )
+        ["_period_sort", org_col], kind="stable"
+    ).drop(columns="_period_sort")
 
-    if len(grouped) < 2:
-        return {
-            "available": False,
-            "reason": "At least two reporting periods are needed.",
-            "data": grouped,
-        }
+    organisations = grouped[org_col].astype(str).drop_duplicates().tolist()
+    periods = _sorted_period_values(grouped[period_col])
 
-    first = float(
-        grouped.iloc[0]["value"]
-    )
-    last = float(
-        grouped.iloc[-1]["value"]
-    )
-
-    absolute_change = last - first
-
-    if first != 0:
-        pct_change = (
-            absolute_change / abs(first) * 100
+    summary = None
+    if organisation is not None:
+        selected = grouped[grouped[org_col].astype(str) == str(organisation)].copy()
+        selected = selected.sort_values(
+            period_col,
+            key=lambda s: s.astype(str).map(_period_sort_key)
         )
-    else:
-        pct_change = None
 
-    direction = (
-        "increased"
-        if absolute_change > 0
-        else "decreased"
-        if absolute_change < 0
-        else "remained stable"
-    )
+        if len(selected) >= 2:
+            first = float(selected.iloc[0]["value"])
+            last = float(selected.iloc[-1]["value"])
+            change = last - first
+            pct_change = change / abs(first) * 100 if first != 0 else None
+            direction = (
+                "increased" if change > 0
+                else "decreased" if change < 0
+                else "remained stable"
+            )
+            diffs = selected["value"].diff().dropna()
 
-    diffs = grouped["value"].diff().dropna()
-
-    volatility = (
-        float(diffs.std())
-        if len(diffs) > 1
-        else 0.0
-    )
-
-    mean_value = float(
-        grouped["value"].mean()
-    )
+            summary = {
+                "organisation": str(organisation),
+                "first_period": str(selected.iloc[0][period_col]),
+                "last_period": str(selected.iloc[-1][period_col]),
+                "first_value": first,
+                "last_value": last,
+                "absolute_change": change,
+                "percent_change": pct_change,
+                "direction": direction,
+                "volatility": float(diffs.std()) if len(diffs) > 1 else 0.0,
+                "mean": float(selected["value"].mean()),
+                "period_count": len(selected),
+            }
 
     return {
         "available": True,
         "indicator": indicator,
         "period_column": str(period_col),
+        "organisation_column": str(org_col),
+        "organisation": organisation,
         "data": grouped,
-        "first_period": str(
-            grouped.iloc[0][period_col]
-        ),
-        "last_period": str(
-            grouped.iloc[-1][period_col]
-        ),
-        "first_value": first,
-        "last_value": last,
-        "absolute_change": absolute_change,
-        "percent_change": pct_change,
-        "direction": direction,
-        "volatility": volatility,
-        "mean": mean_value,
-        "period_count": len(grouped),
+        "periods": periods,
+        "organisations": organisations,
+        "summary": summary,
+        "first_period": summary["first_period"] if summary else None,
+        "last_period": summary["last_period"] if summary else None,
+        "first_value": summary["first_value"] if summary else None,
+        "last_value": summary["last_value"] if summary else None,
+        "absolute_change": summary["absolute_change"] if summary else None,
+        "percent_change": summary["percent_change"] if summary else None,
+        "direction": summary["direction"] if summary else "available",
+        "volatility": summary["volatility"] if summary else 0.0,
+        "mean": summary["mean"] if summary else float(grouped["value"].mean()),
+        "period_count": summary["period_count"] if summary else len(periods),
     }
 
 
-def _geographic_analysis(df, profile, indicator, dimension):
-    if not dimension or indicator not in df.columns:
+def _geographic_analysis(df, profile, indicator, dimension=None, organisation=None):
+    """
+    Compatibility helper. The primary model is NOT a geographic total.
+
+    X = Period Name + Organisation Name
+    Y = Indicator.
+    """
+    period_col = profile.get("period_column")
+    org_col = profile.get("organisation_column")
+
+    if not period_col or not org_col or indicator not in df.columns:
         return pd.DataFrame()
 
-    temp = df[
-        [dimension, indicator]
-    ].copy()
+    temp = df[[period_col, org_col, indicator]].copy()
+    temp[indicator] = pd.to_numeric(temp[indicator], errors="coerce")
+    temp = temp.dropna(subset=[period_col, org_col, indicator])
 
-    temp[indicator] = pd.to_numeric(
-        temp[indicator],
-        errors="coerce",
-    )
-
-    temp = temp.dropna(
-        subset=[dimension, indicator]
-    )
+    if organisation is not None:
+        temp = temp[temp[org_col].astype(str) == str(organisation)]
 
     if temp.empty:
         return pd.DataFrame()
 
     result = (
-        temp.groupby(
-            dimension,
-            dropna=False,
-        )[indicator]
-        .agg(
-            value="sum",
-            observations="count",
-            average="mean",
-        )
+        temp.groupby([period_col, org_col], dropna=False)[indicator]
+        .agg(value="sum", observations="count")
         .reset_index()
     )
 
-    result = result.sort_values(
-        "value",
-        ascending=False,
-    )
-
-    return result
+    result["_period_sort"] = result[period_col].astype(str).map(_period_sort_key)
+    return result.sort_values(
+        ["_period_sort", org_col], kind="stable"
+    ).drop(columns="_period_sort")
 
 
 def _data_quality_analysis(df, profile):
@@ -699,166 +682,97 @@ def _data_quality_analysis(df, profile):
     }
 
 
-def _build_learning_insights(
-    df,
-    profile,
-    indicator,
-    trend,
-    geographic,
-    quality,
-):
+def _build_learning_insights(df, profile, indicator, trend, geographic, quality):
     """
-    Evidence-first learning engine.
-
-    It produces observations and learning questions from the
-    supplied dataset. It deliberately avoids unsupported causal
-    explanations.
+    Learning engine based only on:
+        X = Period Name + Organisation Name
+        Y = Indicator
     """
+    observations=[]
+    learning=[]
+    quality_signals=[]
 
-    observations = []
-    learning = []
-    quality_signals = []
+    period_col=profile.get("period_column")
+    org_col=profile.get("organisation_column")
+
+    if not period_col:
+        quality_signals.append("Period Name is missing.")
+    if not org_col:
+        quality_signals.append("Organisation Name is missing.")
 
     if trend.get("available"):
-
-        direction = trend["direction"]
-
-        if trend.get("percent_change") is not None:
-            change_text = _pct(
-                abs(trend["percent_change"])
+        summary=trend.get("summary")
+        if summary:
+            pct=summary.get("percent_change")
+            observations.append(
+                f"For organisation '{summary['organisation']}', {indicator} "
+                f"{summary['direction']} from {_fmt(summary['first_value'])} "
+                f"in {summary['first_period']} to {_fmt(summary['last_value'])} "
+                f"in {summary['last_period']}. Absolute change: "
+                f"{_fmt(summary['absolute_change'])}; relative change: "
+                f"{_pct(pct) if pct is not None else 'N/A'}."
+            )
+            learning.append(
+                "Review the Period × Organisation records around the largest "
+                "changes to determine whether movement is consistent with "
+                "reporting coverage, programme activity, seasonality or revision."
             )
         else:
-            change_text = "an undefined percentage change because the starting value is zero"
-
-        observations.append(
-            (
-                f"{indicator} {direction} from "
-                f"{_fmt(trend['first_value'])} in "
-                f"{trend['first_period']} to "
-                f"{_fmt(trend['last_value'])} in "
-                f"{trend['last_period']}. "
-                f"The absolute change was "
-                f"{_fmt(trend['absolute_change'])}; "
-                f"the relative change was {change_text}."
+            observations.append(
+                f"{indicator} contains {len(trend.get('periods', []))} periods "
+                f"across {len(trend.get('organisations', []))} organisations. "
+                "Both X dimensions are retained."
             )
-        )
-
-        if trend["period_count"] >= 3:
             learning.append(
-                (
-                    "Review the reporting periods around the largest "
-                    "month-to-month or period-to-period changes to "
-                    "determine whether they reflect programme change, "
-                    "reporting completeness, seasonality or data revision."
-                )
-            )
-
-        if trend["volatility"] > 0:
-            learning.append(
-                (
-                    "Compare the observed variation with reporting "
-                    "coverage and contextual programme events before "
-                    "interpreting the movement as a substantive change."
-                )
+                "Compare organisations at the same Period Name while keeping "
+                "Organisation Name as a separate analytical series."
             )
 
     if not geographic.empty:
-
-        top = geographic.iloc[0]
-        bottom = geographic.iloc[-1]
-
         observations.append(
-            (
-                f"Across the detected geographic dimension, "
-                f"{top.iloc[0]} has the largest reported total "
-                f"({_fmt(top['value'])}), while "
-                f"{bottom.iloc[0]} has the smallest "
-                f"({_fmt(bottom['value'])}) among the displayed groups."
-            )
+            f"The analytical table contains {len(geographic):,} "
+            f"Period × Organisation observations for {indicator}."
         )
-
         learning.append(
-            (
-                "Compare geographic differences with population size, "
-                "programme reach, reporting completeness and denominator "
-                "definitions before treating them as performance differences."
-            )
+            "Compare organisations at equivalent reporting periods and review "
+            "reporting completeness and denominator definitions before interpreting differences."
         )
 
     if quality["missing_rate"] > 0:
-        quality_signals.append(
-            (
-                f"{_pct(quality['missing_rate'])} of all available cells "
-                "are missing."
-            )
-        )
-
+        quality_signals.append(f"{_pct(quality['missing_rate'])} of cells are missing.")
         learning.append(
-            (
-                "Investigate whether missing values represent "
-                "non-reporting, not-applicable observations, system "
-                "gaps or genuine zero activity."
-            )
+            "Determine whether missing values represent non-reporting, "
+            "not-applicable observations, system gaps or genuine zero activity."
         )
 
     if quality["duplicate_rows"] > 0:
-        quality_signals.append(
-            (
-                f"{quality['duplicate_rows']:,} duplicate rows were detected."
-            )
-        )
-
+        quality_signals.append(f"{quality['duplicate_rows']:,} duplicate rows detected.")
         learning.append(
-            (
-                "Check the dataset grain and key fields to determine "
-                "whether duplicate rows are valid repeated observations "
-                "or accidental duplication."
-            )
+            "Check the Period Name + Organisation Name + Indicator grain "
+            "to determine whether duplicate records are valid or accidental."
         )
 
     if quality["zero_indicators"]:
         quality_signals.append(
-            (
-                "High zero rates were detected for: "
-                + ", ".join(
-                    quality["zero_indicators"][:6]
-                )
-            )
+            "High zero rates: " + ", ".join(quality["zero_indicators"][:6])
         )
-
         learning.append(
-            (
-                "Distinguish true zero values from missing or "
-                "not-reported values before calculating averages or rates."
-            )
+            "Distinguish true zero values from missing/not-reported values before averages or rates."
         )
 
     if quality["negative_indicators"]:
         quality_signals.append(
-            (
-                "Negative values were detected for: "
-                + ", ".join(
-                    quality["negative_indicators"][:6]
-                )
-            )
-        )
-
-        learning.append(
-            (
-                "Validate whether negative values are meaningful "
-                "for the affected indicators or represent adjustments "
-                "and data-entry issues."
-            )
+            "Negative values: " + ", ".join(quality["negative_indicators"][:6])
         )
 
     if not observations:
         observations.append(
-            "The current dataset does not contain enough detected dimensions for a reliable automatic trend interpretation."
+            "The dataset does not contain the required Period Name and Organisation Name dimensions."
         )
-
     if not learning:
         learning.append(
-            "Add a reporting-period or geographic dimension to enable deeper automated learning from the dataset."
+            "Map Period Name and Organisation Name to enable the standard "
+            "Period × Organisation × Indicator analytical model."
         )
 
     return {
@@ -2642,329 +2556,190 @@ def _website_quality_checks(df):
 # STREAMLIT ANALYSIS DASHBOARD
 # ============================================================
 
-def _render_analysis_dashboard(
-    df,
-    profile,
-    selected_indicator,
-):
+def _render_analysis_dashboard(df, profile, selected_indicator, selected_organisation=None):
+    """
+    STANDARD DANIP ANALYSIS
+
+    X = Period Name + Organisation Name
+    Y = selected indicator
+
+    No country-only or overall total is used as the primary analytical model.
+    """
     safe_df = _public_safe_dataframe(df)
+    period_col = profile.get("period_column")
+    org_col = profile.get("organisation_column")
 
     trend = _trend_analysis(
-        safe_df,
-        profile,
-        selected_indicator,
+        safe_df, profile, selected_indicator,
+        organisation=selected_organisation
     )
 
-    dimension = (
-        profile["country_column"]
-        or profile["organisation_column"]
+    analytical_table = _geographic_analysis(
+        safe_df, profile, selected_indicator,
+        organisation=selected_organisation
     )
 
-    geographic = _geographic_analysis(
-        safe_df,
-        profile,
-        selected_indicator,
-        dimension,
-    )
-
-    quality = _data_quality_analysis(
-        safe_df,
-        profile,
-    )
-
+    quality = _data_quality_analysis(safe_df, profile)
     learning = _build_learning_insights(
-        safe_df,
-        profile,
-        selected_indicator,
-        trend,
-        geographic,
-        quality,
+        safe_df, profile, selected_indicator,
+        trend, analytical_table, quality
     )
-
-    # --------------------------------------------------------
-    # KPIs
-    # --------------------------------------------------------
 
     st.markdown("### 📊 Analytical Overview")
 
-    k1, k2, k3, k4, k5 = st.columns(5)
+    k1,k2,k3,k4,k5=st.columns(5)
 
-    indicator_profile = next(
-        (
-            x
-            for x in profile["indicators"]
-            if x["name"] == selected_indicator
-        ),
-        None,
+    item=next(
+        (x for x in profile["indicators"] if x["name"]==selected_indicator),
+        None
     )
 
     with k1:
-        st.metric(
-            "Records",
-            f"{profile['rows']:,}",
-        )
-
+        st.metric("Records", f"{profile['rows']:,}")
     with k2:
-        st.metric(
-            "Average",
-            _fmt(
-                indicator_profile["average"]
-                if indicator_profile
-                else 0
-            ),
-        )
-
+        st.metric("Average", _fmt(item["average"] if item else 0))
     with k3:
-        st.metric(
-            "Total",
-            _fmt(
-                indicator_profile["total"]
-                if indicator_profile
-                else 0
-            ),
-        )
-
+        st.metric("Total", _fmt(item["total"] if item else 0))
     with k4:
-        if trend.get("available"):
-            change = trend.get(
-                "percent_change"
-            )
-
-            st.metric(
-                "First → Last",
-                (
-                    _pct(change)
-                    if change is not None
-                    else "N/A"
-                ),
-            )
-        else:
-            st.metric(
-                "First → Last",
-                "N/A",
-            )
-
-    with k5:
+        summary=trend.get("summary")
         st.metric(
-            "Completeness",
-            _pct(
-                quality["completeness"]
-            ),
+            "First → Last",
+            _pct(summary["percent_change"])
+            if summary and summary["percent_change"] is not None
+            else ("N/A" if summary else "Select organisation")
         )
+    with k5:
+        st.metric("Completeness", _pct(quality["completeness"]))
 
-    # --------------------------------------------------------
-    # TABS
-    # --------------------------------------------------------
+    if not period_col or not org_col:
+        st.error(
+            "Analysis requires BOTH Period Name and Organisation Name. "
+            "Country-only or overall analysis is disabled."
+        )
+        return {"trend":trend,"analytical_table":analytical_table,
+                "quality":quality,"learning":learning}
 
-    tab1, tab2, tab3, tab4 = st.tabs(
-        [
-            "📈 Trends",
-            "🌍 Geographic Analysis",
-            "🧠 Learning",
-            "🛡️ Data Quality",
-        ]
+    st.caption(
+        f"Analytical model: X = **{period_col} + {org_col}** | "
+        f"Y = **{selected_indicator}**"
     )
 
+    tab1,tab2,tab3,tab4=st.tabs([
+        "📈 Period × Organisation",
+        "📋 Analytical Data",
+        "🧠 Learning",
+        "🛡️ Data Quality"
+    ])
+
     with tab1:
-
         if trend.get("available"):
+            chart=trend["data"].copy()
+            chart[period_col]=chart[period_col].astype(str)
+            chart[org_col]=chart[org_col].astype(str)
 
-            chart_df = trend["data"][
-                [
-                    profile["period_column"],
-                    "value",
-                ]
-            ].copy()
+            pivot=chart.pivot_table(
+                index=period_col,
+                columns=org_col,
+                values="value",
+                aggfunc="sum"
+            )
+            ordered=_sorted_period_values(pivot.index.to_series())
+            pivot=pivot.reindex(ordered)
 
-            chart_df.columns = [
-                "Period",
-                selected_indicator,
-            ]
+            st.line_chart(pivot, use_container_width=True)
 
-            st.line_chart(
-                chart_df.set_index(
-                    "Period"
-                ),
-                use_container_width=True,
+            st.caption(
+                f"X-axis: {period_col} (Period Name) · "
+                f"Series: {org_col} (Organisation Name) · "
+                f"Y-axis: {selected_indicator}"
             )
 
-            tc1, tc2, tc3 = st.columns(3)
-
-            with tc1:
-                st.metric(
-                    "Direction",
-                    trend["direction"].title(),
-                )
-
-            with tc2:
-                st.metric(
-                    "Absolute change",
-                    _fmt(
-                        trend["absolute_change"]
-                    ),
-                )
-
-            with tc3:
-                st.metric(
-                    "Relative change",
-                    (
-                        _pct(
-                            trend["percent_change"]
-                        )
-                        if trend["percent_change"]
-                        is not None
-                        else "N/A"
-                    ),
-                )
-
-            st.dataframe(
-                chart_df,
-                use_container_width=True,
-                hide_index=True,
-            )
-
+            if trend.get("summary"):
+                a,b,c=st.columns(3)
+                with a:
+                    st.metric("Direction", trend["summary"]["direction"].title())
+                with b:
+                    st.metric("Absolute change", _fmt(trend["summary"]["absolute_change"]))
+                with c:
+                    pct=trend["summary"]["percent_change"]
+                    st.metric("Relative change", _pct(pct) if pct is not None else "N/A")
         else:
-
-            st.info(
-                trend.get(
-                    "reason",
-                    "Trend analysis is unavailable.",
-                )
-            )
+            st.info(trend.get("reason","Analysis unavailable."))
 
     with tab2:
-
-        if not geographic.empty:
-
-            display_geo = geographic.copy()
-
-            display_geo.columns = [
-                str(x)
-                for x in display_geo.columns
-            ]
-
-            st.bar_chart(
-                display_geo.set_index(
-                    display_geo.columns[0]
-                )["value"],
-                use_container_width=True,
-            )
-
+        if not analytical_table.empty:
             st.dataframe(
-                display_geo,
+                analytical_table,
                 use_container_width=True,
-                hide_index=True,
+                hide_index=True
             )
-
+            st.caption(
+                "Required analytical grain: one Period Name × Organisation Name "
+                "combination with the selected indicator as Y."
+            )
         else:
-
-            st.info(
-                "No country or organisation dimension was detected."
-            )
+            st.info("No Period × Organisation observations available.")
 
     with tab3:
-
         st.markdown(
             """
             <div class="danip-learning-box">
-                <b>🧠 Learning from the data</b><br>
-                These findings are generated from observed patterns.
-                They are not causal conclusions.
+                <b>🧠 Learning from the Analysis</b><br>
+                Findings use the Period Name × Organisation Name × Indicator
+                analytical grain. They are observations and questions for
+                further analysis, not causal conclusions.
             </div>
             """,
-            unsafe_allow_html=True,
+            unsafe_allow_html=True
         )
-
         st.markdown("#### What the data shows")
-
-        for item in learning["observations"]:
-            st.info(
-                f"📌 {item}"
-            )
-
-        st.markdown(
-            "#### Questions for further analysis"
-        )
-
-        for item in learning["learning_questions"]:
-            st.warning(
-                f"🔎 {item}"
-            )
+        for x in learning["observations"]:
+            st.info(f"📌 {x}")
+        st.markdown("#### Questions for further analysis")
+        for x in learning["learning_questions"]:
+            st.warning(f"🔎 {x}")
 
     with tab4:
-
-        q1, q2, q3 = st.columns(3)
-
+        q1,q2,q3=st.columns(3)
         with q1:
-            st.metric(
-                "Missing cells",
-                f"{quality['missing_cells']:,}",
-            )
-
+            st.metric("Missing cells", f"{quality['missing_cells']:,}")
         with q2:
-            st.metric(
-                "Missing rate",
-                _pct(
-                    quality["missing_rate"]
-                ),
-            )
-
+            st.metric("Missing rate", _pct(quality["missing_rate"]))
         with q3:
-            st.metric(
-                "Duplicate rows",
-                f"{quality['duplicate_rows']:,}",
-            )
+            st.metric("Duplicate rows", f"{quality['duplicate_rows']:,}")
 
         if quality["zero_indicators"]:
-            st.warning(
-                "High zero rates detected for: "
-                + ", ".join(
-                    quality["zero_indicators"][:10]
-                )
-            )
-
+            st.warning("High zero rates: " + ", ".join(quality["zero_indicators"][:10]))
         if quality["negative_indicators"]:
-            st.warning(
-                "Negative values detected for: "
-                + ", ".join(
-                    quality["negative_indicators"][:10]
-                )
-            )
-
+            st.warning("Negative values: " + ", ".join(quality["negative_indicators"][:10]))
         if quality["high_missing_columns"]:
             st.warning(
-                "Columns with ≥20% missing values: "
-                + ", ".join(
-                    quality["high_missing_columns"][:10]
-                )
+                "Columns with ≥20% missing: "
+                + ", ".join(quality["high_missing_columns"][:10])
             )
 
         st.dataframe(
-            pd.DataFrame(
-                [
-                    {
-                        "Indicator": x["name"],
-                        "Observations": x["observations"],
-                        "Missing": x["missing"],
-                        "Zero rate": _pct(
-                            x["zero_rate"]
-                        ),
-                        "Average": x["average"],
-                        "Minimum": x["minimum"],
-                        "Maximum": x["maximum"],
-                    }
-                    for x in profile["indicators"]
-                ]
-            ),
+            pd.DataFrame([
+                {
+                    "Indicator":x["name"],
+                    "Observations":x["observations"],
+                    "Missing":x["missing"],
+                    "Zero rate":_pct(x["zero_rate"]),
+                    "Average":x["average"],
+                    "Minimum":x["minimum"],
+                    "Maximum":x["maximum"],
+                }
+                for x in profile["indicators"]
+            ]),
             use_container_width=True,
-            hide_index=True,
+            hide_index=True
         )
 
     return {
-        "trend": trend,
-        "geographic": geographic,
-        "quality": quality,
-        "learning": learning,
+        "trend":trend,
+        "analytical_table":analytical_table,
+        "quality":quality,
+        "learning":learning
     }
 
 
@@ -3139,6 +2914,12 @@ def render_ai_public_website_builder():
         "### 🔬 Analysis Controls"
     )
 
+    st.info(
+        "STANDARD MODEL: **X = Period Name + Organisation Name** | "
+        "**Y = Indicator**. All trend, comparison and learning analysis "
+        "uses this Period × Organisation × Indicator grain."
+    )
+
     indicator_names = [
         x["name"]
         for x in profile["indicators"]
@@ -3150,10 +2931,25 @@ def render_ai_public_website_builder():
         key="public_website_primary_indicator",
     )
 
+    if not profile.get("period_column") or not profile.get("organisation_column"):
+        st.error(
+            "The analysis model requires **Period Name** and **Organisation Name**."
+        )
+        selected_organisation = None
+    else:
+        selected_organisation = st.selectbox(
+            "Organisation Name",
+            ["All organisations"] + profile.get("organisations", []),
+            key="public_website_primary_organisation",
+        )
+        if selected_organisation == "All organisations":
+            selected_organisation = None
+
     analysis_result = _render_analysis_dashboard(
         df,
         profile,
         selected_indicator,
+        selected_organisation=selected_organisation,
     )
 
     # --------------------------------------------------------
