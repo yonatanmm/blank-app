@@ -15370,6 +15370,8 @@ with nav_col:
             "🤖 DANIP AI Data Analyst",
             "🧭 DANIP M&E Management Hub",
             "📊 Universal Power BI Analytics",
+            "🌐 AI Public Website Builder",
+            "📅 My Reports & Monitoring",
         ],
         horizontal=True,
         label_visibility="collapsed",
