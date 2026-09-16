@@ -2014,10 +2014,31 @@ if OPENAI_API_KEY and OPENAI_API_KEY.startswith("sk-"):
 # ============================================================
 
 session = requests.Session()
-session.auth = (DHIS2_USERNAME, DHIS2_PASSWORD)
-session.headers.update({
-    "User-Agent": "DANIP-DHIS2-AI/2.0"
-})
+
+# streamlit_app.py authenticates the user through DHIS2 OAuth
+# and stores the resulting access token in session state.
+DANIP_ACCESS_TOKEN = st.session_state.get(
+    "danip_access_token",
+    ""
+)
+
+if DANIP_ACCESS_TOKEN:
+    # Use the authenticated OAuth token for all DHIS2 API requests.
+    session.headers.update({
+        "Authorization": f"Bearer {DANIP_ACCESS_TOKEN}",
+        "User-Agent": "DANIP-DHIS2-AI/2.0",
+    })
+else:
+    # Local/direct app.py fallback.
+    if DHIS2_USERNAME and DHIS2_PASSWORD:
+        session.auth = (
+            DHIS2_USERNAME,
+            DHIS2_PASSWORD,
+        )
+
+    session.headers.update({
+        "User-Agent": "DANIP-DHIS2-AI/2.0"
+    })
 
 
 # ============================================================
