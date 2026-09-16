@@ -11621,7 +11621,7 @@ def _render_universal_powerbi_workspace():
             )
         elif existing_key:
             st.caption(
-                "A secure API key is active for this NEXUS session. For persistent "
+                "A secure API key is active for this NEXUS session. For production, use the same key on the Power BI API service. For persistent "
                 "Power BI Service access, save this key as POWERBI_API_KEY and "
                 "configure POWERBI_API_BASE_URL with your real HTTPS API host."
             )
