@@ -67,14 +67,6 @@ from openai import OpenAI
 
 
 # ============================================================
-# OPENAI CONFIGURATION
-# ============================================================
-
-OPENAI_API_KEY = st.secrets["OPENAI"]["OPENAI_API_KEY"]
-OPENAI_MODEL = st.secrets["OPENAI"]["OPENAI_MODEL"]
-
-client = OpenAI(api_key=OPENAI_API_KEY)
-# ============================================================
 # DHIS2 BASE URL
 # ============================================================
 
