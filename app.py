@@ -9,11 +9,14 @@ import html
 import re
 import json
 import time
+import threading
+import http.server
+import socketserver
 import textwrap
 import sqlite3
 from datetime import datetime
 from io import BytesIO, StringIO
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import urlparse, urlunparse, urlencode
 
 import numpy as np
 import pandas as pd
@@ -134,6 +137,18 @@ DANIP_OAUTH_ME_URL = _dhis2_secret(
     "ME_URL",
     f"{DANIP_DHIS2_BASE_URL}/api/me",
 )
+
+
+# ============================================================
+# DHIS2 AUTHENTICATION SWITCH
+# ============================================================
+# False = temporarily disable the DHIS2 login / OAuth gate.
+# True  = restore the normal DHIS2 OAuth login.
+# Keep the OAuth functions and secrets in place so authentication
+# can be restored later by changing only this value.
+# ============================================================
+
+ENABLE_DHIS2_AUTHENTICATION = False
 
 
 if "danip_authenticated" not in st.session_state:
@@ -524,12 +539,28 @@ def _render_dhis2_login():
 # PROCESS AUTHENTICATION BEFORE THE MAIN DASHBOARD
 # ============================================================
 
-if not st.session_state["danip_authenticated"]:
-    if _process_dhis2_oauth_callback():
-        st.rerun()
+if ENABLE_DHIS2_AUTHENTICATION:
 
-    _render_dhis2_login()
-    st.stop()
+    if not st.session_state["danip_authenticated"]:
+        if _process_dhis2_oauth_callback():
+            st.rerun()
+
+        _render_dhis2_login()
+        st.stop()
+
+
+# ============================================================
+# DEVELOPMENT MODE WHEN DHIS2 AUTHENTICATION IS DISABLED
+# ============================================================
+
+if not ENABLE_DHIS2_AUTHENTICATION:
+    st.session_state["danip_authenticated"] = True
+
+    if not st.session_state.get("danip_user"):
+        st.session_state["danip_user"] = {
+            "username": "Development mode",
+            "displayName": "Development mode",
+        }
 
 
 # ============================================================
@@ -557,30 +588,51 @@ DANIP_AUTHENTICATED_USERNAME = (
 # Authentication status is intentionally displayed in the existing
 # dashboard sidebar without exposing the OAuth access token.
 with st.sidebar:
-    st.markdown(
-        f"""
-        <div style="
-            background:#eef6f2;
-            border:1px solid #b9d8c8;
-            border-radius:10px;
-            padding:10px;
-            color:#174b34;
-            font-size:11px;
-            font-weight:700;
-            margin-bottom:10px;">
-            🔓 DHIS2 authenticated<br>
-            User: {html.escape(str(DANIP_AUTHENTICATED_USERNAME))}
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
 
-    if st.button(
-        "🔒 Sign Out",
-        use_container_width=True,
-        key="nexus_dhis2_signout",
-    ):
-        _logout_dhis2()
+    if ENABLE_DHIS2_AUTHENTICATION:
+        st.markdown(
+            f"""
+            <div style="
+                background:#eef6f2;
+                border:1px solid #b9d8c8;
+                border-radius:10px;
+                padding:10px;
+                color:#174b34;
+                font-size:11px;
+                font-weight:700;
+                margin-bottom:10px;">
+                🔓 DHIS2 authenticated<br>
+                User: {html.escape(str(DANIP_AUTHENTICATED_USERNAME))}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if st.button(
+            "🔒 Sign Out",
+            use_container_width=True,
+            key="nexus_dhis2_signout",
+        ):
+            _logout_dhis2()
+
+    else:
+        st.markdown(
+            """
+            <div style="
+                background:#fff7ed;
+                border:1px solid #fed7aa;
+                border-radius:10px;
+                padding:10px;
+                color:#9a3412;
+                font-size:11px;
+                font-weight:700;
+                margin-bottom:10px;">
+                ⚠️ DHIS2 authentication disabled<br>
+                Development mode
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 
@@ -10922,6 +10974,473 @@ def render_common_sidebar():
                 pass
             st.rerun()
 
+
+# ============================================================
+# SHARED EXCEL EXPORT HELPER
+# ============================================================
+# This helper is intentionally TOP-LEVEL because it is used by
+# the Universal Power BI Analytics workspace as well as MEAL
+# reporting/export workflows.
+# ============================================================
+
+def _meal_build_excel_bytes(sheets):
+    """Build an editable multi-sheet Excel workbook from DataFrames."""
+    output = BytesIO()
+
+    try:
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            for name, frame in sheets.items():
+
+                # Excel sheet names cannot contain: \ / * ? : [ ]
+                safe_name = re.sub(
+                    r"[\\/*?:\[\]]",
+                    "-",
+                    str(name),
+                )[:31] or "Sheet"
+
+                data = (
+                    frame.copy()
+                    if isinstance(frame, pd.DataFrame)
+                    else pd.DataFrame(frame)
+                )
+
+                data.to_excel(
+                    writer,
+                    sheet_name=safe_name,
+                    index=False,
+                )
+
+                ws = writer.book[safe_name]
+                ws.freeze_panes = "A2"
+
+                for col_cells in ws.columns:
+                    max_len = 0
+                    col_letter = col_cells[0].column_letter
+
+                    for cell in col_cells[:200]:
+                        value = (
+                            ""
+                            if cell.value is None
+                            else str(cell.value)
+                        )
+                        max_len = max(max_len, len(value))
+
+                    ws.column_dimensions[col_letter].width = min(
+                        max(max_len + 2, 12),
+                        45,
+                    )
+
+    except Exception as exc:
+        raise RuntimeError(
+            f"Excel export failed: {exc}"
+        ) from exc
+
+    return output.getvalue()
+
+
+# ============================================================
+# UNIVERSAL POWER BI API — EMBEDDED IN app.py
+# ============================================================
+# The API is intentionally part of this same application file.
+# It exposes the current loaded dataset to Power BI Desktop.
+# For Power BI Service/cloud refresh, deploy the application/API
+# behind a public HTTPS endpoint.
+# ============================================================
+
+POWERBI_API_HOST = "0.0.0.0"
+POWERBI_API_PORT = int(os.getenv("POWERBI_API_PORT", "8502"))
+POWERBI_API_RUNTIME = {
+    "api_key": None,
+    "wide": [],
+    "fact": [],
+    "raw": [],
+    "updated_at": None,
+}
+POWERBI_API_SERVER_STARTED = False
+POWERBI_API_SERVER_LOCK = threading.Lock()
+
+
+def _powerbi_json_default(value):
+    if pd.isna(value):
+        return None
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return value.isoformat()
+    return str(value)
+
+
+def _powerbi_json_records(frame):
+    if not isinstance(frame, pd.DataFrame):
+        return []
+    clean = frame.copy()
+    clean = clean.where(pd.notna(clean), None)
+    return json.loads(clean.to_json(orient="records", date_format="iso"))
+
+
+def _powerbi_find_column(df, exact_names=(), patterns=()):
+    """Find a source column using exact normalized names first, then patterns."""
+    normalized = {}
+    for col in df.columns:
+        key = re.sub(r"[^a-z0-9]+", "", str(col).lower())
+        normalized[key] = col
+
+    for name in exact_names:
+        key = re.sub(r"[^a-z0-9]+", "", str(name).lower())
+        if key in normalized:
+            return normalized[key]
+
+    for col in df.columns:
+        name = re.sub(r"[^a-z0-9]+", " ", str(col).lower()).strip()
+        if any(re.search(pattern, name) for pattern in patterns):
+            return col
+    return None
+
+
+def _powerbi_prepare_tables(df):
+    """Create screenshot-style Wide table plus normalized Fact and Raw tables."""
+    data = df.copy()
+    data.columns = [str(c).strip() for c in data.columns]
+
+    period_id_col = _powerbi_find_column(
+        data, exact_names=("periodid", "period_id"), patterns=(r"^period id$",)
+    )
+    period_name_col = _powerbi_find_column(
+        data, exact_names=("periodname", "period_name"), patterns=(r"^period name$",)
+    )
+    period_code_col = _powerbi_find_column(
+        data, exact_names=("periodcode", "period_code"), patterns=(r"^period code$", r"^pe$")
+    )
+    org_id_col = _powerbi_find_column(
+        data,
+        exact_names=("organisationunitid", "organisation_unit_id", "orgunitid", "ou"),
+        patterns=(r"organisation unit id", r"org unit id", r"^ou$"),
+    )
+    org_name_col = _powerbi_find_column(
+        data,
+        exact_names=("organisationunitname", "organisation_unit_name", "orgunitname"),
+        patterns=(r"organisation unit name", r"organisation", r"org unit name", r"facility"),
+    )
+
+    # If the source is already in DHIS2 Analytics wide format, preserve it.
+    dimension_cols = [
+        period_id_col,
+        period_name_col,
+        period_code_col,
+        org_id_col,
+        org_name_col,
+    ]
+    dimension_cols = [c for c in dimension_cols if c and c in data.columns]
+
+    # Detect a genuine long-format DHIS2 dataset.
+    dx_col = _powerbi_find_column(
+        data, exact_names=("dx",), patterns=(r"^indicator$", r"data element", r"metric", r"measure")
+    )
+    value_col = _powerbi_find_column(
+        data, exact_names=("value",), patterns=(r"^value$", r"actual", r"result")
+    )
+
+    if dx_col and value_col and dimension_cols:
+        work = data.copy()
+        work["__PBI_VALUE__"] = pd.to_numeric(work[value_col], errors="coerce")
+        work["__PBI_INDICATOR__"] = work[dx_col].astype("string")
+
+        wide = work.pivot_table(
+            index=dimension_cols,
+            columns="__PBI_INDICATOR__",
+            values="__PBI_VALUE__",
+            aggfunc="sum",
+            dropna=False,
+        ).reset_index()
+        wide.columns = [str(c) for c in wide.columns]
+
+        # Also retain any non-value metadata that can be safely represented.
+        used = set(dimension_cols + [dx_col, value_col])
+        extra_cols = [c for c in data.columns if c not in used]
+        for col in extra_cols:
+            if col not in wide.columns and col not in dimension_cols:
+                # Do not duplicate arbitrary long-format rows into the wide grain.
+                if data.groupby(dimension_cols, dropna=False)[col].nunique(dropna=True).max() <= 1:
+                    meta = data.groupby(dimension_cols, dropna=False)[col].first().reset_index()
+                    wide = wide.merge(meta, on=dimension_cols, how="left")
+    else:
+        wide = data.copy()
+
+        # Collapse accidental duplicates to exactly one row per Period × Organisation.
+        if dimension_cols and len(dimension_cols) >= 2:
+            non_dimensions = [c for c in wide.columns if c not in dimension_cols]
+            if wide.duplicated(subset=dimension_cols, keep=False).any():
+                agg = {}
+                for col in non_dimensions:
+                    numeric = pd.to_numeric(wide[col], errors="coerce")
+                    if numeric.notna().any():
+                        wide[col] = numeric
+                        agg[col] = "sum"
+                    else:
+                        agg[col] = "first"
+                wide = wide.groupby(dimension_cols, dropna=False, as_index=False).agg(agg)
+
+    # Standardize the five key fields to the screenshot naming convention.
+    rename_map = {}
+    if period_id_col and period_id_col != "periodid": rename_map[period_id_col] = "periodid"
+    if period_name_col and period_name_col != "periodname": rename_map[period_name_col] = "periodname"
+    if period_code_col and period_code_col != "periodcode": rename_map[period_code_col] = "periodcode"
+    if org_id_col and org_id_col != "organisationunitid": rename_map[org_id_col] = "organisationunitid"
+    if org_name_col and org_name_col != "organisationunitname": rename_map[org_name_col] = "organisationunitname"
+    wide = wide.rename(columns=rename_map)
+
+    preferred = [
+        "periodid", "periodname", "periodcode",
+        "organisationunitid", "organisationunitname",
+    ]
+    ordered = [c for c in preferred if c in wide.columns]
+    ordered += [c for c in wide.columns if c not in ordered]
+    wide = wide[ordered]
+
+    # Normalized fact table for flexible Power BI modelling.
+    fact = pd.DataFrame()
+    if dimension_cols:
+        dim_after = [c for c in preferred if c in wide.columns]
+        indicator_columns = [c for c in wide.columns if c not in dim_after]
+        rows = []
+        for _, row in wide.iterrows():
+            base = {c: row.get(c) for c in dim_after}
+            for indicator in indicator_columns:
+                numeric_value = pd.to_numeric(pd.Series([row.get(indicator)]), errors="coerce").iloc[0]
+                if pd.notna(numeric_value):
+                    rec = dict(base)
+                    rec["PBI_Indicator"] = indicator
+                    rec["PBI_Value"] = numeric_value
+                    rows.append(rec)
+        fact = pd.DataFrame(rows)
+
+    raw = data.copy()
+    raw.insert(0, "PBI_Row_ID", np.arange(1, len(raw) + 1))
+
+    return wide, fact, raw
+
+
+def _powerbi_generate_api_key():
+    key = "nexus_pbi_" + secrets.token_urlsafe(32)
+    POWERBI_API_RUNTIME["api_key"] = key
+    st.session_state["powerbi_api_key"] = key
+    return key
+
+
+def _powerbi_api_authorized(headers):
+    supplied = headers.get("x-api-key", "")
+    expected = POWERBI_API_RUNTIME.get("api_key")
+    return bool(expected and supplied and hmac.compare_digest(str(supplied), str(expected)))
+
+
+def _powerbi_start_embedded_server():
+    """Start the lightweight API once per Python process."""
+    global POWERBI_API_SERVER_STARTED
+    if POWERBI_API_SERVER_STARTED:
+        return
+
+    class PowerBIRequestHandler(http.server.BaseHTTPRequestHandler):
+        def _send_json(self, payload, status=200):
+            body = json.dumps(payload, default=_powerbi_json_default, ensure_ascii=False).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            parsed = urlparse(self.path)
+            path = parsed.path.rstrip("/") or "/"
+
+            if path == "/api/powerbi/health":
+                self._send_json({
+                    "status": "ok",
+                    "service": "NEXUS DANIP Power BI API",
+                    "updated_at": POWERBI_API_RUNTIME.get("updated_at"),
+                })
+                return
+
+            if not _powerbi_api_authorized(self.headers):
+                self._send_json({"status": "error", "message": "Unauthorized — valid x-api-key required."}, 401)
+                return
+
+            if path == "/api/powerbi/wide":
+                self._send_json({
+                    "status": "success",
+                    "dataset": "wide",
+                    "grain": "period × organisation",
+                    "updated_at": POWERBI_API_RUNTIME.get("updated_at"),
+                    "data": POWERBI_API_RUNTIME.get("wide", []),
+                })
+                return
+
+            if path == "/api/powerbi/fact":
+                self._send_json({
+                    "status": "success",
+                    "dataset": "fact",
+                    "grain": "period × organisation × indicator",
+                    "updated_at": POWERBI_API_RUNTIME.get("updated_at"),
+                    "data": POWERBI_API_RUNTIME.get("fact", []),
+                })
+                return
+
+            if path == "/api/powerbi/raw":
+                self._send_json({
+                    "status": "success",
+                    "dataset": "raw",
+                    "grain": "source record",
+                    "updated_at": POWERBI_API_RUNTIME.get("updated_at"),
+                    "data": POWERBI_API_RUNTIME.get("raw", []),
+                })
+                return
+
+            self._send_json({"status": "error", "message": "Endpoint not found."}, 404)
+
+        def log_message(self, format, *args):
+            return
+
+    class ReusableTCPServer(socketserver.ThreadingTCPServer):
+        allow_reuse_address = True
+        daemon_threads = True
+
+    try:
+        server = ReusableTCPServer((POWERBI_API_HOST, POWERBI_API_PORT), PowerBIRequestHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True, name="NEXUS-PowerBI-API")
+        thread.start()
+        POWERBI_API_SERVER_STARTED = True
+    except OSError:
+        # Streamlit may rerun while another process/thread already owns the port.
+        # The application remains fully usable; only the embedded API is unavailable.
+        POWERBI_API_SERVER_STARTED = False
+
+
+_powerbi_start_embedded_server()
+
+
+def _render_universal_powerbi_workspace():
+    """Universal Power BI workspace using Period × Organisation wide data."""
+    st.markdown("## 📊 Universal Power BI Analytics")
+    st.caption(
+        "Universal analytical layer: one row per Period × Organisation, with each indicator preserved as a column. "
+        "Raw and normalized datasets are also available."
+    )
+
+    df = st.session_state.get("loaded_df")
+    loaded_url = st.session_state.get("loaded_source_url", "")
+
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        st.info(
+            "No dataset is currently loaded. Go to **🤖 DANIP AI Data Analyst**, "
+            "connect your DHIS2/API source, and then return here."
+        )
+        return
+
+    wide, fact, raw = _powerbi_prepare_tables(df)
+
+    # Publish current data to the embedded API.
+    POWERBI_API_RUNTIME["wide"] = _powerbi_json_records(wide)
+    POWERBI_API_RUNTIME["fact"] = _powerbi_json_records(fact)
+    POWERBI_API_RUNTIME["raw"] = _powerbi_json_records(raw)
+    POWERBI_API_RUNTIME["updated_at"] = datetime.utcnow().isoformat() + "Z"
+
+    st.success(
+        f"✅ Power BI dataset ready — {len(wide):,} Period × Organisation rows × {len(wide.columns):,} columns."
+    )
+    if loaded_url:
+        st.caption(f"Source: `{loaded_url}`")
+
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        st.metric("Wide Rows", f"{len(wide):,}")
+    with k2:
+        st.metric("Indicator Columns", f"{max(len(wide.columns) - 5, 0):,}")
+    with k3:
+        st.metric("Organisation Units", f"{wide['organisationunitname'].nunique(dropna=True):,}" if "organisationunitname" in wide else "—")
+    with k4:
+        st.metric("Periods", f"{wide['periodcode'].nunique(dropna=True):,}" if "periodcode" in wide else "—")
+
+    st.markdown("### 📊 Power BI Wide Analytical Dataset")
+    st.caption(
+        "This is the primary Power BI table. The grain is Period × Organisation. "
+        "Indicator measures remain as separate columns, matching DHIS2 analytical exports."
+    )
+    st.dataframe(wide.head(5000), use_container_width=True, hide_index=True, height=500)
+
+    st.markdown("### 🔢 Normalized Indicator Fact Dataset")
+    st.caption("One row per Period × Organisation × Indicator for flexible Power BI modelling.")
+    if fact.empty:
+        st.info("No numeric indicator values were detected for the normalized fact table.")
+    else:
+        st.dataframe(fact.head(5000), use_container_width=True, hide_index=True, height=350)
+
+    # API key and connection details.
+    st.markdown("### 🔐 Direct Power BI API Connection")
+    existing_key = st.session_state.get("powerbi_api_key", "")
+    if st.button("🔑 Generate New Power BI API Key", key="pbi_generate_api_key", use_container_width=False):
+        existing_key = _powerbi_generate_api_key()
+        st.session_state["powerbi_api_key"] = existing_key
+
+    if existing_key:
+        st.code(existing_key, language="text")
+        st.warning("Keep this API key private. Generate a new key if it is exposed.")
+        local_url = f"http://localhost:{POWERBI_API_PORT}/api/powerbi/wide"
+        st.markdown("**Power BI Desktop URL:**")
+        st.code(local_url, language="text")
+        st.markdown("**Power Query:**")
+        st.code(
+            'let\n'
+            '    Source = Json.Document(\n'
+            f'        Web.Contents(\n            "{local_url}",\n'
+            '            [Headers=[#"x-api-key"="YOUR_GENERATED_API_KEY"]]\n'
+            '        )\n'
+            '    ),\n'
+            '    Data = Table.FromRecords(Source[data])\n'
+            'in\n'
+            '    Data',
+            language="powerquery",
+        )
+        st.caption(
+            "The embedded API is part of app.py. localhost works for Power BI Desktop on the same machine. "
+            "For Power BI Service, deploy this application/API behind HTTPS and use that public API URL."
+        )
+    else:
+        st.info("Generate an API key to enable the authenticated Power BI endpoint.")
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.download_button(
+            "⬇️ Download Wide CSV",
+            wide.to_csv(index=False).encode("utf-8-sig"),
+            "DANIP_PowerBI_Wide.csv",
+            "text/csv",
+            use_container_width=True,
+            key="pbi_wide_csv_export",
+        )
+    with c2:
+        st.download_button(
+            "⬇️ Download Fact CSV",
+            fact.to_csv(index=False).encode("utf-8-sig"),
+            "DANIP_PowerBI_Fact.csv",
+            "text/csv",
+            use_container_width=True,
+            key="pbi_fact_csv_export",
+        )
+    with c3:
+        st.download_button(
+            "⬇️ Download Excel",
+            _meal_build_excel_bytes({"Wide Data": wide, "Fact Data": fact, "Raw Data": raw}),
+            "DANIP_PowerBI_Universal.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+            key="pbi_universal_excel_export",
+        )
+
+
 def render_existing_danip_ai_app():
     # ============================================================
     # CONNECTION STATUS
@@ -14531,6 +15050,7 @@ with nav_col:
         [
             "🤖 DANIP AI Data Analyst",
             "🧭 DANIP M&E Management Hub",
+            "📊 Universal Power BI Analytics",
         ],
         horizontal=True,
         label_visibility="collapsed",
@@ -14586,8 +15106,10 @@ with refresh_col:
 
 if workspace == "🤖 DANIP AI Data Analyst":
     render_existing_danip_ai_app()
-else:
+elif workspace == "🧭 DANIP M&E Management Hub":
     render_danip_me_management_hub()
+else:
+    _render_universal_powerbi_workspace()
 
 # ============================================================
 # END — DANIP AI + SEPARATE DANIP M&E MANAGEMENT HUB
