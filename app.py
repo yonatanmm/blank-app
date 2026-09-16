@@ -57,9 +57,8 @@ DHIS2_URL = _get_secret(
 # Local: .env beside this file.
 # Streamlit Cloud: App settings -> Secrets.
 # Never hard-code passwords or API keys in source code.
-DHIS2_USERNAME = _get_secret("DHIS2_USERNAME", "")
-DHIS2_PASSWORD = _get_secret("DHIS2_PASSWORD", "")
-OPENAI_API_KEY = _get_secret("OPENAI_API_KEY", "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")
+
+OPENAI_API_KEY = _get_secret("OPENAI_API_KEY", "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")
 OPENAI_MODEL = _get_secret("OPENAI_MODEL", "gpt-5")
 
 
