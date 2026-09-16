@@ -75,7 +75,7 @@ try:
     ).strip()
 except Exception:
     # Local fallback for .env development.
-    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "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").strip()
     OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5").strip()
 
 
