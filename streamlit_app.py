@@ -60,13 +60,12 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 import requests
-import streamlit as st
 
 import streamlit as st
 from openai import OpenAI
 
-OPENAI_API_KEY = st.secrets["OPENAI"]["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"]
-OPENAI_MODEL = st.secrets["OPENAI"]["gpt-5"]
+OPENAI_API_KEY = st.secrets["OPENAI"]["OPENAI_API_KEY"]
+OPENAI_MODEL = st.secrets["OPENAI"]["OPENAI_MODEL"]
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 # ============================================================
