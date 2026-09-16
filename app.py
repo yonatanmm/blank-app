@@ -9855,8 +9855,8 @@ def _me_hub_build_api_view(api_df):
         program_series = pd.Series("DANIP API Portfolio", index=df.index, dtype="string")
 
     df["__ME_PROGRAM__"] = program_series.astype(str)
-    df["__ME_TARGET__"] = pd.to_numeric(df[target_col], errors="coerce") if target_col else np.nan
-    df["__ME_PERF_ACTUAL__"] = pd.to_numeric(df[actual_col], errors="coerce") if actual_col else np.nan
+    df["__ME_TARGET__"] = _me_hub_numeric_series(df[target_col]) if target_col else np.nan
+    df["__ME_PERF_ACTUAL__"] = _me_hub_numeric_series(df[actual_col]) if actual_col else np.nan
     df["__ME_BUDGET__"] = pd.to_numeric(df[budget_col], errors="coerce") if budget_col else np.nan
     df["__ME_FIN_ACTUAL__"] = pd.to_numeric(df[financial_actual_col], errors="coerce") if financial_actual_col else np.nan
     df["__ME_EAC__"] = pd.to_numeric(df[eac_col], errors="coerce") if eac_col else np.nan
@@ -10106,6 +10106,23 @@ def _me_hub_responsive_css():
     """, unsafe_allow_html=True)
 
 
+def _me_hub_numeric_series(series):
+    """Convert common DHIS2/API numeric representations to numbers safely."""
+    if series is None:
+        return pd.Series(dtype="float64")
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce")
+    cleaned = (
+        series.astype("string")
+        .str.strip()
+        .str.replace(",", "", regex=False)
+        .str.replace("%", "", regex=False)
+        .str.replace(r"^\((.*)\)$", r"-\1", regex=True)
+        .replace({"": pd.NA, "-": pd.NA, "—": pd.NA, "N/A": pd.NA, "NA": pd.NA})
+    )
+    return pd.to_numeric(cleaned, errors="coerce")
+
+
 def _me_hub_find_indicator_dimension(df):
     """Find the DHIS2 long-format indicator dimension (usually dx)."""
     if not isinstance(df, pd.DataFrame) or df.empty:
@@ -10202,9 +10219,7 @@ def _me_hub_expand_long_indicator_data(df):
     if work.empty:
         return df.copy()
 
-    work["__ME_INDICATOR_VALUE__"] = pd.to_numeric(
-        work[value_col], errors="coerce"
-    )
+    work["__ME_INDICATOR_VALUE__"] = _me_hub_numeric_series(work[value_col])
 
     period_col = find_period_column(work)
     ou_col = find_ou_column(work)
@@ -10256,6 +10271,10 @@ def _me_hub_expand_long_indicator_data(df):
     ).reset_index()
 
     wide.columns = [str(c) for c in wide.columns]
+    wide.attrs = dict(getattr(df, "attrs", {}))
+    wide.attrs["me_source_indicators"] = list(dict.fromkeys(
+        list(wide.attrs.get("me_source_indicators", [])) + indicator_universe
+    ))
 
     # Explicitly restore every indicator column from the source universe.
     # Reindexing guarantees the dropdown sees the complete indicator list.
@@ -10360,7 +10379,7 @@ def _me_hub_indicator_columns(df):
         if any(w in low for w in excluded_words):
             continue
 
-        vals = pd.to_numeric(df[c], errors="coerce")
+        vals = _me_hub_numeric_series(df[c])
         n = int(vals.notna().sum())
 
         # Keep only columns that actually contain a numeric observation.
@@ -10368,6 +10387,16 @@ def _me_hub_indicator_columns(df):
             continue
 
         candidates.append((c, n))
+
+    # Also include indicators explicitly requested by the source URL, even when
+    # DHIS2 returned no observation for one of them. The source-universe list is
+    # attached to the dataframe by _me_hub_add_source_indicator_universe().
+    source_universe = getattr(df, "attrs", {}).get("me_source_indicators", [])
+    existing = {str(x) for x, _ in candidates}
+    for indicator in source_universe:
+        indicator = str(indicator).strip()
+        if indicator and indicator not in existing and indicator in df.columns:
+            candidates.append((indicator, 0))
 
     candidates.sort(key=lambda x: (-x[1], str(x[0]).lower()))
     return [x[0] for x in candidates]
@@ -10431,8 +10460,12 @@ def _me_hub_add_source_indicator_universe(df, source_url=None):
             out[indicator] = np.nan
             existing.add(indicator)
 
-    # Store the source universe separately so the UI can expose it even when
-    # the current dataframe contains no observation for a requested indicator.
+    # Keep the requested indicator universe on the dataframe. This survives
+    # normal pandas copies and lets the dropdown retain zero-observation items.
+    out.attrs = dict(getattr(out, "attrs", {}))
+    out.attrs["me_source_indicators"] = list(dict.fromkeys(
+        list(out.attrs.get("me_source_indicators", [])) + source_indicators
+    ))
     return out
 
 
@@ -10544,9 +10577,14 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
         st.warning("No records match the selected filters."); return
     if selected_indicator!="All": indicator_cols=[c for c in indicator_cols if str(c)==str(selected_indicator)]
     if not indicator_cols:
-        st.warning("No numeric indicator columns were detected in the selected dataset/filter."); return
+        st.warning("No numeric indicator values were detected in the M&E view.")
+        st.caption(
+            "The AI workspace may still have the dataset. M&E accepts DHIS2 long format (dx/value), "
+            "wide indicator columns, numeric strings, commas and percentage signs."
+        )
+        return
     # KPIs
-    allvals=pd.concat([pd.to_numeric(work[c],errors="coerce") for c in indicator_cols],ignore_index=True)
+    allvals=pd.concat([_me_hub_numeric_series(work[c]) for c in indicator_cols],ignore_index=True)
     kc=st.columns(5)
     kc[0].metric("Indicators",f"{len(indicator_cols):,}")
     kc[1].metric("Observations",f"{int(allvals.notna().sum()):,}")
@@ -10560,7 +10598,7 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
     # Summary / ranking
     rows=[]
     for c in indicator_cols:
-        v=pd.to_numeric(work[c],errors="coerce").dropna()
+        v=_me_hub_numeric_series(work[c]).dropna()
         rows.append({"indicator":_me_hub_indicator_label(c),"average":float(v.mean()) if not v.empty else np.nan,"total":float(v.sum()) if not v.empty else 0,"observations":int(v.size),"zero_values":int((v==0).sum()) if not v.empty else 0})
     summary=pd.DataFrame(rows).dropna(subset=["average"])
     if px and not summary.empty:
@@ -10570,7 +10608,7 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
     # Overall trend
     trend_rows=[]
     for c in indicator_cols:
-        t=pd.DataFrame({"period":work["__ME_PERIOD_LABEL__"],"period_date":work["__ME_PERIOD_DATE__"],"indicator":_me_hub_indicator_label(c),"value":pd.to_numeric(work[c],errors="coerce")}).dropna(subset=["value"])
+        t=pd.DataFrame({"period":work["__ME_PERIOD_LABEL__"],"period_date":work["__ME_PERIOD_DATE__"],"indicator":_me_hub_indicator_label(c),"value":_me_hub_numeric_series(work[c])}).dropna(subset=["value"])
         if not t.empty: trend_rows.append(t)
     trend_all=pd.concat(trend_rows,ignore_index=True) if trend_rows else pd.DataFrame()
     if px and not trend_all.empty:
@@ -10587,7 +10625,7 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
     if px and ou_col and not trend_all.empty:
         ou_rows=[]
         for c in indicator_cols:
-            t=pd.DataFrame({"ou":work["__ME_OU_LABEL__"],"value":pd.to_numeric(work[c],errors="coerce"),"indicator":_me_hub_indicator_label(c)}).dropna(subset=["value"])
+            t=pd.DataFrame({"ou":work["__ME_OU_LABEL__"],"value":_me_hub_numeric_series(work[c]),"indicator":_me_hub_indicator_label(c)}).dropna(subset=["value"])
             if not t.empty: ou_rows.append(t.groupby(["ou","indicator"],as_index=False)["value"].mean())
         if ou_rows:
             oo=pd.concat(ou_rows,ignore_index=True)
@@ -10604,7 +10642,7 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
         for j,c in enumerate(indicator_cols[i:i+2]):
             with cc[j]:
                 title=_me_hub_indicator_label(c)
-                vals=pd.to_numeric(work[c],errors="coerce")
+                vals=_me_hub_numeric_series(work[c])
                 d=pd.DataFrame({"period":work["__ME_PERIOD_LABEL__"],"period_date":work["__ME_PERIOD_DATE__"],"ou":work["__ME_OU_LABEL__"],"value":vals}).dropna(subset=["value"])
                 st.markdown(f"**{title}**")
                 if d.empty:
