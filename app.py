@@ -2515,25 +2515,26 @@ st.markdown(
 
 
 # ============================================================
-# CONFIGURATION
+# CONFIGURATION STATUS
 # ============================================================
 
 missing = []
 
+# DHIS2 URL is required for DHIS2 data access.
 if not DHIS2_URL:
-    missing.append("https://dhis2.nutritionintl.org")
+    missing.append("DHIS2_URL")
 
-if not DANIP_ACCESS_TOKEN:
+# OAuth is required only when the DHIS2 authentication gate is enabled.
+if ENABLE_DHIS2_AUTHENTICATION and not DANIP_ACCESS_TOKEN:
     missing.append("DHIS2 OAuth session")
 
-if not OPENAI_API_KEY:
-    missing.append("OPENAI_API_KEY")
+# OpenAI is optional. DHIS2 and Power BI functionality remain available.
+openai_missing = not OPENAI_API_KEY
 
 if missing:
     st.warning(
-        "⚙️ Configuration is incomplete. The interface is still available. "
-        "Add the missing values to .env before connecting to a protected "
-        "DHIS2 server or using AI interpretation."
+        "⚙️ Configuration is incomplete. "
+        "The interface is still available."
     )
 
     with st.expander("Configuration details", expanded=False):
@@ -2542,22 +2543,33 @@ if missing:
             st.code(item)
 
         st.info(
-            "Create a .env file beside this Python file using .env.example. "
-            "The page will remain usable while configuration is incomplete."
+            "Configure the missing values in .env or Streamlit Secrets."
         )
+elif openai_missing:
+    st.info(
+        "🤖 AI interpretation is currently disabled because "
+        "OPENAI_API_KEY is not configured. "
+        "DHIS2 data access and Power BI analytics remain available."
+    )
 
-# Only create the OpenAI client when a key is actually available.
+# ============================================================
+# OPENAI CLIENT
+# ============================================================
+
 client = None
+
 if OPENAI_API_KEY:
     try:
         client = OpenAI(api_key=OPENAI_API_KEY)
     except Exception as e:
-        st.error("OpenAI client could not be initialized. Check OPENAI_API_KEY.")
+        st.error(
+            "OpenAI client could not be initialized. "
+            "Check OPENAI_API_KEY."
+        )
         with st.expander("Technical details", expanded=False):
             st.code(str(e))
 else:
     client = None
-
 
 # ============================================================
 # OPENAI CONFIGURATION SAFETY
@@ -11047,8 +11059,13 @@ def _meal_build_excel_bytes(sheets):
 # behind a public HTTPS endpoint.
 # ============================================================
 
-POWERBI_API_HOST = "0.0.0.0"
+POWERBI_API_HOST = os.getenv("POWERBI_API_HOST", "0.0.0.0")
 POWERBI_API_PORT = int(os.getenv("POWERBI_API_PORT", "8502"))
+
+# Public Power BI API service.
+# IMPORTANT: this must be a separate HTTPS API service, not the Streamlit UI URL.
+POWERBI_API_BASE_URL = _get_secret("POWERBI_API_BASE_URL", "").rstrip("/")
+POWERBI_API_KEY = _get_secret("POWERBI_API_KEY", "")
 POWERBI_API_RUNTIME = {
     "api_key": None,
     "wide": [],
@@ -11237,6 +11254,39 @@ def _powerbi_api_authorized(headers):
     return bool(expected and supplied and hmac.compare_digest(str(supplied), str(expected)))
 
 
+
+def _powerbi_external_api_enabled():
+    return bool(POWERBI_API_BASE_URL and POWERBI_API_KEY)
+
+
+def _powerbi_publish_external(wide, fact, raw):
+    """Publish current datasets to the separate public HTTPS Power BI API."""
+    if not _powerbi_external_api_enabled():
+        return False, "Public Power BI API is not configured."
+    if "streamlit.app" in POWERBI_API_BASE_URL.lower():
+        return False, (
+            "POWERBI_API_BASE_URL cannot be the Streamlit UI URL. "
+            "Deploy powerbi_api.py as a separate HTTPS API service."
+        )
+    payload={
+        "wide": _powerbi_json_records(wide),
+        "fact": _powerbi_json_records(fact),
+        "raw": _powerbi_json_records(raw),
+        "updated_at": datetime.utcnow().isoformat()+"Z",
+    }
+    try:
+        r=requests.post(
+            f"{POWERBI_API_BASE_URL}/api/powerbi/publish",
+            headers={"x-api-key":POWERBI_API_KEY,"Content-Type":"application/json","Accept":"application/json"},
+            json=payload, timeout=120,
+        )
+        r.raise_for_status()
+        return True, r.json()
+    except requests.RequestException as exc:
+        return False, f"Public Power BI API publish failed: {exc}"
+    except Exception as exc:
+        return False, f"Public Power BI API publish failed: {exc}"
+
 def _powerbi_start_embedded_server():
     """Start the lightweight API once per Python process."""
     global POWERBI_API_SERVER_STARTED
@@ -11319,7 +11369,9 @@ def _powerbi_start_embedded_server():
         POWERBI_API_SERVER_STARTED = False
 
 
-_powerbi_start_embedded_server()
+# Keep the embedded API only for local Desktop compatibility.
+if not POWERBI_API_BASE_URL:
+    _powerbi_start_embedded_server()
 
 
 def _render_universal_powerbi_workspace():
@@ -11342,11 +11394,17 @@ def _render_universal_powerbi_workspace():
 
     wide, fact, raw = _powerbi_prepare_tables(df)
 
-    # Publish current data to the embedded API.
+    # Keep the local runtime populated for Power BI Desktop.
     POWERBI_API_RUNTIME["wide"] = _powerbi_json_records(wide)
     POWERBI_API_RUNTIME["fact"] = _powerbi_json_records(fact)
     POWERBI_API_RUNTIME["raw"] = _powerbi_json_records(raw)
     POWERBI_API_RUNTIME["updated_at"] = datetime.utcnow().isoformat() + "Z"
+
+    # Also publish to the public API when configured.
+    external_publish_ok = False
+    external_publish_message = ""
+    if _powerbi_external_api_enabled():
+        external_publish_ok, external_publish_message = _powerbi_publish_external(wide, fact, raw)
 
     st.success(
         f"✅ Power BI dataset ready — {len(wide):,} Period × Organisation rows × {len(wide.columns):,} columns."
@@ -11379,37 +11437,51 @@ def _render_universal_powerbi_workspace():
         st.dataframe(fact.head(5000), use_container_width=True, hide_index=True, height=350)
 
     # API key and connection details.
-    st.markdown("### 🔐 Direct Power BI API Connection")
-    existing_key = st.session_state.get("powerbi_api_key", "")
-    if st.button("🔑 Generate New Power BI API Key", key="pbi_generate_api_key", use_container_width=False):
-        existing_key = _powerbi_generate_api_key()
-        st.session_state["powerbi_api_key"] = existing_key
+    configured_key = POWERBI_API_KEY.strip()
+    session_key = st.session_state.get("powerbi_api_key", "")
+    existing_key = configured_key or session_key
+
+    if not configured_key:
+        if st.button("🔑 Generate Local Power BI API Key", key="pbi_generate_api_key", use_container_width=False):
+            existing_key = _powerbi_generate_api_key()
+            st.session_state["powerbi_api_key"] = existing_key
 
     if existing_key:
         st.code(existing_key, language="text")
-        st.warning("Keep this API key private. Generate a new key if it is exposed.")
-        local_url = f"http://localhost:{POWERBI_API_PORT}/api/powerbi/wide"
-        st.markdown("**Power BI Desktop URL:**")
+        st.warning("Keep this API key private. Put it in the x-api-key header, never in the URL hostname.")
+        local_url=f"http://localhost:{POWERBI_API_PORT}/api/powerbi/wide"
+        public_api_base=POWERBI_API_BASE_URL
+        invalid_streamlit_base=bool(public_api_base and "streamlit.app" in public_api_base.lower())
+        public_url=(f"{public_api_base}/api/powerbi/wide" if public_api_base and not invalid_streamlit_base else "")
+        st.markdown("**Power BI Desktop — local development:**")
         st.code(local_url, language="text")
+        if invalid_streamlit_base:
+            st.error("POWERBI_API_BASE_URL is set to the Streamlit UI URL. It cannot serve the custom /api/powerbi route. Deploy powerbi_api.py separately over HTTPS.")
+        if public_url:
+            st.markdown("**Power BI Service — public API:**")
+            st.code(public_url, language="text")
+            if external_publish_ok:
+                st.success("☁️ Current dataset published to the public Power BI API.")
+            elif external_publish_message:
+                st.warning(str(external_publish_message))
         st.markdown("**Power Query:**")
+        query_url=public_url or local_url
         st.code(
             'let\n'
             '    Source = Json.Document(\n'
-            f'        Web.Contents(\n            "{local_url}",\n'
-            '            [Headers=[#"x-api-key"="YOUR_GENERATED_API_KEY"]]\n'
+            f'        Web.Contents(\n            "{query_url}",\n'
+            '            [Headers=[#"x-api-key"="YOUR_POWERBI_API_KEY"]]\n'
             '        )\n'
             '    ),\n'
             '    Data = Table.FromRecords(Source[data])\n'
             'in\n'
-            '    Data',
-            language="powerquery",
-        )
-        st.caption(
-            "The embedded API is part of app.py. localhost works for Power BI Desktop on the same machine. "
-            "For Power BI Service, deploy this application/API behind HTTPS and use that public API URL."
-        )
+            '    Data', language="powerquery")
+        if public_url:
+            st.caption("Use the public API URL in Power BI Service and the same POWERBI_API_KEY configured in both services.")
+        else:
+            st.caption("Local Power BI Desktop can use localhost. Power BI Service requires the separately deployed HTTPS API.")
     else:
-        st.info("Generate an API key to enable the authenticated Power BI endpoint.")
+        st.info("Configure POWERBI_API_BASE_URL and POWERBI_API_KEY for Power BI Service, or generate a local key for Power BI Desktop.")
 
     c1, c2, c3 = st.columns(3)
     with c1:
