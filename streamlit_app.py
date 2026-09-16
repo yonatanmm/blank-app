@@ -63,6 +63,19 @@ import requests
 import streamlit as st
 
 
+
+st.write("DEBUG - root secrets:", list(st.secrets.keys()))
+
+if "OPENAI_API_KEY" in st.secrets:
+    st.success("OPENAI_API_KEY FOUND at root level")
+else:
+    st.error("OPENAI_API_KEY NOT FOUND at root level")
+
+if "OPENAI" in st.secrets:
+    st.success("OPENAI section FOUND")
+    st.write("OPENAI keys:", list(st.secrets["OPENAI"].keys()))
+else:
+    st.warning("OPENAI section NOT FOUND")
 # ============================================================
 # PAGE CONFIGURATION
 # ============================================================
