@@ -1291,11 +1291,11 @@ def _html_trend_chart(
         </svg>
 
         <div class="chart-caption">
-            {html.escape(trend['first_period'])}:
-            <strong>{_fmt(trend['first_value'])}</strong>
+            {_safe_text(trend.get("first_period") or "First reported period")}:
+            <strong>{_fmt(trend.get("first_value"))}</strong>
             &nbsp; → &nbsp;
-            {html.escape(trend['last_period'])}:
-            <strong>{_fmt(trend['last_value'])}</strong>
+            {_safe_text(trend.get("last_period") or "Last reported period")}:
+            <strong>{_fmt(trend.get("last_value"))}</strong>
         </div>
     </div>
     """
