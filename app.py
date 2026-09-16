@@ -15387,16 +15387,24 @@ with refresh_col:
         st.rerun()
 
 if workspace == "🤖 DANIP AI Data Analyst":
+
     render_existing_danip_ai_app()
 
 elif workspace == "🧭 DANIP M&E Management Hub":
+
     render_danip_me_management_hub()
 
 elif workspace == "📊 Universal Power BI Analytics":
+
     _render_universal_powerbi_workspace()
 
 elif workspace == "🌐 AI Public Website Builder":
+
     render_ai_public_website_builder()
+
+elif workspace == "📅 My Reports & Monitoring":
+
+    render_my_reports_monitoring()
 
 # ============================================================
 # END — DANIP AI + SEPARATE DANIP M&E MANAGEMENT HUB
