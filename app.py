@@ -16,7 +16,7 @@ import textwrap
 import sqlite3
 from datetime import datetime
 from io import BytesIO, StringIO
-from urllib.parse import urlparse, urlunparse, urlencode
+from urllib.parse import urlparse, urlunparse, urlencode, parse_qs, unquote
 
 import numpy as np
 import pandas as pd
@@ -10372,6 +10372,70 @@ def _me_hub_indicator_columns(df):
     candidates.sort(key=lambda x: (-x[1], str(x[0]).lower()))
     return [x[0] for x in candidates]
 
+def _me_hub_extract_source_indicators(source_url):
+    """Extract the complete dx indicator universe from a DHIS2 analytics URL.
+
+    DHIS2 analytics URLs can request indicators explicitly with one or more
+    ``dimension=dx:...`` parameters. An indicator with no returned observation
+    will not appear in the dataframe, so dataframe-only detection can never
+    discover it. This helper reads the requested dx members directly from the
+    source URL and keeps them available to the M&E Hub.
+    """
+    if not source_url:
+        return []
+
+    try:
+        parsed = urlparse(str(source_url))
+        query_items = parse_qs(parsed.query, keep_blank_values=True)
+    except Exception:
+        return []
+
+    indicators = []
+    for key, values in query_items.items():
+        if str(key).strip().lower() != "dimension":
+            continue
+        for raw_dimension in values:
+            # A URL can contain dimension=dx:A;B or dimension=dx:A&dimension=dx:B.
+            for part in str(raw_dimension).split(";"):
+                part = unquote(part).strip()
+                if not part:
+                    continue
+                if part.lower().startswith("dx:"):
+                    members = part[3:]
+                    for member in members.split(";"):
+                        member = unquote(member).strip()
+                        if member and member not in indicators:
+                            indicators.append(member)
+
+    return indicators
+
+
+def _me_hub_add_source_indicator_universe(df, source_url=None):
+    """Ensure every dx indicator requested by the source remains visible.
+
+    This does not invent observations. Missing indicators are added as empty
+    numeric columns so they remain selectable, while indicators already
+    returned by the dataset keep their actual values.
+    """
+    if not isinstance(df, pd.DataFrame):
+        return df
+
+    out = df.copy()
+    source_indicators = _me_hub_extract_source_indicators(source_url)
+    if not source_indicators:
+        return out
+
+    existing = {str(c).strip() for c in out.columns}
+    for indicator in source_indicators:
+        if indicator not in existing:
+            out[indicator] = np.nan
+            existing.add(indicator)
+
+    # Store the source universe separately so the UI can expose it even when
+    # the current dataframe contains no observation for a requested indicator.
+    return out
+
+
 def _me_hub_indicator_label(name):
     return " ".join(str(name).replace("_"," ").replace("-"," ").split()) or "Indicator"
 
@@ -10591,6 +10655,17 @@ def render_danip_me_management_hub():
         # were detected and many DHIS2 indicators were therefore invisible.
         if _me_hub_is_long_indicator_data(api_df):
             api_df = _me_hub_expand_long_indicator_data(api_df)
+
+        # IMPORTANT: The dataframe only contains indicators for which DHIS2
+        # returned observations. If the analytics URL explicitly requested
+        # additional dx members with no observations, those indicators would
+        # otherwise disappear from the M&E dropdown. Add the complete dx
+        # universe from the source URL as empty columns so every requested
+        # indicator remains selectable.
+        api_df = _me_hub_add_source_indicator_universe(
+            api_df,
+            api_source_url,
+        )
 
     api_view = _me_hub_build_api_view(api_df)
     api_programs = api_view["programs"]
