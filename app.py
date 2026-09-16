@@ -24,8 +24,6 @@ import requests
 import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI
-from ai_public_website_builder import render_ai_public_website_builder
-from my_reports_monitoring import render_my_reports_monitoring
 
 # Optional Word export dependency. Excel export uses pandas/openpyxl.
 try:
@@ -10106,34 +10104,271 @@ def _me_hub_responsive_css():
     """, unsafe_allow_html=True)
 
 
+def _me_hub_find_indicator_dimension(df):
+    """Find the DHIS2 long-format indicator dimension (usually dx)."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+
+    exact = {
+        "dx", "indicator", "indicator id", "indicator_id",
+        "data element", "data element id", "dataelement",
+        "metric", "measure"
+    }
+    for c in df.columns:
+        low = str(c).strip().lower()
+        if low in exact:
+            return c
+
+    for c in df.columns:
+        low = str(c).strip().lower()
+        if re.search(r"(^|[\s_])dx($|[\s_])", low):
+            return c
+
+    return None
+
+
+def _me_hub_find_indicator_value(df):
+    """Find the numeric value field used by DHIS2 long-format responses."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+
+    exact = {
+        "value", "values", "actual value", "result",
+        "indicator value", "data value", "datavalue"
+    }
+    for c in df.columns:
+        low = str(c).strip().lower()
+        if low in exact:
+            return c
+
+    # Only use a generic numeric field as the value field when it is clearly
+    # paired with an indicator dimension.
+    for c in df.columns:
+        low = str(c).strip().lower()
+        if low in {"actual", "achievement"}:
+            return c
+
+    return None
+
+
+def _me_hub_is_long_indicator_data(df):
+    """Return True when the loaded DHIS2/API table is indicator-long format."""
+    indicator_col = _me_hub_find_indicator_dimension(df)
+    value_col = _me_hub_find_indicator_value(df)
+    return bool(indicator_col and value_col and indicator_col != value_col)
+
+
+def _me_hub_expand_long_indicator_data(df):
+    """Convert DHIS2 long indicator data (dx/value) into a wide M&E Hub view.
+
+    This is deliberately local to the M&E Hub. The original API dataframe in
+    session_state is never modified.
+
+    Example:
+        dx       value   pe       ou
+        IND001   85      2026Q1   OU1
+        IND002   72      2026Q1   OU1
+
+    becomes:
+        pe       ou       IND001   IND002
+        2026Q1  OU1      85       72
+
+    All indicator IDs returned by the source are retained, including indicators
+    that have zero values. Metadata/dimension columns are preserved where they
+    form the row grain.
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return df.copy() if isinstance(df, pd.DataFrame) else df
+
+    indicator_col = _me_hub_find_indicator_dimension(df)
+    value_col = _me_hub_find_indicator_value(df)
+
+    if not indicator_col or not value_col or indicator_col == value_col:
+        return df.copy()
+
+    work = df.copy()
+
+    # Clean indicator identifiers/names without dropping them.
+    work["__ME_INDICATOR_KEY__"] = (
+        work[indicator_col]
+        .astype("string")
+        .fillna("")
+        .str.strip()
+    )
+    work = work[work["__ME_INDICATOR_KEY__"] != ""].copy()
+
+    if work.empty:
+        return df.copy()
+
+    work["__ME_INDICATOR_VALUE__"] = pd.to_numeric(
+        work[value_col], errors="coerce"
+    )
+
+    period_col = find_period_column(work)
+    ou_col = find_ou_column(work)
+
+    # Keep the normal DHIS2 dimensions at row level. Do not use arbitrary
+    # descriptive columns as a pivot grain because that can split indicators.
+    dimension_cols = []
+    for c in [period_col, ou_col]:
+        if c and c not in dimension_cols:
+            dimension_cols.append(c)
+
+    # Retain other common DHIS2 dimensions when they exist.
+    dimension_aliases = {
+        "pe", "period", "periodid", "periodcode",
+        "ou", "organisationunit", "organisationunitid",
+        "orgunit", "org unit", "level"
+    }
+    for c in work.columns:
+        low = str(c).strip().lower()
+        if c in {indicator_col, value_col,
+                 "__ME_INDICATOR_KEY__", "__ME_INDICATOR_VALUE__"}:
+            continue
+        if low in dimension_aliases and c not in dimension_cols:
+            dimension_cols.append(c)
+
+    # If there is no obvious dimension, create one row per source table.
+    if not dimension_cols:
+        dimension_cols = ["__ME_SOURCE_ROW__"]
+        work["__ME_SOURCE_ROW__"] = 0
+
+    # Preserve the full indicator universe before pivoting. This prevents
+    # indicators with all-null values in a particular slice from disappearing.
+    indicator_universe = (
+        work["__ME_INDICATOR_KEY__"]
+        .dropna()
+        .astype(str)
+        .drop_duplicates()
+        .tolist()
+    )
+
+    # Sum duplicate observations only when the source itself has repeated
+    # records at the same dimension + indicator grain.
+    wide = work.pivot_table(
+        index=dimension_cols,
+        columns="__ME_INDICATOR_KEY__",
+        values="__ME_INDICATOR_VALUE__",
+        aggfunc="sum",
+        dropna=False,
+    ).reset_index()
+
+    wide.columns = [str(c) for c in wide.columns]
+
+    # Explicitly restore every indicator column from the source universe.
+    # Reindexing guarantees the dropdown sees the complete indicator list.
+    for indicator in indicator_universe:
+        if indicator not in wide.columns:
+            wide[indicator] = np.nan
+
+    # Keep useful metadata that is constant within the pivot grain.
+    used = set(dimension_cols + [indicator_col, value_col,
+                                 "__ME_INDICATOR_KEY__",
+                                 "__ME_INDICATOR_VALUE__"])
+    metadata_candidates = [
+        c for c in df.columns
+        if c not in used and c not in wide.columns
+    ]
+    for col in metadata_candidates:
+        try:
+            nunique = (
+                work.groupby(dimension_cols, dropna=False)[col]
+                .nunique(dropna=True)
+            )
+            if not nunique.empty and nunique.max() <= 1:
+                meta = (
+                    work.groupby(dimension_cols, dropna=False)[col]
+                    .first()
+                    .reset_index()
+                )
+                wide = wide.merge(meta, on=dimension_cols, how="left")
+        except Exception:
+            continue
+
+    if "__ME_SOURCE_ROW__" in wide.columns:
+        wide = wide.drop(columns=["__ME_SOURCE_ROW__"], errors="ignore")
+
+    # Put standard dimensions first, followed by every indicator.
+    ordered = [c for c in dimension_cols if c in wide.columns]
+    ordered += [
+        c for c in indicator_universe
+        if c in wide.columns and c not in ordered
+    ]
+    ordered += [c for c in wide.columns if c not in ordered]
+    return wide[ordered]
+
+
 def _me_hub_indicator_columns(df):
-    """Detect numeric indicator/value columns from a DHIS2/API dataset."""
+    """Return the COMPLETE indicator universe from wide or DHIS2 long data.
+
+    Wide data:
+        Numeric indicator columns are detected without requiring indicator
+        names to contain words such as VAS/WIFA/Zinc.
+
+    Long data:
+        Every distinct value in dx/indicator/data-element is returned after
+        conversion to the M&E Hub's wide representation.
+    """
     if not isinstance(df, pd.DataFrame) or df.empty:
         return []
+
+    # DHIS2 analytics commonly returns dx + value. In that case the indicators
+    # live in ROW VALUES, not in dataframe column names.
+    if _me_hub_is_long_indicator_data(df):
+        indicator_col = _me_hub_find_indicator_dimension(df)
+        values = (
+            df[indicator_col]
+            .dropna()
+            .astype(str)
+            .str.strip()
+        )
+        values = values[values != ""].drop_duplicates().tolist()
+        return sorted(values, key=lambda x: x.lower())
+
     period_col = find_period_column(df)
     ou_col = find_ou_column(df)
+
     excluded_words = [
-        "period", "event date", "date", "organisation", "organization", "org unit",
-        "facility", "program", "programme", "project", "sponsor", "department",
-        "status", "target", "forecast", "budget", "actual cost", "expenditure",
-        "eac", "start date", "finish date", "end date", "created", "updated"
+        "period", "event date", "date", "organisation", "organization",
+        "org unit", "facility", "program", "programme", "project",
+        "sponsor", "department", "status", "target", "forecast", "budget",
+        "actual cost", "expenditure", "eac", "start date", "finish date",
+        "end date", "created", "updated"
     ]
-    exact_exclude = {str(x).strip().lower() for x in [period_col, ou_col] if x is not None}
-    candidates=[]
+    exact_exclude = {
+        str(x).strip().lower()
+        for x in [period_col, ou_col]
+        if x is not None
+    }
+
+    candidates = []
     for c in df.columns:
-        name=str(c).strip(); low=name.lower()
-        if low in exact_exclude or low in {"id","uid","uuid","code","year","month","quarter","level","rank"}:
+        name = str(c).strip()
+        low = name.lower()
+
+        if low in exact_exclude:
             continue
+
+        if low in {
+            "id", "uid", "uuid", "code", "year", "month",
+            "quarter", "level", "rank", "value", "values"
+        }:
+            continue
+
         if any(w in low for w in excluded_words):
             continue
-        vals=pd.to_numeric(df[c], errors="coerce")
-        n=int(vals.notna().sum())
-        if n==0: continue
-        hint=any(k in low for k in ["indicator","coverage","rate","percent","%","numerator","denominator","vas","wifa","zinc","mnhn","usi","ff","icmnci"])
-        candidates.append((c,n,hint))
-    candidates.sort(key=lambda x:(not x[2],-x[1],str(x[0]).lower()))
-    return [x[0] for x in candidates]
 
+        vals = pd.to_numeric(df[c], errors="coerce")
+        n = int(vals.notna().sum())
+
+        # Keep only columns that actually contain a numeric observation.
+        if n == 0:
+            continue
+
+        candidates.append((c, n))
+
+    candidates.sort(key=lambda x: (-x[1], str(x[0]).lower()))
+    return [x[0] for x in candidates]
 
 def _me_hub_indicator_label(name):
     return " ".join(str(name).replace("_"," ").replace("-"," ").split()) or "Indicator"
@@ -10345,6 +10580,16 @@ def render_danip_me_management_hub():
         # Always expose organisation names in the M&E Hub filters/charts.
         # The original loaded dataframe remains untouched in session state.
         api_df = _me_hub_resolve_organisation_names(api_df, api_source_url)
+
+        # IMPORTANT:
+        # DHIS2 Analytics can return indicators in long format (dx + value).
+        # Convert that format to the same wide structure used by the Hub so
+        # every returned indicator becomes available to the dropdown/charts.
+        # This fixes the previous behaviour where only numeric COLUMN names
+        # were detected and many DHIS2 indicators were therefore invisible.
+        if _me_hub_is_long_indicator_data(api_df):
+            api_df = _me_hub_expand_long_indicator_data(api_df)
+
     api_view = _me_hub_build_api_view(api_df)
     api_programs = api_view["programs"]
     api_finance = api_view["finance"]
@@ -11064,49 +11309,12 @@ def _meal_build_excel_bytes(sheets):
 POWERBI_API_HOST = os.getenv("POWERBI_API_HOST", "0.0.0.0")
 POWERBI_API_PORT = int(os.getenv("POWERBI_API_PORT", "8502"))
 
-# ============================================================
-# POWER BI PRODUCTION CONFIGURATION
-# ============================================================
-# IMPORTANT:
-# Streamlit Cloud serves the Streamlit UI on *.streamlit.app.
-# It does NOT expose the secondary port 8502 as /api/powerbi/*.
-#
-# Therefore:
-#   POWERBI_LOCAL_API_ENABLED=true
-#       -> local Power BI Desktop development only.
-#
-#   POWERBI_API_BASE_URL=<REAL HTTPS API HOST>
-#       -> production Power BI Service / scheduled refresh.
-#
-# Do NOT set POWERBI_API_BASE_URL to the Streamlit UI URL.
-# ============================================================
-POWERBI_LOCAL_API_ENABLED = (
-    _get_secret("POWERBI_LOCAL_API_ENABLED", "false").lower()
-    in ("1", "true", "yes", "on")
-)
-
-POWERBI_UI_URL = _get_secret(
-    "POWERBI_UI_URL",
-    "https://mdl-ni-ai.streamlit.app",
-).rstrip("/")
-
-POWERBI_API_BASE_URL = _get_secret(
-    "POWERBI_API_BASE_URL",
-    "",
-).rstrip("/")
-
-# Production key is read from Streamlit Secrets / environment.
-# If no key is configured, NEXUS automatically creates a secure runtime key
-# for the current application process. For Power BI Service, store the key
-# permanently as POWERBI_API_KEY in Streamlit Secrets AND in the API service.
+# Public Power BI API service.
+# IMPORTANT: this must be a separate HTTPS API service, not the Streamlit UI URL.
+POWERBI_API_BASE_URL = _get_secret("POWERBI_API_BASE_URL", "").rstrip("/")
 POWERBI_API_KEY = _get_secret("POWERBI_API_KEY", "")
-POWERBI_AUTO_GENERATE_API_KEY = (
-    _get_secret("POWERBI_AUTO_GENERATE_API_KEY", "true").lower()
-    in ("1", "true", "yes", "on")
-)
-
 POWERBI_API_RUNTIME = {
-    "api_key": POWERBI_API_KEY or None,
+    "api_key": None,
     "wide": [],
     "fact": [],
     "raw": [],
@@ -11114,12 +11322,6 @@ POWERBI_API_RUNTIME = {
 }
 POWERBI_API_SERVER_STARTED = False
 POWERBI_API_SERVER_LOCK = threading.Lock()
-
-# Use a configured secret immediately; otherwise the workspace will generate
-# a secure runtime key automatically when it is first displayed/used.
-if POWERBI_API_KEY:
-    POWERBI_API_RUNTIME["api_key"] = POWERBI_API_KEY
-
 
 
 def _powerbi_json_default(value):
@@ -11287,47 +11489,16 @@ def _powerbi_prepare_tables(df):
 
 
 def _powerbi_generate_api_key():
-    """Generate a cryptographically secure NEXUS Power BI API key."""
     key = "nexus_pbi_" + secrets.token_urlsafe(32)
     POWERBI_API_RUNTIME["api_key"] = key
     st.session_state["powerbi_api_key"] = key
     return key
 
 
-def _powerbi_get_or_create_api_key():
-    """
-    Return the configured production key or automatically generate one.
-
-    A configured POWERBI_API_KEY is preferred because it survives Streamlit
-    restarts and can be shared with the separately hosted HTTPS API service.
-    If no configured key exists, a secure runtime key is generated once for
-    the current Streamlit process/session.
-    """
-    configured = str(POWERBI_API_KEY or "").strip()
-    if configured:
-        POWERBI_API_RUNTIME["api_key"] = configured
-        st.session_state["powerbi_api_key"] = configured
-        return configured
-
-    session_key = str(st.session_state.get("powerbi_api_key", "")).strip()
-    if session_key:
-        POWERBI_API_RUNTIME["api_key"] = session_key
-        return session_key
-
-    if POWERBI_AUTO_GENERATE_API_KEY:
-        return _powerbi_generate_api_key()
-
-    return ""
-
-
 def _powerbi_api_authorized(headers):
     supplied = headers.get("x-api-key", "")
-    expected = POWERBI_API_RUNTIME.get("api_key") or POWERBI_API_KEY
-    return bool(
-        expected
-        and supplied
-        and hmac.compare_digest(str(supplied).strip(), str(expected).strip())
-    )
+    expected = POWERBI_API_RUNTIME.get("api_key")
+    return bool(expected and supplied and hmac.compare_digest(str(supplied), str(expected)))
 
 
 
@@ -11336,10 +11507,7 @@ def _powerbi_external_api_enabled():
 
 
 def _powerbi_publish_external(wide, fact, raw):
-    """Publish current datasets to the configured public HTTPS Power BI API.
-
-    The Streamlit UI URL is intentionally not treated as an API host.
-    """
+    """Publish current datasets to the separate public HTTPS Power BI API."""
     if not _powerbi_external_api_enabled():
         return False, "Public Power BI API is not configured."
     if "streamlit.app" in POWERBI_API_BASE_URL.lower():
@@ -11448,10 +11616,8 @@ def _powerbi_start_embedded_server():
         POWERBI_API_SERVER_STARTED = False
 
 
-# The embedded API is OFF by default.
-# Enable it only for local development with:
-# POWERBI_LOCAL_API_ENABLED=true
-if POWERBI_LOCAL_API_ENABLED:
+# Keep the embedded API only for local Desktop compatibility.
+if not POWERBI_API_BASE_URL:
     _powerbi_start_embedded_server()
 
 
@@ -11518,180 +11684,51 @@ def _render_universal_powerbi_workspace():
         st.dataframe(fact.head(5000), use_container_width=True, hide_index=True, height=350)
 
     # API key and connection details.
-    # Automatically create the key when none is configured.
-    existing_key = _powerbi_get_or_create_api_key()
+    configured_key = POWERBI_API_KEY.strip()
+    session_key = st.session_state.get("powerbi_api_key", "")
+    existing_key = configured_key or session_key
 
-    st.markdown("### 🔐 Power BI API Connection")
+    if not configured_key:
+        if st.button("🔑 Generate Local Power BI API Key", key="pbi_generate_api_key", use_container_width=False):
+            existing_key = _powerbi_generate_api_key()
+            st.session_state["powerbi_api_key"] = existing_key
 
     if existing_key:
-        st.markdown("**Power BI API Key:**")
         st.code(existing_key, language="text")
-
-        # Downloadable credential package. The key is never put into a URL.
-        # This downloads a local TXT file containing the current key and
-        # Power BI connection instructions so the user can save/share it
-        # securely with the authorized Power BI administrator.
-        download_base = POWERBI_API_BASE_URL
-        if download_base and "streamlit.app" not in download_base.lower():
-            download_fact_url = f"{download_base}/api/powerbi/fact"
-            download_wide_url = f"{download_base}/api/powerbi/wide"
-            download_raw_url = f"{download_base}/api/powerbi/raw"
-        else:
-            download_fact_url = "CONFIGURE_POWERBI_API_BASE_URL/api/powerbi/fact"
-            download_wide_url = "CONFIGURE_POWERBI_API_BASE_URL/api/powerbi/wide"
-            download_raw_url = "CONFIGURE_POWERBI_API_BASE_URL/api/powerbi/raw"
-
-        api_key_download = (
-            "NEXUS POWER BI API CREDENTIALS\n"
-            "================================\n\n"
-            f"API Key: {existing_key}\n\n"
-            "Authentication Header:\n"
-            "x-api-key: " + existing_key + "\n\n"
-            "Power BI API Endpoints:\n"
-            f"WIDE: {download_wide_url}\n"
-            f"FACT: {download_fact_url}\n"
-            f"RAW:  {download_raw_url}\n\n"
-            "Power Query — Normalized Indicator Fact Dataset:\n"
-            "-----------------------------------------------\n"
-            "let\n"
-            "    Source = Json.Document(\n"
-            "        Web.Contents(\n"
-            f'            "{download_fact_url}",\n'
-            "            [\n"
-            "                Headers = [\n"
-            f'                    #"x-api-key" = "{existing_key}"\n'
-            "                ]\n"
-            "            ]\n"
-            "        )\n"
-            "    ),\n"
-            "    Data = Table.FromRecords(Source[data])\n"
-            "in\n"
-            "    Data\n\n"
-            "SECURITY: Keep this file private. Do not publish the API key.\n"
-            "Use the API key only in the x-api-key HTTP header.\n"
-        )
-
-        dl_col1, dl_col2 = st.columns([1, 1])
-        with dl_col1:
-            st.download_button(
-                "⬇️ Download API Key + Power BI Setup",
-                data=api_key_download,
-                file_name="NEXUS_PowerBI_API_Credentials.txt",
-                mime="text/plain",
-                use_container_width=True,
-                key="download_powerbi_api_credentials",
-            )
-        with dl_col2:
-            st.download_button(
-                "⬇️ Download API Key Only",
-                data=existing_key + "\n",
-                file_name="NEXUS_PowerBI_API_Key.txt",
-                mime="text/plain",
-                use_container_width=True,
-                key="download_powerbi_api_key_only",
-            )
-
-        st.success(
-            "✅ This API key is authorized to access the Wide, Fact and Raw "
-            "Power BI datasets through the `x-api-key` HTTP header."
-        )
-        st.warning(
-            "Keep this API key private. Use it in the `x-api-key` header, "
-            "never in the URL. For Power BI Service, store the same key in "
-            "the API service and in your deployment secrets."
-        )
-    else:
-        st.error(
-            "Power BI API key generation is disabled. Configure "
-            "POWERBI_API_KEY or enable POWERBI_AUTO_GENERATE_API_KEY."
-        )
-
-    public_api_base = POWERBI_API_BASE_URL
-    invalid_streamlit_base = bool(
-        public_api_base and "streamlit.app" in public_api_base.lower()
-    )
-
-    if invalid_streamlit_base:
-        st.error(
-            "POWERBI_API_BASE_URL is pointing to the Streamlit UI. "
-            "That URL cannot expose the custom /api/powerbi route on Streamlit Cloud."
-        )
-        public_api_base = ""
-
-    if public_api_base:
-        wide_url = f"{public_api_base}/api/powerbi/wide"
-        fact_url = f"{public_api_base}/api/powerbi/fact"
-        raw_url = f"{public_api_base}/api/powerbi/raw"
-
-        st.markdown("**Power BI Service — production API endpoints:**")
-        st.code(
-            f"WIDE: {wide_url}\n"
-            f"FACT: {fact_url}\n"
-            f"RAW:  {raw_url}",
-            language="text",
-        )
-
-        if external_publish_ok:
-            st.success("☁️ Current dataset published to the production Power BI API.")
-        elif external_publish_message:
-            st.warning(str(external_publish_message))
-
-        st.markdown("**Power Query — Normalized Indicator Fact Dataset:**")
-        fact_query_key = existing_key or "YOUR_POWERBI_API_KEY"
+        st.warning("Keep this API key private. Put it in the x-api-key header, never in the URL hostname.")
+        local_url=f"http://localhost:{POWERBI_API_PORT}/api/powerbi/wide"
+        public_api_base=POWERBI_API_BASE_URL
+        invalid_streamlit_base=bool(public_api_base and "streamlit.app" in public_api_base.lower())
+        public_url=(f"{public_api_base}/api/powerbi/wide" if public_api_base and not invalid_streamlit_base else "")
+        st.markdown("**Power BI Desktop — local development:**")
+        st.code(local_url, language="text")
+        if invalid_streamlit_base:
+            st.error("POWERBI_API_BASE_URL is set to the Streamlit UI URL. It cannot serve the custom /api/powerbi route. Deploy powerbi_api.py separately over HTTPS.")
+        if public_url:
+            st.markdown("**Power BI Service — public API:**")
+            st.code(public_url, language="text")
+            if external_publish_ok:
+                st.success("☁️ Current dataset published to the public Power BI API.")
+            elif external_publish_message:
+                st.warning(str(external_publish_message))
+        st.markdown("**Power Query:**")
+        query_url=public_url or local_url
         st.code(
             'let\n'
             '    Source = Json.Document(\n'
-            f'        Web.Contents(\n            "{fact_url}",\n'
-            '            [\n'
-            '                Headers = [\n'
-            f'                    #"x-api-key" = "{fact_query_key}"\n'
-            '                ]\n'
-            '            ]\n'
+            f'        Web.Contents(\n            "{query_url}",\n'
+            '            [Headers=[#"x-api-key"="YOUR_POWERBI_API_KEY"]]\n'
             '        )\n'
             '    ),\n'
             '    Data = Table.FromRecords(Source[data])\n'
             'in\n'
-            '    Data',
-            language="powerquery",
-        )
-
-        st.caption(
-            "The same API key protects Wide, Fact and Raw. Power BI sends it "
-            "only through the x-api-key HTTP header."
-        )
-
+            '    Data', language="powerquery")
+        if public_url:
+            st.caption("Use the public API URL in Power BI Service and the same POWERBI_API_KEY configured in both services.")
+        else:
+            st.caption("Local Power BI Desktop can use localhost. Power BI Service requires the separately deployed HTTPS API.")
     else:
-        st.markdown("**NEXUS Streamlit UI:**")
-        st.code(POWERBI_UI_URL, language="text")
-
-        st.info(
-            "The Streamlit URL above is the NEXUS application URL, not a REST API endpoint. "
-            "For Power BI Service, configure POWERBI_API_BASE_URL with the URL of a real "
-            "HTTPS API service that exposes /api/powerbi/wide, /api/powerbi/fact, and "
-            "/api/powerbi/raw."
-        )
-
-        if POWERBI_LOCAL_API_ENABLED:
-            local_wide_url = f"http://localhost:{POWERBI_API_PORT}/api/powerbi/wide"
-            local_fact_url = f"http://localhost:{POWERBI_API_PORT}/api/powerbi/fact"
-            local_raw_url = f"http://localhost:{POWERBI_API_PORT}/api/powerbi/raw"
-            st.markdown("**Power BI Desktop — local development only:**")
-            st.code(
-                f"WIDE: {local_wide_url}\n"
-                f"FACT: {local_fact_url}\n"
-                f"RAW:  {local_raw_url}",
-                language="text",
-            )
-            st.caption(
-                "Local API mode is enabled. The same generated API key is required "
-                "in the x-api-key header."
-            )
-        elif existing_key:
-            st.caption(
-                "A secure API key is active for this NEXUS session. For production, use the same key on the Power BI API service. For persistent "
-                "Power BI Service access, save this key as POWERBI_API_KEY and "
-                "configure POWERBI_API_BASE_URL with your real HTTPS API host."
-            )
+        st.info("Configure POWERBI_API_BASE_URL and POWERBI_API_KEY for Power BI Service, or generate a local key for Power BI Desktop.")
 
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -15320,42 +15357,29 @@ div[data-testid="stRadio"] input:focus-visible {
 # ============================================================
 # TOP-LEVEL DANIP WORKSPACE NAVIGATION
 # ============================================================
-# Horizontal workspace selector.
-#
-# IMPORTANT:
-#   My Reports & Monitoring is explicitly included here.
-#   Each menu item has an explicit elif route.
-# ============================================================
+# Use a horizontal Streamlit radio as the workspace switcher rather than
+# st.tabs. The refresh control is placed beside the workspace selector so
+# users can restart the application without using the browser refresh icon.
 
-nav_col, refresh_col = st.columns(
-    [8.5, 1.5],
-    gap="small",
-    vertical_alignment="center",
-)
+nav_col, refresh_col = st.columns([8.5, 1.5], gap="small", vertical_alignment="center")
 
 with nav_col:
-
     workspace = st.radio(
         "DANIP workspace",
         [
             "🤖 DANIP AI Data Analyst",
             "🧭 DANIP M&E Management Hub",
             "📊 Universal Power BI Analytics",
-            "🌐 AI Public Website Builder",
-            "📅 My Reports & Monitoring",
         ],
         horizontal=True,
         label_visibility="collapsed",
         key="danip_workspace_selector",
     )
 
-
 with refresh_col:
-
     st.markdown(
         """
         <style>
-
         div[data-testid="stButton"] > button.nexus-top-refresh {
             min-height: 38px !important;
             height: 38px !important;
@@ -15368,100 +15392,44 @@ with refresh_col:
             padding: 0 12px !important;
             white-space: nowrap !important;
         }
-
         div[data-testid="stButton"] > button.nexus-top-refresh:hover {
             background: #244f66 !important;
             border-color: #244f66 !important;
             color: #ffffff !important;
         }
-
         </style>
         """,
         unsafe_allow_html=True,
     )
-
-    if st.button(
-        "🔄 Refresh",
-        key="nexus_top_refresh",
-        use_container_width=True,
-    ):
-
-        # Preserve authenticated DHIS2 session information.
+    if st.button("🔄 Refresh", key="nexus_top_refresh", use_container_width=True):
+        # Full application reset: also remove the pasted API/Data URL so the
+        # user returns to a completely blank starting point. Persistent MEAL
+        # records in danip_meal.db are intentionally preserved.
         _auth_state = {
-            "danip_authenticated": st.session_state.get(
-                "danip_authenticated",
-                False,
-            ),
-            "danip_user": st.session_state.get(
-                "danip_user",
-                {},
-            ),
-            "danip_access_token": st.session_state.get(
-                "danip_access_token",
-                "",
-            ),
-            "danip_refresh_token": st.session_state.get(
-                "danip_refresh_token",
-                "",
-            ),
+            "danip_authenticated": st.session_state.get("danip_authenticated", False),
+            "danip_user": st.session_state.get("danip_user", {}),
+            "danip_access_token": st.session_state.get("danip_access_token", ""),
+            "danip_refresh_token": st.session_state.get("danip_refresh_token", ""),
         }
-
-        # Clear application state.
         st.session_state.clear()
-
-        # Restore authentication state.
         st.session_state.update(_auth_state)
-
-        # Explicitly clear the current data/API URL.
         st.session_state["data_url_input"] = ""
         st.session_state["last_analyzed_url"] = ""
         st.session_state["loaded_source_url"] = ""
         st.session_state["data_loaded"] = False
-
-        # Clear generated website state.
-        st.session_state["public_website_generated"] = False
-        st.session_state["public_website_html"] = ""
-        st.session_state["public_website_zip"] = b""
-
         try:
             st.query_params.clear()
         except Exception:
             pass
-
         st.rerun()
 
-
-# ============================================================
-# WORKSPACE ROUTING
-# ============================================================
-
 if workspace == "🤖 DANIP AI Data Analyst":
-
     render_existing_danip_ai_app()
-
-
 elif workspace == "🧭 DANIP M&E Management Hub":
-
     render_danip_me_management_hub()
-
-
-elif workspace == "📊 Universal Power BI Analytics":
-
+else:
     _render_universal_powerbi_workspace()
-
-
-elif workspace == "🌐 AI Public Website Builder":
-
-    render_ai_public_website_builder()
-
-
-elif workspace == "📅 My Reports & Monitoring":
-
-    render_my_reports_monitoring()
-
 
 # ============================================================
 # END — DANIP AI + SEPARATE DANIP M&E MANAGEMENT HUB
 # ============================================================
-
-
