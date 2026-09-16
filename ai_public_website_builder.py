@@ -2558,40 +2558,309 @@ def _website_quality_checks(df):
 
 def _render_analysis_dashboard(df, profile, selected_indicator, selected_organisation=None):
     """
-    STANDARD DANIP ANALYSIS
+    STANDARD DANIP ANALYTICAL MODEL
 
     X = Period Name + Organisation Name
-    Y = selected indicator
+    Y = Indicator
 
-    No country-only or overall total is used as the primary analytical model.
+    Primary indicator supports "All indicators".
+    Primary organisation supports "All organisations".
+
+    When ALL indicators is selected, every numeric indicator is analysed
+    independently at the same Period × Organisation grain. Organisations
+    remain separate series and are never collapsed into an overall total.
     """
     safe_df = _public_safe_dataframe(df)
     period_col = profile.get("period_column")
     org_col = profile.get("organisation_column")
 
+    if not period_col or not org_col:
+        st.error(
+            "Analysis requires BOTH Period Name and Organisation Name. "
+            "Country-only or overall analysis is disabled."
+        )
+        quality = _data_quality_analysis(safe_df, profile)
+        return {
+            "trend": {"available": False, "reason": "Period Name and Organisation Name are required."},
+            "analytical_table": pd.DataFrame(),
+            "quality": quality,
+            "learning": {"observations": [], "learning_questions": [], "quality_signals": []},
+        }
+
+    all_mode = selected_indicator == "All indicators"
+    indicator_names = [x["name"] for x in profile.get("indicators", [])]
+
+    quality = _data_quality_analysis(safe_df, profile)
+
+    # --------------------------------------------------------
+    # ALL INDICATORS
+    # --------------------------------------------------------
+    if all_mode:
+        trend_results = {}
+        table_parts = []
+        all_observations = []
+        all_questions = []
+        all_quality_signals = []
+
+        for indicator in indicator_names:
+            trend = _trend_analysis(
+                safe_df,
+                profile,
+                indicator,
+                organisation=selected_organisation,
+            )
+            trend_results[indicator] = trend
+
+            if trend.get("available"):
+                part = trend["data"].copy()
+                part.insert(0, "Indicator", indicator)
+                table_parts.append(part)
+
+                learning = _build_learning_insights(
+                    safe_df,
+                    profile,
+                    indicator,
+                    trend,
+                    part,
+                    quality,
+                )
+                all_observations.extend(learning.get("observations", []))
+                all_questions.extend(learning.get("learning_questions", []))
+                all_quality_signals.extend(learning.get("quality_signals", []))
+
+        analytical_table = (
+            pd.concat(table_parts, ignore_index=True)
+            if table_parts
+            else pd.DataFrame(
+                columns=["Indicator", period_col, org_col, "value", "observations"]
+            )
+        )
+
+        st.markdown("### 📊 Analytical Overview")
+
+        k1, k2, k3, k4, k5 = st.columns(5)
+        with k1:
+            st.metric("Indicators", f"{len(indicator_names):,}")
+        with k2:
+            st.metric("Period × Organisation", f"{len(analytical_table):,}")
+        with k3:
+            org_count = (
+                analytical_table[org_col].nunique()
+                if not analytical_table.empty and org_col in analytical_table
+                else 0
+            )
+            st.metric("Organisations", f"{org_count:,}")
+        with k4:
+            period_count = (
+                analytical_table[period_col].nunique()
+                if not analytical_table.empty and period_col in analytical_table
+                else 0
+            )
+            st.metric("Periods", f"{period_count:,}")
+        with k5:
+            st.metric("Completeness", _pct(quality["completeness"]))
+
+        st.caption(
+            f"Analytical model: X = **{period_col} + {org_col}** | "
+            "Y = **All Indicators**. Each indicator is analysed separately."
+        )
+
+        tab1, tab2, tab3, tab4 = st.tabs([
+            "📈 Period × Organisation",
+            "📋 Analytical Data",
+            "🧠 Learning",
+            "🛡️ Data Quality",
+        ])
+
+        with tab1:
+            if not trend_results:
+                st.info("No valid Period × Organisation × Indicator observations available.")
+            else:
+                for indicator, trend in trend_results.items():
+                    if not trend.get("available"):
+                        continue
+
+                    with st.expander(f"📈 {indicator}", expanded=False):
+                        chart = trend["data"].copy()
+                        chart[period_col] = chart[period_col].astype(str)
+                        chart[org_col] = chart[org_col].astype(str)
+
+                        pivot = chart.pivot_table(
+                            index=period_col,
+                            columns=org_col,
+                            values="value",
+                            aggfunc="sum",
+                        )
+                        ordered = _sorted_period_values(pivot.index.to_series())
+                        pivot = pivot.reindex(ordered)
+
+                        st.line_chart(pivot, use_container_width=True)
+                        st.caption(
+                            f"X-axis: {period_col} (Period Name) · "
+                            f"Series: {org_col} (Organisation Name) · "
+                            f"Y-axis: {indicator}"
+                        )
+
+                        summary = trend.get("summary")
+                        if summary:
+                            a, b, c = st.columns(3)
+                            with a:
+                                st.metric("Direction", summary["direction"].title())
+                            with b:
+                                st.metric(
+                                    "Absolute change",
+                                    _fmt(summary["absolute_change"]),
+                                )
+                            with c:
+                                pct = summary["percent_change"]
+                                st.metric(
+                                    "Relative change",
+                                    _pct(pct) if pct is not None else "N/A",
+                                )
+                        else:
+                            st.caption(
+                                "All organisations are shown as separate series. "
+                                "Select one organisation above to calculate First → Last change."
+                            )
+
+        with tab2:
+            if not analytical_table.empty:
+                display_cols = ["Indicator", period_col, org_col, "value", "observations"]
+                display_cols = [c for c in display_cols if c in analytical_table.columns]
+                st.dataframe(
+                    analytical_table[display_cols],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+                st.caption(
+                    "Required analytical grain: Indicator × Period Name × "
+                    "Organisation Name. Organisations are not aggregated together."
+                )
+            else:
+                st.info("No Period × Organisation observations available.")
+
+        with tab3:
+            st.markdown(
+                """
+                <div class="danip-learning-box">
+                    <b>🧠 Learning from the Analysis</b><br>
+                    ALL indicators are analysed independently using the
+                    Period Name × Organisation Name × Indicator grain.
+                    No country-only or overall organisation aggregation is used.
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            st.markdown("#### What the data shows")
+            if all_observations:
+                for observation in all_observations[:50]:
+                    st.info(f"📌 {observation}")
+            else:
+                st.info("No indicator-level observations are available.")
+
+            st.markdown("#### Questions for further analysis")
+            if all_questions:
+                for question in all_questions[:50]:
+                    st.warning(f"🔎 {question}")
+            else:
+                st.info("No additional learning questions are available.")
+
+        with tab4:
+            q1, q2, q3 = st.columns(3)
+            with q1:
+                st.metric("Missing cells", f"{quality['missing_cells']:,}")
+            with q2:
+                st.metric("Missing rate", _pct(quality["missing_rate"]))
+            with q3:
+                st.metric("Duplicate rows", f"{quality['duplicate_rows']:,}")
+
+            if quality["zero_indicators"]:
+                st.warning(
+                    "High zero rates: " + ", ".join(quality["zero_indicators"][:10])
+                )
+            if quality["negative_indicators"]:
+                st.warning(
+                    "Negative values: " + ", ".join(quality["negative_indicators"][:10])
+                )
+            if quality["high_missing_columns"]:
+                st.warning(
+                    "Columns with ≥20% missing: "
+                    + ", ".join(quality["high_missing_columns"][:10])
+                )
+
+            st.dataframe(
+                pd.DataFrame([
+                    {
+                        "Indicator": x["name"],
+                        "Observations": x["observations"],
+                        "Missing": x["missing"],
+                        "Zero rate": _pct(x["zero_rate"]),
+                        "Average": x["average"],
+                        "Minimum": x["minimum"],
+                        "Maximum": x["maximum"],
+                    }
+                    for x in profile["indicators"]
+                ]),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        combined_trend = {
+            "available": bool(trend_results),
+            "indicator": "All indicators",
+            "period_column": str(period_col),
+            "organisation_column": str(org_col),
+            "organisation": selected_organisation,
+            "indicators": trend_results,
+        }
+
+        combined_learning = {
+            "observations": all_observations,
+            "learning_questions": all_questions,
+            "quality_signals": all_quality_signals,
+        }
+
+        return {
+            "trend": combined_trend,
+            "analytical_table": analytical_table,
+            "quality": quality,
+            "learning": combined_learning,
+        }
+
+    # --------------------------------------------------------
+    # SINGLE INDICATOR
+    # --------------------------------------------------------
     trend = _trend_analysis(
-        safe_df, profile, selected_indicator,
-        organisation=selected_organisation
+        safe_df,
+        profile,
+        selected_indicator,
+        organisation=selected_organisation,
     )
 
     analytical_table = _geographic_analysis(
-        safe_df, profile, selected_indicator,
-        organisation=selected_organisation
+        safe_df,
+        profile,
+        selected_indicator,
+        organisation=selected_organisation,
     )
 
-    quality = _data_quality_analysis(safe_df, profile)
     learning = _build_learning_insights(
-        safe_df, profile, selected_indicator,
-        trend, analytical_table, quality
+        safe_df,
+        profile,
+        selected_indicator,
+        trend,
+        analytical_table,
+        quality,
     )
 
     st.markdown("### 📊 Analytical Overview")
 
-    k1,k2,k3,k4,k5=st.columns(5)
+    k1, k2, k3, k4, k5 = st.columns(5)
 
-    item=next(
-        (x for x in profile["indicators"] if x["name"]==selected_indicator),
-        None
+    item = next(
+        (x for x in profile["indicators"] if x["name"] == selected_indicator),
+        None,
     )
 
     with k1:
@@ -2601,50 +2870,42 @@ def _render_analysis_dashboard(df, profile, selected_indicator, selected_organis
     with k3:
         st.metric("Total", _fmt(item["total"] if item else 0))
     with k4:
-        summary=trend.get("summary")
+        summary = trend.get("summary")
         st.metric(
             "First → Last",
             _pct(summary["percent_change"])
             if summary and summary["percent_change"] is not None
-            else ("N/A" if summary else "Select organisation")
+            else ("N/A" if summary else "Select organisation"),
         )
     with k5:
         st.metric("Completeness", _pct(quality["completeness"]))
-
-    if not period_col or not org_col:
-        st.error(
-            "Analysis requires BOTH Period Name and Organisation Name. "
-            "Country-only or overall analysis is disabled."
-        )
-        return {"trend":trend,"analytical_table":analytical_table,
-                "quality":quality,"learning":learning}
 
     st.caption(
         f"Analytical model: X = **{period_col} + {org_col}** | "
         f"Y = **{selected_indicator}**"
     )
 
-    tab1,tab2,tab3,tab4=st.tabs([
+    tab1, tab2, tab3, tab4 = st.tabs([
         "📈 Period × Organisation",
         "📋 Analytical Data",
         "🧠 Learning",
-        "🛡️ Data Quality"
+        "🛡️ Data Quality",
     ])
 
     with tab1:
         if trend.get("available"):
-            chart=trend["data"].copy()
-            chart[period_col]=chart[period_col].astype(str)
-            chart[org_col]=chart[org_col].astype(str)
+            chart = trend["data"].copy()
+            chart[period_col] = chart[period_col].astype(str)
+            chart[org_col] = chart[org_col].astype(str)
 
-            pivot=chart.pivot_table(
+            pivot = chart.pivot_table(
                 index=period_col,
                 columns=org_col,
                 values="value",
-                aggfunc="sum"
+                aggfunc="sum",
             )
-            ordered=_sorted_period_values(pivot.index.to_series())
-            pivot=pivot.reindex(ordered)
+            ordered = _sorted_period_values(pivot.index.to_series())
+            pivot = pivot.reindex(ordered)
 
             st.line_chart(pivot, use_container_width=True)
 
@@ -2655,23 +2916,29 @@ def _render_analysis_dashboard(df, profile, selected_indicator, selected_organis
             )
 
             if trend.get("summary"):
-                a,b,c=st.columns(3)
+                a, b, c = st.columns(3)
                 with a:
                     st.metric("Direction", trend["summary"]["direction"].title())
                 with b:
-                    st.metric("Absolute change", _fmt(trend["summary"]["absolute_change"]))
+                    st.metric(
+                        "Absolute change",
+                        _fmt(trend["summary"]["absolute_change"]),
+                    )
                 with c:
-                    pct=trend["summary"]["percent_change"]
-                    st.metric("Relative change", _pct(pct) if pct is not None else "N/A")
+                    pct = trend["summary"]["percent_change"]
+                    st.metric(
+                        "Relative change",
+                        _pct(pct) if pct is not None else "N/A",
+                    )
         else:
-            st.info(trend.get("reason","Analysis unavailable."))
+            st.info(trend.get("reason", "Analysis unavailable."))
 
     with tab2:
         if not analytical_table.empty:
             st.dataframe(
                 analytical_table,
                 use_container_width=True,
-                hide_index=True
+                hide_index=True,
             )
             st.caption(
                 "Required analytical grain: one Period Name × Organisation Name "
@@ -2690,7 +2957,7 @@ def _render_analysis_dashboard(df, profile, selected_indicator, selected_organis
                 further analysis, not causal conclusions.
             </div>
             """,
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
         st.markdown("#### What the data shows")
         for x in learning["observations"]:
@@ -2700,7 +2967,7 @@ def _render_analysis_dashboard(df, profile, selected_indicator, selected_organis
             st.warning(f"🔎 {x}")
 
     with tab4:
-        q1,q2,q3=st.columns(3)
+        q1, q2, q3 = st.columns(3)
         with q1:
             st.metric("Missing cells", f"{quality['missing_cells']:,}")
         with q2:
@@ -2721,25 +2988,25 @@ def _render_analysis_dashboard(df, profile, selected_indicator, selected_organis
         st.dataframe(
             pd.DataFrame([
                 {
-                    "Indicator":x["name"],
-                    "Observations":x["observations"],
-                    "Missing":x["missing"],
-                    "Zero rate":_pct(x["zero_rate"]),
-                    "Average":x["average"],
-                    "Minimum":x["minimum"],
-                    "Maximum":x["maximum"],
+                    "Indicator": x["name"],
+                    "Observations": x["observations"],
+                    "Missing": x["missing"],
+                    "Zero rate": _pct(x["zero_rate"]),
+                    "Average": x["average"],
+                    "Minimum": x["minimum"],
+                    "Maximum": x["maximum"],
                 }
                 for x in profile["indicators"]
             ]),
             use_container_width=True,
-            hide_index=True
+            hide_index=True,
         )
 
     return {
-        "trend":trend,
-        "analytical_table":analytical_table,
-        "quality":quality,
-        "learning":learning
+        "trend": trend,
+        "analytical_table": analytical_table,
+        "quality": quality,
+        "learning": learning,
     }
 
 
@@ -2927,7 +3194,8 @@ def render_ai_public_website_builder():
 
     selected_indicator = st.selectbox(
         "Primary indicator",
-        indicator_names,
+        ["All indicators"] + indicator_names,
+        index=0,
         key="public_website_primary_indicator",
     )
 
@@ -2944,6 +3212,12 @@ def render_ai_public_website_builder():
         )
         if selected_organisation == "All organisations":
             selected_organisation = None
+
+    st.caption(
+        "Default analysis: **All indicators** × **All organisations**. "
+        "All organisations remain separate series; they are never combined "
+        "into one overall total."
+    )
 
     analysis_result = _render_analysis_dashboard(
         df,
@@ -3029,7 +3303,7 @@ def render_ai_public_website_builder():
     selected_indicators = st.multiselect(
         "Select public indicators",
         indicator_names,
-        default=indicator_names[:6],
+        default=indicator_names,
         key="website_builder_indicators",
     )
 
