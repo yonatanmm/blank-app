@@ -24,7 +24,7 @@ def check_api_key(x_api_key: Optional[str]):
         )
 
 
-@app.get("/api/powerbi/wide")
+@app.get("/api/wide")
 def get_wide(x_api_key: Optional[str] = Header(None)):
 
     check_api_key(x_api_key)
@@ -45,7 +45,7 @@ def get_wide(x_api_key: Optional[str] = Header(None)):
     }
 
 
-@app.get("/api/powerbi/health")
+@app.get("/api/wide/health")
 def health():
     return {
         "status": "ok",
