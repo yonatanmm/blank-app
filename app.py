@@ -25,6 +25,7 @@ import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI
 from ai_public_website_builder import render_ai_public_website_builder
+from my_reports_monitoring import render_my_reports_monitoring
 
 # Optional Word export dependency. Excel export uses pandas/openpyxl.
 try:
@@ -15319,13 +15320,21 @@ div[data-testid="stRadio"] input:focus-visible {
 # ============================================================
 # TOP-LEVEL DANIP WORKSPACE NAVIGATION
 # ============================================================
-# Use a horizontal Streamlit radio as the workspace switcher rather than
-# st.tabs. The refresh control is placed beside the workspace selector so
-# users can restart the application without using the browser refresh icon.
+# Horizontal workspace selector.
+#
+# IMPORTANT:
+#   My Reports & Monitoring is explicitly included here.
+#   Each menu item has an explicit elif route.
+# ============================================================
 
-nav_col, refresh_col = st.columns([8.5, 1.5], gap="small", vertical_alignment="center")
+nav_col, refresh_col = st.columns(
+    [8.5, 1.5],
+    gap="small",
+    vertical_alignment="center",
+)
 
 with nav_col:
+
     workspace = st.radio(
         "DANIP workspace",
         [
@@ -15333,16 +15342,20 @@ with nav_col:
             "🧭 DANIP M&E Management Hub",
             "📊 Universal Power BI Analytics",
             "🌐 AI Public Website Builder",
+            "📅 My Reports & Monitoring",
         ],
         horizontal=True,
         label_visibility="collapsed",
         key="danip_workspace_selector",
     )
 
+
 with refresh_col:
+
     st.markdown(
         """
         <style>
+
         div[data-testid="stButton"] > button.nexus-top-refresh {
             min-height: 38px !important;
             height: 38px !important;
@@ -15355,58 +15368,100 @@ with refresh_col:
             padding: 0 12px !important;
             white-space: nowrap !important;
         }
+
         div[data-testid="stButton"] > button.nexus-top-refresh:hover {
             background: #244f66 !important;
             border-color: #244f66 !important;
             color: #ffffff !important;
         }
+
         </style>
         """,
         unsafe_allow_html=True,
     )
-    if st.button("🔄 Refresh", key="nexus_top_refresh", use_container_width=True):
-        # Full application reset: also remove the pasted API/Data URL so the
-        # user returns to a completely blank starting point. Persistent MEAL
-        # records in danip_meal.db are intentionally preserved.
+
+    if st.button(
+        "🔄 Refresh",
+        key="nexus_top_refresh",
+        use_container_width=True,
+    ):
+
+        # Preserve authenticated DHIS2 session information.
         _auth_state = {
-            "danip_authenticated": st.session_state.get("danip_authenticated", False),
-            "danip_user": st.session_state.get("danip_user", {}),
-            "danip_access_token": st.session_state.get("danip_access_token", ""),
-            "danip_refresh_token": st.session_state.get("danip_refresh_token", ""),
+            "danip_authenticated": st.session_state.get(
+                "danip_authenticated",
+                False,
+            ),
+            "danip_user": st.session_state.get(
+                "danip_user",
+                {},
+            ),
+            "danip_access_token": st.session_state.get(
+                "danip_access_token",
+                "",
+            ),
+            "danip_refresh_token": st.session_state.get(
+                "danip_refresh_token",
+                "",
+            ),
         }
+
+        # Clear application state.
         st.session_state.clear()
+
+        # Restore authentication state.
         st.session_state.update(_auth_state)
+
+        # Explicitly clear the current data/API URL.
         st.session_state["data_url_input"] = ""
         st.session_state["last_analyzed_url"] = ""
         st.session_state["loaded_source_url"] = ""
         st.session_state["data_loaded"] = False
+
+        # Clear generated website state.
+        st.session_state["public_website_generated"] = False
+        st.session_state["public_website_html"] = ""
+        st.session_state["public_website_zip"] = b""
+
         try:
             st.query_params.clear()
         except Exception:
             pass
+
         st.rerun()
+
+
+# ============================================================
+# WORKSPACE ROUTING
+# ============================================================
 
 if workspace == "🤖 DANIP AI Data Analyst":
 
     render_existing_danip_ai_app()
 
+
 elif workspace == "🧭 DANIP M&E Management Hub":
 
     render_danip_me_management_hub()
+
 
 elif workspace == "📊 Universal Power BI Analytics":
 
     _render_universal_powerbi_workspace()
 
+
 elif workspace == "🌐 AI Public Website Builder":
 
     render_ai_public_website_builder()
+
 
 elif workspace == "📅 My Reports & Monitoring":
 
     render_my_reports_monitoring()
 
+
 # ============================================================
 # END — DANIP AI + SEPARATE DANIP M&E MANAGEMENT HUB
 # ============================================================
+
 
