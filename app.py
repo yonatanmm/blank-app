@@ -15429,7 +15429,9 @@ elif workspace == "🧭 DANIP M&E Management Hub":
     render_danip_me_management_hub()
 else:
     _render_universal_powerbi_workspace()
+elif workspace == "📅 My Reports & Monitoring":
 
+    render_my_reports_monitoring()
 # ============================================================
 # END — DANIP AI + SEPARATE DANIP M&E MANAGEMENT HUB
 # ============================================================
