@@ -62,32 +62,13 @@ from urllib.parse import urlencode
 import requests
 import streamlit as st
 
+import streamlit as st
+from openai import OpenAI
 
+OPENAI_API_KEY = st.secrets["OPENAI"]["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"]
+OPENAI_MODEL = st.secrets["OPENAI"]["gpt-5"]
 
-st.write("DEBUG - root secrets:", list(st.secrets.keys()))
-
-if "OPENAI_API_KEY" in st.secrets:
-    st.success("OPENAI_API_KEY FOUND at root level")
-else:
-    st.error("OPENAI_API_KEY NOT FOUND at root level")
-
-if "OPENAI" in st.secrets:
-    st.success("OPENAI section FOUND")
-    st.write("OPENAI keys:", list(st.secrets["OPENAI"].keys()))
-else:
-    st.warning("OPENAI section NOT FOUND")
-# ============================================================
-# PAGE CONFIGURATION
-# ============================================================
-
-st.set_page_config(
-    page_title="NEXUS DANIP | Secure Access",
-    page_icon="🔐",
-    layout="centered",
-    initial_sidebar_state="collapsed",
-)
-
-
+client = OpenAI(api_key=OPENAI_API_KEY)
 # ============================================================
 # DHIS2 BASE URL
 # ============================================================
