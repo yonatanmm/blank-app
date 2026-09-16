@@ -24,6 +24,7 @@ import requests
 import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI
+from ai_public_website_builder import render_ai_public_website_builder
 
 # Optional Word export dependency. Excel export uses pandas/openpyxl.
 try:
@@ -15331,6 +15332,7 @@ with nav_col:
             "🤖 DANIP AI Data Analyst",
             "🧭 DANIP M&E Management Hub",
             "📊 Universal Power BI Analytics",
+            "🌐 AI Public Website Builder",
         ],
         horizontal=True,
         label_visibility="collapsed",
@@ -15386,10 +15388,15 @@ with refresh_col:
 
 if workspace == "🤖 DANIP AI Data Analyst":
     render_existing_danip_ai_app()
+
 elif workspace == "🧭 DANIP M&E Management Hub":
     render_danip_me_management_hub()
-else:
+
+elif workspace == "📊 Universal Power BI Analytics":
     _render_universal_powerbi_workspace()
+
+elif workspace == "🌐 AI Public Website Builder":
+    render_ai_public_website_builder()
 
 # ============================================================
 # END — DANIP AI + SEPARATE DANIP M&E MANAGEMENT HUB
