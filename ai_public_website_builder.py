@@ -1155,7 +1155,7 @@ def _html_trend_chart(
     ).reindex(periods)
     pivot = pivot.reindex(columns=display_organisations)
 
-    all_values = pd.to_numeric(pivot.stack(dropna=True), errors="coerce").dropna().tolist()
+    all_values = pd.to_numeric(pivot.stack(), errors="coerce").dropna().tolist()
     if not all_values:
         return '<div class="empty-state">No numeric values are available for the trend.</div>'
 
