@@ -1,6 +1,10 @@
 
 
 import os
+import base64
+import hashlib
+import hmac
+import secrets
 import html
 import re
 import json
@@ -57,9 +61,22 @@ DHIS2_URL = _get_secret(
 # Local: .env beside this file.
 # Streamlit Cloud: App settings -> Secrets.
 # Never hard-code passwords or API keys in source code.
-
-OPENAI_API_KEY = _get_secret("OPENAI_API_KEY", "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")
-OPENAI_MODEL = _get_secret("OPENAI_MODEL", "gpt-5")
+# ============================================================
+# OPENAI CONFIGURATION — MAIN NEXUS DANIP APP
+# ============================================================
+# OpenAI is NOT part of DHIS2 authentication.
+# Keep the OpenAI secret under [OPENAI] in Streamlit Secrets.
+try:
+    OPENAI_API_KEY = str(
+        st.secrets["OPENAI"]["OPENAI_API_KEY"]
+    ).strip()
+    OPENAI_MODEL = str(
+        st.secrets["OPENAI"].get("OPENAI_MODEL", "gpt-5")
+    ).strip()
+except Exception:
+    # Local fallback for .env development.
+    OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+    OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5").strip()
 
 
 # ============================================================
@@ -72,6 +89,499 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ============================================================
+# SECURE DHIS2 OAUTH2 AUTHENTICATION
+# ============================================================
+# Authentication is completely separate from OpenAI.
+# DHIS2 OAuth credentials belong in [DANIP_DHIS2].
+# OpenAI credentials belong in [OPENAI] and are used only by
+# the main NEXUS DANIP AI dashboard.
+# ============================================================
+
+def _dhis2_secret(key, default=""):
+    try:
+        section = st.secrets.get("DANIP_DHIS2", {})
+        value = section.get(key, None)
+        if value is not None:
+            return str(value).strip()
+    except Exception:
+        pass
+    return os.getenv(key, default).strip()
+
+
+DANIP_DHIS2_BASE_URL = _dhis2_secret(
+    "BASE_URL",
+    "https://dhis2.nutritionintl.org",
+).rstrip("/")
+
+DANIP_OAUTH_CLIENT_ID = _dhis2_secret("CLIENT_ID")
+DANIP_OAUTH_CLIENT_SECRET = _dhis2_secret("CLIENT_SECRET")
+DANIP_OAUTH_REDIRECT_URI = _dhis2_secret("REDIRECT_URI")
+DANIP_OAUTH_STATE_SECRET = _dhis2_secret("STATE_SECRET")
+
+DANIP_OAUTH_AUTHORIZE_URL = _dhis2_secret(
+    "AUTHORIZE_URL",
+    f"{DANIP_DHIS2_BASE_URL}/uaa/oauth/authorize",
+)
+
+DANIP_OAUTH_TOKEN_URL = _dhis2_secret(
+    "TOKEN_URL",
+    f"{DANIP_DHIS2_BASE_URL}/uaa/oauth/token",
+)
+
+DANIP_OAUTH_ME_URL = _dhis2_secret(
+    "ME_URL",
+    f"{DANIP_DHIS2_BASE_URL}/api/me",
+)
+
+
+if "danip_authenticated" not in st.session_state:
+    st.session_state["danip_authenticated"] = False
+
+if "danip_user" not in st.session_state:
+    st.session_state["danip_user"] = {}
+
+if "danip_access_token" not in st.session_state:
+    st.session_state["danip_access_token"] = ""
+
+if "danip_refresh_token" not in st.session_state:
+    st.session_state["danip_refresh_token"] = ""
+
+
+def _oauth_b64url(data):
+    return base64.urlsafe_b64encode(data).decode("utf-8").rstrip("=")
+
+
+def _create_oauth_state():
+    if not DANIP_OAUTH_STATE_SECRET:
+        return ""
+
+    timestamp = str(int(time.time()))
+    nonce = secrets.token_urlsafe(32)
+    payload = f"{timestamp}.{nonce}"
+
+    signature = hmac.new(
+        DANIP_OAUTH_STATE_SECRET.encode("utf-8"),
+        payload.encode("utf-8"),
+        hashlib.sha256,
+    ).digest()
+
+    return (
+        f"{_oauth_b64url(payload.encode('utf-8'))}."
+        f"{_oauth_b64url(signature)}"
+    )
+
+
+def _verify_oauth_state(state, max_age_seconds=600):
+    if not state or not DANIP_OAUTH_STATE_SECRET:
+        return False
+
+    try:
+        encoded_payload, encoded_signature = state.split(".", 1)
+
+        payload = base64.urlsafe_b64decode(
+            encoded_payload + "=" * (-len(encoded_payload) % 4)
+        ).decode("utf-8")
+
+        signature = base64.urlsafe_b64decode(
+            encoded_signature + "=" * (-len(encoded_signature) % 4)
+        )
+
+        expected = hmac.new(
+            DANIP_OAUTH_STATE_SECRET.encode("utf-8"),
+            payload.encode("utf-8"),
+            hashlib.sha256,
+        ).digest()
+
+        if not hmac.compare_digest(signature, expected):
+            return False
+
+        timestamp_text, nonce = payload.split(".", 1)
+        if not nonce:
+            return False
+
+        timestamp = int(timestamp_text)
+
+        if abs(int(time.time()) - timestamp) > max_age_seconds:
+            return False
+
+        return True
+
+    except Exception:
+        return False
+
+
+def _oauth_configuration_errors():
+    errors = []
+
+    if not DANIP_OAUTH_CLIENT_ID:
+        errors.append("DANIP_DHIS2.CLIENT_ID")
+
+    if not DANIP_OAUTH_CLIENT_SECRET:
+        errors.append("DANIP_DHIS2.CLIENT_SECRET")
+
+    if not DANIP_OAUTH_REDIRECT_URI:
+        errors.append("DANIP_DHIS2.REDIRECT_URI")
+
+    if not DANIP_OAUTH_STATE_SECRET:
+        errors.append("DANIP_DHIS2.STATE_SECRET")
+
+    return errors
+
+
+def _build_dhis2_authorization_url():
+    state = _create_oauth_state()
+
+    if not state:
+        return ""
+
+    params = {
+        "client_id": DANIP_OAUTH_CLIENT_ID,
+        "response_type": "code",
+        "redirect_uri": DANIP_OAUTH_REDIRECT_URI,
+        "scope": "ALL",
+        "state": state,
+    }
+
+    return DANIP_OAUTH_AUTHORIZE_URL + "?" + urlencode(params)
+
+
+def _exchange_dhis2_code(code):
+    response = requests.post(
+        DANIP_OAUTH_TOKEN_URL,
+        auth=(
+            DANIP_OAUTH_CLIENT_ID,
+            DANIP_OAUTH_CLIENT_SECRET,
+        ),
+        data={
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": DANIP_OAUTH_REDIRECT_URI,
+        },
+        headers={
+            "Accept": "application/json",
+        },
+        timeout=30,
+    )
+
+    if not response.ok:
+        detail = ""
+        try:
+            body = response.json()
+            detail = body.get("error_description") or body.get("error") or ""
+        except Exception:
+            detail = ""
+
+        if detail:
+            raise RuntimeError(
+                f"DHIS2 OAuth error: {detail}"
+            )
+
+        raise RuntimeError(
+            f"DHIS2 token endpoint returned HTTP {response.status_code}."
+        )
+
+    return response.json()
+
+
+def _get_dhis2_authenticated_user(access_token):
+    response = requests.get(
+        DANIP_OAUTH_ME_URL,
+        headers={
+            "Authorization": f"Bearer {access_token}",
+            "Accept": "application/json",
+        },
+        timeout=30,
+    )
+
+    response.raise_for_status()
+    return response.json()
+
+
+def _clear_oauth_query_params():
+    try:
+        st.query_params.clear()
+    except Exception:
+        pass
+
+
+def _process_dhis2_oauth_callback():
+    params = st.query_params
+
+    code = params.get("code")
+    state = params.get("state")
+    error = params.get("error")
+    error_description = params.get("error_description")
+
+    if error:
+        st.error("DHIS2 authentication was not completed.")
+        if error_description:
+            st.caption(str(error_description))
+        _clear_oauth_query_params()
+        return False
+
+    if not code:
+        return False
+
+    if not _verify_oauth_state(state or ""):
+        st.error(
+            "The DHIS2 authentication response could not be verified."
+        )
+        st.caption("The OAuth state was invalid or expired.")
+        _clear_oauth_query_params()
+        return False
+
+    try:
+        token_data = _exchange_dhis2_code(code)
+        access_token = token_data.get("access_token")
+
+        if not access_token:
+            raise RuntimeError(
+                "DHIS2 did not return an access token."
+            )
+
+        user_data = _get_dhis2_authenticated_user(access_token)
+
+        st.session_state["danip_authenticated"] = True
+        st.session_state["danip_user"] = user_data
+        st.session_state["danip_access_token"] = access_token
+        st.session_state["danip_refresh_token"] = (
+            token_data.get("refresh_token", "")
+        )
+
+        _clear_oauth_query_params()
+        return True
+
+    except requests.HTTPError as exc:
+        status = (
+            exc.response.status_code
+            if exc.response is not None
+            else "unknown"
+        )
+
+        st.error("DHIS2 OAuth authentication failed.")
+        st.caption(f"DHIS2 returned HTTP {status}.")
+        _clear_oauth_query_params()
+        return False
+
+    except requests.RequestException:
+        st.error(
+            "NEXUS DANIP could not connect to the DHIS2 "
+            "authentication service."
+        )
+        st.caption(
+            "Check the DHIS2 server URL and network connection."
+        )
+        _clear_oauth_query_params()
+        return False
+
+    except RuntimeError as exc:
+        st.error("DHIS2 OAuth authentication failed.")
+        st.caption(str(exc))
+        _clear_oauth_query_params()
+        return False
+
+    except Exception:
+        st.error(
+            "NEXUS DANIP could not complete DHIS2 authentication."
+        )
+        st.caption("Check the OAuth configuration and application logs.")
+        _clear_oauth_query_params()
+        return False
+
+
+def _logout_dhis2():
+    st.session_state["danip_authenticated"] = False
+    st.session_state["danip_user"] = {}
+    st.session_state["danip_access_token"] = ""
+    st.session_state["danip_refresh_token"] = ""
+    _clear_oauth_query_params()
+    st.rerun()
+
+
+def _render_dhis2_login():
+    st.markdown(
+        """
+        <style>
+        .nexus-auth-shell {
+            max-width: 520px;
+            margin: 5vh auto 0 auto;
+        }
+
+        .nexus-auth-card {
+            background: #ffffff;
+            border: 1px solid #dbe2ea;
+            border-radius: 18px;
+            padding: 28px;
+            box-shadow: 0 12px 35px rgba(15,23,42,.10);
+        }
+
+        .nexus-auth-title {
+            color: #17374b;
+            text-align: center;
+            font-size: 28px;
+            font-weight: 900;
+            margin-bottom: 4px;
+        }
+
+        .nexus-auth-subtitle {
+            color: #64748b;
+            text-align: center;
+            font-size: 12px;
+            margin-bottom: 22px;
+        }
+
+        .nexus-auth-security {
+            background: #1d1f27;
+            color: #ffffff;
+            border-radius: 10px;
+            padding: 15px 16px;
+            font-size: 11px;
+            line-height: 1.6;
+            margin-bottom: 14px;
+        }
+
+        .nexus-auth-provider {
+            background: #edf6fb;
+            border: 1px solid #c9dce8;
+            color: #17374b;
+            border-radius: 10px;
+            padding: 12px 14px;
+            font-size: 10px;
+            line-height: 1.6;
+            margin-bottom: 16px;
+        }
+
+        .nexus-auth-footer {
+            text-align: center;
+            color: #8292a1;
+            font-size: 9px;
+            margin-top: 18px;
+        }
+        </style>
+
+        <div class="nexus-auth-shell">
+            <div class="nexus-auth-card">
+                <div class="nexus-auth-title">NEXUS DANIP</div>
+                <div class="nexus-auth-subtitle">
+                    Data + M&amp;E Intelligence Platform
+                </div>
+
+                <div class="nexus-auth-security">
+                    <b>🔐 Authorized access only</b><br>
+                    Sign in using your existing DHIS2 account.
+                    Your DHIS2 username and password are entered on
+                    the official DHIS2 authentication page and are not
+                    collected by NEXUS DANIP.
+                </div>
+
+                <div class="nexus-auth-provider">
+                    <b>Authentication provider:</b>
+                    Datalytics for Nutrition International Program (DANIP)<br>
+                    <b>DHIS2 server:</b> dhis2.nutritionintl.org
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    errors = _oauth_configuration_errors()
+
+    if errors:
+        st.error("DHIS2 authentication is not configured yet.")
+        st.write("Missing configuration:")
+        for item in errors:
+            st.code(item)
+        st.info(
+            "Configure the DANIP_DHIS2 values in Streamlit Secrets "
+            "and restart the application."
+        )
+        return
+
+    authorization_url = _build_dhis2_authorization_url()
+
+    if not authorization_url:
+        st.error("OAuth state security is not configured.")
+        return
+
+    st.link_button(
+        "🔐 Sign in with DHIS2",
+        authorization_url,
+        use_container_width=True,
+    )
+
+    st.markdown(
+        '<div class="nexus-auth-footer">'
+        'You will be redirected to the official DHIS2 login page.'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+# ============================================================
+# PROCESS AUTHENTICATION BEFORE THE MAIN DASHBOARD
+# ============================================================
+
+if not st.session_state["danip_authenticated"]:
+    if _process_dhis2_oauth_callback():
+        st.rerun()
+
+    _render_dhis2_login()
+    st.stop()
+
+
+# ============================================================
+# AUTHENTICATED SESSION CONTEXT
+# ============================================================
+
+DANIP_ACCESS_TOKEN = st.session_state.get(
+    "danip_access_token",
+    "",
+)
+
+DANIP_AUTHENTICATED_USER = st.session_state.get(
+    "danip_user",
+    {},
+)
+
+DANIP_AUTHENTICATED_USERNAME = (
+    DANIP_AUTHENTICATED_USER.get("username")
+    or DANIP_AUTHENTICATED_USER.get("userCredentials", {}).get("username")
+    or DANIP_AUTHENTICATED_USER.get("displayName")
+    or DANIP_AUTHENTICATED_USER.get("name")
+    or "Authenticated DHIS2 user"
+)
+
+# Authentication status is intentionally displayed in the existing
+# dashboard sidebar without exposing the OAuth access token.
+with st.sidebar:
+    st.markdown(
+        f"""
+        <div style="
+            background:#eef6f2;
+            border:1px solid #b9d8c8;
+            border-radius:10px;
+            padding:10px;
+            color:#174b34;
+            font-size:11px;
+            font-weight:700;
+            margin-bottom:10px;">
+            🔓 DHIS2 authenticated<br>
+            User: {html.escape(str(DANIP_AUTHENTICATED_USERNAME))}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if st.button(
+        "🔒 Sign Out",
+        use_container_width=True,
+        key="nexus_dhis2_signout",
+    ):
+        _logout_dhis2()
+
 
 
 # ============================================================
@@ -1961,14 +2471,11 @@ missing = []
 if not DHIS2_URL:
     missing.append("https://dhis2.nutritionintl.org")
 
-if not DHIS2_USERNAME:
-    missing.append("data.ai")
-
-if not DHIS2_PASSWORD:
-    missing.append("Data.ai@2025")
+if not DANIP_ACCESS_TOKEN:
+    missing.append("DHIS2 OAuth session")
 
 if not OPENAI_API_KEY:
-    missing.append("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")
+    missing.append("OPENAI_API_KEY")
 
 if missing:
     st.warning(
@@ -2014,30 +2521,16 @@ if OPENAI_API_KEY and OPENAI_API_KEY.startswith("sk-"):
 
 session = requests.Session()
 
-# streamlit_app.py authenticates the user through DHIS2 OAuth
-# and stores the resulting access token in session state.
+# Use the authenticated DHIS2 OAuth token for all protected API requests.
 DANIP_ACCESS_TOKEN = st.session_state.get(
     "danip_access_token",
-    ""
+    "",
 )
 
-if DANIP_ACCESS_TOKEN:
-    # Use the authenticated OAuth token for all DHIS2 API requests.
-    session.headers.update({
-        "Authorization": f"Bearer {DANIP_ACCESS_TOKEN}",
-        "User-Agent": "DANIP-DHIS2-AI/2.0",
-    })
-else:
-    # Local/direct app.py fallback.
-    if DHIS2_USERNAME and DHIS2_PASSWORD:
-        session.auth = (
-            DHIS2_USERNAME,
-            DHIS2_PASSWORD,
-        )
-
-    session.headers.update({
-        "User-Agent": "DANIP-DHIS2-AI/2.0"
-    })
+session.headers.update({
+    "Authorization": f"Bearer {DANIP_ACCESS_TOKEN}",
+    "User-Agent": "DANIP-DHIS2-AI/2.0",
+})
 
 
 # ============================================================
@@ -10185,7 +10678,7 @@ def _nexus_sidebar_status(message, state="running", stage=None, detail=None):
         dq_score = None
 
     ai_ready = bool(OPENAI_API_KEY)
-    dhis_ready = bool(DHIS2_USERNAME and DHIS2_PASSWORD)
+    dhis_ready = bool(DANIP_ACCESS_TOKEN)
 
     def dot(ok, active=False, warning=False):
         if warning:
@@ -10411,7 +10904,14 @@ def render_common_sidebar():
             # Full application reset: clear the current workspace, dataset,
             # analysis state AND the pasted API/Data URL. Persistent MEAL
             # records in danip_meal.db are intentionally preserved.
+            _auth_state = {
+                "danip_authenticated": st.session_state.get("danip_authenticated", False),
+                "danip_user": st.session_state.get("danip_user", {}),
+                "danip_access_token": st.session_state.get("danip_access_token", ""),
+                "danip_refresh_token": st.session_state.get("danip_refresh_token", ""),
+            }
             st.session_state.clear()
+            st.session_state.update(_auth_state)
             st.session_state["data_url_input"] = ""
             st.session_state["last_analyzed_url"] = ""
             st.session_state["loaded_source_url"] = ""
@@ -10429,10 +10929,10 @@ def render_existing_danip_ai_app():
 
     status_items = []
 
-    if DHIS2_USERNAME and DHIS2_PASSWORD:
-        status_items.append("🟢 DHIS2 credentials ready")
+    if DANIP_ACCESS_TOKEN:
+        status_items.append("🟢 DHIS2 OAuth authenticated")
     else:
-        status_items.append("🟠 DHIS2 credentials required for protected APIs")
+        status_items.append("🟠 DHIS2 authentication required")
 
     if OPENAI_API_KEY:
         status_items.append("🟢 NEXUS automatic intelligence ready")
@@ -14066,7 +14566,14 @@ with refresh_col:
         # Full application reset: also remove the pasted API/Data URL so the
         # user returns to a completely blank starting point. Persistent MEAL
         # records in danip_meal.db are intentionally preserved.
+        _auth_state = {
+            "danip_authenticated": st.session_state.get("danip_authenticated", False),
+            "danip_user": st.session_state.get("danip_user", {}),
+            "danip_access_token": st.session_state.get("danip_access_token", ""),
+            "danip_refresh_token": st.session_state.get("danip_refresh_token", ""),
+        }
         st.session_state.clear()
+        st.session_state.update(_auth_state)
         st.session_state["data_url_input"] = ""
         st.session_state["last_analyzed_url"] = ""
         st.session_state["loaded_source_url"] = ""
