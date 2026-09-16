@@ -111,7 +111,7 @@ def _pct(value):
 
 
 def _safe_text(value):
-    return html.escape(str(value))
+    return html.escape("" if value is None else str(value))
 
 
 # ============================================================
@@ -864,9 +864,10 @@ def _default_public_content(
             else "Use the analytical findings to identify questions for further review."
         ),
         "methodology": (
-            "Data are presented as reported monitoring information. "
-            "Values may be aggregated by period, geography, organisation "
-            "or indicator depending on the source dataset."
+            "Web analysis uses Indicator as Y. X is either Report Period "
+            "for trend analysis or Organisation Name for organisation comparison. "
+            "Where multiple organisations are present, each organisation remains "
+            "a separate series rather than being combined into one total."
         ),
         "limitations": (
             "Reported statistics may be affected by completeness, "
@@ -1112,193 +1113,174 @@ def _html_trend_chart(
     trend,
     title="Reported trend",
 ):
+    """
+    Render a Report Period (X) vs Indicator (Y) trend.
+
+    Organisation Name is retained as separate series and is never collapsed
+    into one overall organisation total.
+    """
     if not trend.get("available"):
         return f"""
-        <div class="empty-state">
-            {_safe_text(trend.get('reason', 'Trend unavailable.'))}
-        </div>
+        <div class="empty-state">{_safe_text(trend.get('reason', 'Trend unavailable.'))}</div>
         """
 
-    data = trend["data"]
+    data = trend.get("data")
+    period_col = trend.get("period_column")
+    org_col = trend.get("organisation_column")
+    indicator = trend.get("indicator", "Indicator")
 
-    points = []
+    if data is None or data.empty or not period_col or not org_col:
+        return '<div class="empty-state">No Period Name × Organisation Name × Indicator data available.</div>'
 
-    for _, row in data.tail(
-        MAX_CHART_POINTS
-    ).iterrows():
+    work = data[[period_col, org_col, "value"]].copy()
+    work[period_col] = work[period_col].astype(str)
+    work[org_col] = work[org_col].astype(str)
+    work["value"] = pd.to_numeric(work["value"], errors="coerce")
+    work = work.dropna(subset=["value"])
+    if work.empty:
+        return '<div class="empty-state">No numeric indicator observations are available for the trend.</div>'
 
-        points.append(
-            (
-                str(row.iloc[0]),
-                float(row["value"]),
-            )
-        )
+    periods = _sorted_period_values(work[period_col].drop_duplicates())
+    periods = periods[-MAX_CHART_POINTS:]
+    work = work[work[period_col].isin(periods)].copy()
 
-    if not points:
-        return """
-        <div class="empty-state">
-            No trend points available.
-        </div>
-        """
+    organisations = work[org_col].drop_duplicates().tolist()
+    display_organisations = organisations[:12]
 
-    max_value = max(
-        x[1]
-        for x in points
-    )
+    pivot = work.pivot_table(
+        index=period_col,
+        columns=org_col,
+        values="value",
+        aggfunc="sum",
+    ).reindex(periods)
+    pivot = pivot.reindex(columns=display_organisations)
 
-    min_value = min(
-        x[1]
-        for x in points
-    )
+    all_values = pd.to_numeric(pivot.stack(dropna=True), errors="coerce").dropna().tolist()
+    if not all_values:
+        return '<div class="empty-state">No numeric values are available for the trend.</div>'
 
-    span = (
-        max_value - min_value
-        if max_value != min_value
-        else 1
-    )
-
-    line = []
+    max_value = max(all_values)
+    min_value = min(all_values)
+    span = max_value - min_value if max_value != min_value else 1
 
     width = 1000
-    height = 320
+    height = 360
+    left = 55
+    right = 35
+    top = 35
+    plot_width = width - left - right
+    plot_height = 230
 
-    for index, (_, value) in enumerate(points):
+    def xy(index, value):
+        x = left + (index / max(len(periods) - 1, 1)) * plot_width
+        y = top + ((max_value - value) / span) * plot_height
+        return x, y
 
-        x = (
-            40
-            + (
-                index
-                / max(
-                    len(points) - 1,
-                    1,
-                )
-            ) * 920
-        )
+    series_html = []
+    legend_html = []
 
-        y = (
-            35
-            + (
-                (max_value - value)
-                / span
-            ) * 230
-        )
+    for series_index, organisation in enumerate(display_organisations):
+        points = []
+        circles = []
+        series_values = pivot[organisation]
 
-        line.append(
-            f"{x:.1f},{y:.1f}"
-        )
+        for index, period in enumerate(periods):
+            value = series_values.iloc[index]
+            if pd.isna(value):
+                continue
+            x, y = xy(index, float(value))
+            points.append(f"{x:.1f},{y:.1f}")
+            circles.append(
+                f'''<circle cx="{x:.1f}" cy="{y:.1f}" r="4" class="trend-point trend-series-{series_index}">
+                    <title>{_safe_text(organisation)} · {_safe_text(period)}: {_fmt(value)}</title>
+                </circle>'''
+            )
 
-    circles = []
-
-    for index, (label, value) in enumerate(points):
-
-        x = (
-            40
-            + (
-                index
-                / max(
-                    len(points) - 1,
-                    1,
-                )
-            ) * 920
-        )
-
-        y = (
-            35
-            + (
-                (max_value - value)
-                / span
-            ) * 230
-        )
-
-        circles.append(
-            f"""
-            <circle
-                cx="{x:.1f}"
-                cy="{y:.1f}"
-                r="5"
-                class="trend-point">
-                <title>
-                    {_safe_text(label)}:
-                    {_fmt(value)}
-                </title>
-            </circle>
-            """
-        )
+        if points:
+            series_html.append(
+                f'''<polyline points="{' '.join(points)}" class="trend-line trend-series-{series_index}" fill="none"/>
+                {''.join(circles)}'''
+            )
+            legend_html.append(
+                f'''<span class="trend-legend-item"><i class="trend-legend-dot trend-series-{series_index}"></i>{_safe_text(organisation)}</span>'''
+            )
 
     labels = []
-
-    step = max(
-        1,
-        len(points) // 8,
-    )
-
-    for index, (label, _) in enumerate(points):
-
-        if (
-            index % step != 0
-            and index != len(points) - 1
-        ):
+    step = max(1, len(periods) // 8)
+    for index, period in enumerate(periods):
+        if index % step != 0 and index != len(periods) - 1:
             continue
-
-        x = (
-            40
-            + (
-                index
-                / max(
-                    len(points) - 1,
-                    1,
-                )
-            ) * 920
+        x, _ = xy(index, min_value)
+        labels.append(
+            f'''<text x="{x:.1f}" y="315" text-anchor="middle" class="trend-label">{_safe_text(period)}</text>'''
         )
 
-        labels.append(
-            f"""
-            <text
-                x="{x:.1f}"
-                y="300"
-                text-anchor="middle"
-                class="trend-label">
-                {_safe_text(label)}
-            </text>
-            """
+    summary = trend.get("summary")
+    if summary:
+        summary_html = (
+            f"{_safe_text(summary.get('first_period'))}: <strong>{_fmt(summary.get('first_value'))}</strong>"
+            " &nbsp; → &nbsp; "
+            f"{_safe_text(summary.get('last_period'))}: <strong>{_fmt(summary.get('last_value'))}</strong>"
+        )
+    else:
+        summary_html = (
+            "All organisations are shown as separate series. Select an organisation in the application for a first-to-last summary."
+        )
+
+    hidden_note = ""
+    if len(organisations) > len(display_organisations):
+        hidden_note = (
+            f" Showing {len(display_organisations)} of {len(organisations)} organisation series in the visual; the analytical table retains all organisations."
         )
 
     return f"""
     <div class="chart-card">
         <h3>{_safe_text(title)}</h3>
-
-        <svg
-            viewBox="0 0 {width} {height}"
-            role="img"
-            aria-label="{_safe_text(title)}"
-            class="trend-svg">
-
-            <line
-                x1="40"
-                y1="265"
-                x2="960"
-                y2="265"
-                class="trend-axis"/>
-
-            <polyline
-                points="{' '.join(line)}"
-                class="trend-line"
-                fill="none"/>
-
-            {''.join(circles)}
+        <p class="chart-axis-note">X = <strong>{_safe_text(period_col)}</strong> (Report Period) · Y = <strong>{_safe_text(indicator)}</strong> (Indicator) · Organisation Name = separate series</p>
+        <svg viewBox="0 0 {width} {height}" role="img" aria-label="{_safe_text(title)}" class="trend-svg">
+            <line x1="{left}" y1="265" x2="{width-right}" y2="265" class="trend-axis"/>
+            {''.join(series_html)}
             {''.join(labels)}
-
         </svg>
-
-        <div class="chart-caption">
-            {_safe_text(trend.get("first_period") or "First reported period")}:
-            <strong>{_fmt(trend.get("first_value"))}</strong>
-            &nbsp; → &nbsp;
-            {_safe_text(trend.get("last_period") or "Last reported period")}:
-            <strong>{_fmt(trend.get("last_value"))}</strong>
-        </div>
+        <div class="trend-legend">{''.join(legend_html)}</div>
+        <div class="chart-caption">{summary_html}{_safe_text(hidden_note)}</div>
     </div>
     """
+
+
+def _html_organisation_chart(
+    trend,
+    title="Reported indicator by organisation",
+):
+    """Render Organisation Name (X) vs Indicator (Y) for the latest period."""
+    if not trend.get("available"):
+        return f'<div class="empty-state">{_safe_text(trend.get("reason", "Organisation analysis unavailable."))}</div>'
+
+    data = trend.get("data")
+    period_col = trend.get("period_column")
+    org_col = trend.get("organisation_column")
+    if data is None or data.empty or not period_col or not org_col:
+        return '<div class="empty-state">Organisation Name analysis requires Period Name and Organisation Name.</div>'
+
+    work = data[[period_col, org_col, "value"]].copy()
+    work[period_col] = work[period_col].astype(str)
+    work[org_col] = work[org_col].astype(str)
+    work["value"] = pd.to_numeric(work["value"], errors="coerce")
+    work = work.dropna(subset=["value"])
+    if work.empty:
+        return '<div class="empty-state">No numeric organisation observations available.</div>'
+
+    periods = _sorted_period_values(work[period_col].drop_duplicates())
+    latest_period = periods[-1]
+    latest = work[work[period_col] == latest_period]
+    latest = latest.groupby(org_col, as_index=False)["value"].sum()
+    latest = latest.sort_values("value", ascending=False).head(24)
+
+    return _html_bar_chart(
+        latest[org_col].astype(str).tolist(),
+        latest["value"].tolist(),
+        title=f"{title} — {latest_period}",
+    )
 
 
 # ============================================================
@@ -1477,29 +1459,44 @@ def build_public_website_html(
             """
         )
 
-    # Geographic chart.
-    if not geographic.empty:
+    # ========================================================
+    # WEB ANALYSIS MODEL
+    # X = Report Period OR Organisation Name
+    # Y = Indicator
+    # ========================================================
+    analysis_sections = []
 
-        geo_chart = _html_bar_chart(
-            geographic.iloc[:10, 0].astype(str).tolist(),
-            geographic["value"].tolist()[:10],
-            title=(
-                f"Reported {primary_indicator} by "
-                f"{geo_dimension}"
-            ),
-        )
+    if profile.get("period_column") and profile.get("organisation_column"):
+        for indicator_name in [x["name"] for x in profile["indicators"][:12]]:
+            indicator_trend = _trend_analysis(
+                safe_df,
+                profile,
+                indicator_name,
+            )
 
-    else:
-        geo_chart = """
-        <div class="empty-state">
-            Geographic comparison is not available for this dataset.
-        </div>
-        """
+            period_chart = _html_trend_chart(
+                indicator_trend,
+                title=f"{indicator_name} — Report Period trend",
+            )
 
-    trend_chart = _html_trend_chart(
-        trend,
-        title=f"{primary_indicator} — reported trend",
-    )
+            organisation_chart = _html_organisation_chart(
+                indicator_trend,
+                title=f"{indicator_name} — Organisation comparison",
+            )
+
+            analysis_sections.append(
+                f'''<div class="analysis-indicator-block">
+                    <div class="analysis-indicator-heading">
+                        <h3>{_safe_text(indicator_name)}</h3>
+                        <p>Y = indicator value · X = Report Period or Organisation Name</p>
+                    </div>
+                    <div class="two-col">{period_chart}{organisation_chart}</div>
+                </div>'''
+            )
+
+    analysis_html = "".join(analysis_sections) if analysis_sections else '''
+        <div class="empty-state">Web analysis requires both Period Name and Organisation Name.</div>
+    '''
 
     observation_html = "".join(
         f"""
@@ -2250,13 +2247,7 @@ a {{
 
         </div>
 
-        <div class="two-col">
-
-            {trend_chart}
-
-            {geo_chart}
-
-        </div>
+        {analysis_html}
 
         <div class="content-card" style="margin-top:20px;">
 
