@@ -8624,6 +8624,21 @@ def build_analysis_chat_evidence(
 
 
 
+def _chat_report_intent(question):
+    """Detect requests to generate a report from the currently loaded API/DHIS2 data."""
+    q = _chat_normalize_text(question)
+    report_terms = (
+        "write report", "generate report", "create report", "prepare report",
+        "make a report", "give me a report", "produce a report",
+        "analysis report", "m and e report", "m&e report",
+        "programme report", "program report", "indicator report",
+        "report on this indicator", "report on these indicators",
+        "summarize this indicator", "summarise this indicator",
+        "write a summary", "prepare a summary",
+    )
+    return any(term in q for term in report_terms)
+
+
 def _chat_external_research_requested(question):
     """Detect questions that explicitly ask for external/UN/WHO evidence."""
     q = str(question or "").lower().strip()
@@ -9100,12 +9115,22 @@ def ask_analysis_chatbot(
             else []
         )
 
-    # Always retrieve authoritative external context for M&E interpretation.
-    # This does not change any dashboard values or deterministic calculations.
-    external_context = research_mne_external_context(
-        question=question,
-        indicators=indicators,
-    )
+    # IMPORTANT: the loaded API/DHIS2 dataset is the default source of truth.
+    # Do NOT perform web research for ordinary indicator questions or report requests.
+    # External research is activated only when the user explicitly asks for UN/WHO,
+    # an external report/study/guideline, or other outside evidence.
+    external_requested = _chat_external_research_requested(question)
+    if external_requested:
+        external_context = research_mne_external_context(
+            question=question,
+            indicators=indicators,
+        )
+    else:
+        external_context = {
+            "status": "NOT_REQUESTED",
+            "sources": [],
+            "text": "External web research was not requested. Use the loaded API/DHIS2 dataset only.",
+        }
 
     # Always prepare a deterministic fallback first.
     local_answer = _chat_local_mne_answer(
@@ -9223,11 +9248,13 @@ NON-NEGOTIABLE RULES:
     a target or benchmark is supplied. Instead say whether the observed pattern
     warrants routine monitoring or investigation.
 17. Keep the response concise but substantive.
-18. External authoritative evidence is REQUIRED for M&E interpretation whenever a relevant source is available.
-19. Clearly separate dashboard findings from external evidence.
-20. Do not present external context as if it were a DANIP/DHIS2 value.
-21. Include a short **External evidence** section with the organization/publication and source link(s) when available.
-22. If no suitable external source is available, explicitly say **NO VERIFIED EXTERNAL MATCH** rather than inventing one.
+18. For ordinary indicator analysis and report requests, use ONLY the current loaded API/DHIS2 evidence. Do not request or invent outside evidence.
+19. Only use external evidence when the user explicitly requested external/UN/WHO/report/guideline/study research.
+20. Clearly separate dashboard findings from external evidence when external evidence was explicitly requested.
+21. Never present external context as if it were a DANIP/DHIS2 value.
+22. For a report request, write the report from the supplied current API/DHIS2 indicators, periods, organisation units, calculated evidence and quality findings.
+23. If the user asks for a report, do not respond with instructions on how to make one; generate the report directly.
+24. Do not add an external-evidence section when external research was not requested.
 
 CURRENT SOURCE:
 {source_url}
@@ -9280,13 +9307,12 @@ Do not include sections that are not relevant.
 
     for model in models_to_try:
         try:
+            # Internal indicator analysis/reporting NEVER gets a web-search tool.
+            # This keeps the chatbot grounded in the currently loaded API/DHIS2
+            # dataset. The explicit external-research branch above is the only
+            # path that is allowed to call web search.
             response = client.responses.create(
                 model=model,
-                tools=[{
-                    "type": "web_search",
-                    "search_context_size": "high",
-                    "filters": {"allowed_domains": EXTERNAL_EVIDENCE_DOMAINS},
-                }],
                 input=prompt,
             )
 
