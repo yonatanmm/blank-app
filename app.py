@@ -11093,7 +11093,13 @@ POWERBI_API_BASE_URL = _get_secret(
     "",
 ).rstrip("/")
 
-POWERBI_API_KEY = _get_secret("POWERBI_API_KEY", "")
+# Power BI authentication key. Prefer Streamlit Secrets for a stable production key.
+# If no secret exists, the app generates a secure session key automatically.
+POWERBI_API_KEY = _get_secret("POWERBI_API_KEY", "").strip()
+POWERBI_AUTO_GENERATE_API_KEY = (
+    _get_secret("POWERBI_AUTO_GENERATE_API_KEY", "true").lower()
+    in ("1", "true", "yes", "on")
+)
 POWERBI_API_RUNTIME = {
     "api_key": None,
     "wide": [],
@@ -11269,16 +11275,42 @@ def _powerbi_prepare_tables(df):
     return wide, fact, raw
 
 
-def _powerbi_generate_api_key():
+def _powerbi_generate_api_key(force=False):
+    """Return the configured key, or generate one automatically for this app session."""
+    configured = POWERBI_API_KEY.strip()
+    if configured and not force:
+        POWERBI_API_RUNTIME["api_key"] = configured
+        st.session_state["powerbi_api_key"] = configured
+        return configured
+
     key = "nexus_pbi_" + secrets.token_urlsafe(32)
     POWERBI_API_RUNTIME["api_key"] = key
     st.session_state["powerbi_api_key"] = key
     return key
 
 
+def _powerbi_get_api_key():
+    """Initialize the Power BI API key automatically when enabled."""
+    configured = POWERBI_API_KEY.strip()
+    if configured:
+        POWERBI_API_RUNTIME["api_key"] = configured
+        st.session_state["powerbi_api_key"] = configured
+        return configured, True
+
+    existing = st.session_state.get("powerbi_api_key", "").strip()
+    if existing:
+        POWERBI_API_RUNTIME["api_key"] = existing
+        return existing, False
+
+    if POWERBI_AUTO_GENERATE_API_KEY:
+        return _powerbi_generate_api_key(), False
+
+    return "", False
+
+
 def _powerbi_api_authorized(headers):
     supplied = headers.get("x-api-key", "")
-    expected = POWERBI_API_RUNTIME.get("api_key")
+    expected = POWERBI_API_RUNTIME.get("api_key") or POWERBI_API_KEY.strip()
     return bool(expected and supplied and hmac.compare_digest(str(supplied), str(expected)))
 
 
@@ -11470,94 +11502,59 @@ def _render_universal_powerbi_workspace():
         st.dataframe(fact.head(5000), use_container_width=True, hide_index=True, height=350)
 
     # API key and connection details.
-    configured_key = POWERBI_API_KEY.strip()
-    session_key = st.session_state.get("powerbi_api_key", "")
-    existing_key = configured_key or session_key
-
-    if not configured_key and POWERBI_LOCAL_API_ENABLED:
-        if st.button(
-            "🔑 Generate Local Power BI API Key",
-            key="pbi_generate_api_key",
-            use_container_width=False,
-        ):
-            existing_key = _powerbi_generate_api_key()
-            st.session_state["powerbi_api_key"] = existing_key
-
-    st.markdown("### 🔐 Power BI API Connection")
+    existing_key, key_from_secrets = _powerbi_get_api_key()
 
     if existing_key:
+        st.markdown("**Power BI API Key:**")
         st.code(existing_key, language="text")
-        st.warning(
-            "Keep this API key private. Put it in the x-api-key header, "
-            "never in the URL hostname."
-        )
+        st.warning("Keep this API key private. Power BI sends it in the x-api-key header, never in the URL hostname.")
 
-    public_api_base = POWERBI_API_BASE_URL
-    invalid_streamlit_base = bool(
-        public_api_base and "streamlit.app" in public_api_base.lower()
-    )
+        if not key_from_secrets:
+            st.info("A secure key was generated automatically for this Streamlit session. For a stable Power BI Service connection, add POWERBI_API_KEY to Streamlit Secrets using this value.")
 
-    if invalid_streamlit_base:
-        st.error(
-            "POWERBI_API_BASE_URL is pointing to the Streamlit UI. "
-            "That URL cannot expose the custom /api/powerbi route on Streamlit Cloud."
-        )
-        public_api_base = ""
+        local_url = f"http://localhost:{POWERBI_API_PORT}/api/powerbi/wide"
+        public_api_base = POWERBI_API_BASE_URL
+        invalid_streamlit_base = bool(public_api_base and "streamlit.app" in public_api_base.lower())
+        public_url = (f"{public_api_base}/api/powerbi/wide" if public_api_base and not invalid_streamlit_base else "")
 
-    if public_api_base:
-        public_url = f"{public_api_base}/api/powerbi/wide"
+        st.markdown("**NEXUS Streamlit UI:**")
+        st.code(POWERBI_UI_URL, language="text")
 
-        st.markdown("**Power BI Service — production API:**")
-        st.code(public_url, language="text")
+        if POWERBI_LOCAL_API_ENABLED:
+            st.markdown("**Power BI Desktop — local development:**")
+            st.code(local_url, language="text")
 
-        if external_publish_ok:
-            st.success("☁️ Current dataset published to the production Power BI API.")
-        elif external_publish_message:
-            st.warning(str(external_publish_message))
+        if invalid_streamlit_base:
+            st.error("POWERBI_API_BASE_URL cannot be the Streamlit UI URL. The /api/powerbi/* routes require a real HTTPS API service.")
+
+        if public_url:
+            st.markdown("**Power BI Service — public API:**")
+            st.code(public_url, language="text")
+            if external_publish_ok:
+                st.success("☁️ Current dataset published to the public Power BI API.")
+            elif external_publish_message:
+                st.warning(str(external_publish_message))
+        else:
+            st.caption("Power BI Service requires POWERBI_API_BASE_URL to point to a separately deployed HTTPS API service. Streamlit Cloud does not proxy custom /api/powerbi/* routes.")
 
         st.markdown("**Power Query:**")
+        query_url = public_url or local_url
         st.code(
             'let\n'
             '    Source = Json.Document(\n'
-            f'        Web.Contents(\n            "{public_url}",\n'
-            '            [Headers=[#"x-api-key"="YOUR_POWERBI_API_KEY"]]\n'
+            f'        Web.Contents(\n            "{query_url}",\n'
+            '            [\n'
+            '                Headers = [\n'
+            '                    #"x-api-key" = "YOUR_POWERBI_API_KEY"\n'
+            '                ]\n'
+            '            ]\n'
             '        )\n'
             '    ),\n'
             '    Data = Table.FromRecords(Source[data])\n'
             'in\n'
-            '    Data',
-            language="powerquery",
-        )
-
-        st.caption(
-            "Use the production HTTPS API URL above in Power BI Service. "
-            "The API key is supplied only through the x-api-key HTTP header."
-        )
-
+            '    Data', language="powerquery")
     else:
-        st.markdown("**NEXUS Streamlit UI:**")
-        st.code(POWERBI_UI_URL, language="text")
-
-        st.info(
-            "The Streamlit URL above is the NEXUS application URL, not a REST API endpoint. "
-            "For Power BI Service, configure POWERBI_API_BASE_URL with the URL of a real "
-            "HTTPS API service that exposes /api/powerbi/wide, /api/powerbi/fact, and "
-            "/api/powerbi/raw."
-        )
-
-        if POWERBI_LOCAL_API_ENABLED:
-            local_url = f"http://localhost:{POWERBI_API_PORT}/api/powerbi/wide"
-            st.markdown("**Power BI Desktop — local development only:**")
-            st.code(local_url, language="text")
-            st.caption(
-                "Local API mode is enabled. This endpoint is intentionally not used "
-                "as the production Power BI Service URL."
-            )
-        elif not existing_key:
-            st.caption(
-                "No production API key is configured. Add POWERBI_API_KEY and "
-                "POWERBI_API_BASE_URL to your deployment secrets."
-            )
+        st.error("Power BI API key generation is disabled. Set POWERBI_AUTO_GENERATE_API_KEY=true or configure POWERBI_API_KEY in Streamlit Secrets.")
 
     c1, c2, c3 = st.columns(3)
     with c1:
