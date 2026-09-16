@@ -15449,7 +15449,45 @@ elif workspace == "📊 Universal Power BI Analytics":
 
 elif workspace == "🌐 AI Public Website Builder":
 
-    render_ai_public_website_builder()
+    # The website-builder module uses Streamlit Markdown for its HTML header.
+    # Render that specific header through Streamlit's HTML component so the
+    # HTML is interpreted by the browser instead of appearing as source text.
+    _original_st_markdown = st.markdown
+
+    def _website_builder_safe_markdown(body, *args, **kwargs):
+        try:
+            body_text = str(body)
+        except Exception:
+            body_text = ""
+
+        is_builder_header = (
+            "website-builder-header" in body_text
+            and "website-builder-title" in body_text
+            and "AI Public Website Builder" in body_text
+            and "underlying analysis" in body_text
+        )
+
+        if is_builder_header and kwargs.get("unsafe_allow_html", False):
+            try:
+                import streamlit.components.v1 as components
+                components.html(
+                    body_text,
+                    height=150,
+                    scrolling=False,
+                )
+                return None
+            except Exception:
+                # Fall back to normal Streamlit rendering if the HTML
+                # component is unavailable.
+                pass
+
+        return _original_st_markdown(body, *args, **kwargs)
+
+    st.markdown = _website_builder_safe_markdown
+    try:
+        render_ai_public_website_builder()
+    finally:
+        st.markdown = _original_st_markdown
 
 
 elif workspace == "📅 My Reports & Monitoring":
