@@ -1565,30 +1565,25 @@ def render_my_reports_monitoring() -> None:
         or "—"
     )
 
+    user_card_html = (
+        '<div class="danip-user-card">'
+        '<span class="danip-badge danip-badge-auth">🔐 AUTHENTICATED SESSION</span>'
+        '<span class="danip-badge danip-badge-system">👥 SYSTEM-WIDE MONITORING</span>'
+        f'<h3 style="margin:10px 0 4px 0;color:#17374b;">'
+        f'{html.escape(display_name)}'
+        '</h3>'
+        '<div style="color:#5d7185;">'
+        'Username: '
+        f'<strong>{html.escape(username)}</strong>'
+        '&nbsp; | &nbsp;'
+        'Email: '
+        f'<strong>{html.escape(email)}</strong>'
+        '</div>'
+        '</div>'
+    )
+
     st.markdown(
-        f"""
-        <div class="danip-user-card">
-            <span class="danip-badge danip-badge-auth">
-                🔐 AUTHENTICATED SESSION
-            </span>
-
-            <span class="danip-badge danip-badge-system">
-                👥 SYSTEM-WIDE MONITORING
-            </span>
-
-            <h3 style="margin:10px 0 4px 0;color:#17374b;">
-                {html.escape(display_name)}
-            </h3>
-
-            <div style="color:#5d7185;">
-                Username:
-                <strong>{html.escape(username)}</strong>
-                &nbsp; | &nbsp;
-                Email:
-                <strong>{html.escape(email)}</strong>
-            </div>
-        </div>
-        """,
+        user_card_html,
         unsafe_allow_html=True,
     )
 
