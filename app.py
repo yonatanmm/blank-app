@@ -11524,6 +11524,71 @@ def _render_universal_powerbi_workspace():
     if existing_key:
         st.markdown("**Power BI API Key:**")
         st.code(existing_key, language="text")
+
+        # Downloadable credential package. The key is never put into a URL.
+        # This downloads a local TXT file containing the current key and
+        # Power BI connection instructions so the user can save/share it
+        # securely with the authorized Power BI administrator.
+        download_base = POWERBI_API_BASE_URL
+        if download_base and "streamlit.app" not in download_base.lower():
+            download_fact_url = f"{download_base}/api/powerbi/fact"
+            download_wide_url = f"{download_base}/api/powerbi/wide"
+            download_raw_url = f"{download_base}/api/powerbi/raw"
+        else:
+            download_fact_url = "CONFIGURE_POWERBI_API_BASE_URL/api/powerbi/fact"
+            download_wide_url = "CONFIGURE_POWERBI_API_BASE_URL/api/powerbi/wide"
+            download_raw_url = "CONFIGURE_POWERBI_API_BASE_URL/api/powerbi/raw"
+
+        api_key_download = (
+            "NEXUS POWER BI API CREDENTIALS\n"
+            "================================\n\n"
+            f"API Key: {existing_key}\n\n"
+            "Authentication Header:\n"
+            "x-api-key: " + existing_key + "\n\n"
+            "Power BI API Endpoints:\n"
+            f"WIDE: {download_wide_url}\n"
+            f"FACT: {download_fact_url}\n"
+            f"RAW:  {download_raw_url}\n\n"
+            "Power Query — Normalized Indicator Fact Dataset:\n"
+            "-----------------------------------------------\n"
+            "let\n"
+            "    Source = Json.Document(\n"
+            "        Web.Contents(\n"
+            f'            "{download_fact_url}",\n'
+            "            [\n"
+            "                Headers = [\n"
+            f'                    #"x-api-key" = "{existing_key}"\n'
+            "                ]\n"
+            "            ]\n"
+            "        )\n"
+            "    ),\n"
+            "    Data = Table.FromRecords(Source[data])\n"
+            "in\n"
+            "    Data\n\n"
+            "SECURITY: Keep this file private. Do not publish the API key.\n"
+            "Use the API key only in the x-api-key HTTP header.\n"
+        )
+
+        dl_col1, dl_col2 = st.columns([1, 1])
+        with dl_col1:
+            st.download_button(
+                "⬇️ Download API Key + Power BI Setup",
+                data=api_key_download,
+                file_name="NEXUS_PowerBI_API_Credentials.txt",
+                mime="text/plain",
+                use_container_width=True,
+                key="download_powerbi_api_credentials",
+            )
+        with dl_col2:
+            st.download_button(
+                "⬇️ Download API Key Only",
+                data=existing_key + "\n",
+                file_name="NEXUS_PowerBI_API_Key.txt",
+                mime="text/plain",
+                use_container_width=True,
+                key="download_powerbi_api_key_only",
+            )
+
         st.success(
             "✅ This API key is authorized to access the Wide, Fact and Raw "
             "Power BI datasets through the `x-api-key` HTTP header."
@@ -15329,3 +15394,4 @@ else:
 # ============================================================
 # END — DANIP AI + SEPARATE DANIP M&E MANAGEMENT HUB
 # ============================================================
+
