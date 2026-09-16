@@ -10371,16 +10371,66 @@ def _me_hub_expand_long_indicator_data(df):
 
 
 def _me_hub_indicator_columns(df):
-    """Return indicators using the same model as AI Public Website Builder.
+    """Return selectable indicator columns while excluding numeric metadata.
 
-    The AI Public Website Builder identifies indicators from numeric dataframe
-    columns. The M&E Hub now uses that exact rule so both workspaces expose the
-    same indicator universe after true long-format data has been normalized.
+    Start with the AI Public Website Builder numeric-column model, then remove
+    columns that are clearly structural metadata such as period IDs/codes,
+    organisation-unit IDs, dates, row numbers and coordinates. This keeps real
+    numeric indicators available without allowing fields such as ``periodid``
+    or ``periodcode`` to appear in the Indicator selector.
     """
     if not isinstance(df, pd.DataFrame) or df.empty:
         return []
 
-    return _me_hub_ai_style_indicator_columns(df)
+    candidates = _me_hub_ai_style_indicator_columns(df)
+    period_col = find_period_column(df)
+    ou_col = find_ou_column(df)
+
+    # Exact structural columns that should never be treated as indicators.
+    exact_metadata = {
+        "id", "uid", "uuid", "code", "year", "month", "day",
+        "quarter", "week", "period", "periodid", "periodcode",
+        "period_id", "period_code", "ou", "ouid", "ou_id",
+        "organisationunitid", "organisationunit_id",
+        "organisation unit id", "orgunitid", "orgunit_id",
+        "level", "rank", "index", "row", "rowid", "row_id",
+        "serial", "sn", "latitude", "longitude", "lat", "lon",
+        "startdate", "enddate", "start_date", "end_date",
+    }
+
+    # Common structural suffixes/patterns. Keep this deliberately narrow so
+    # indicator names such as ``ANC coverage`` are not removed accidentally.
+    metadata_suffixes = ("_id", "_code")
+    metadata_contains = (
+        "periodid", "periodcode", "organisationunitid",
+        "organisationunit_id", "orgunitid", "orgunit_id",
+    )
+
+    excluded = {period_col, ou_col}
+    out = []
+    for col in candidates:
+        low = str(col).strip().lower()
+        compact = low.replace(" ", "").replace("-", "_")
+
+        if col in excluded:
+            continue
+        if low in exact_metadata or compact in exact_metadata:
+            continue
+        if compact.endswith(metadata_suffixes):
+            continue
+        if any(token in compact for token in metadata_contains):
+            continue
+
+        # Pandas datetime columns are dimensions, not numeric indicators.
+        try:
+            if pd.api.types.is_datetime64_any_dtype(df[col]):
+                continue
+        except Exception:
+            pass
+
+        out.append(col)
+
+    return out
 
 def _me_hub_extract_source_indicators(source_url):
     """Extract the complete dx indicator universe from a DHIS2 analytics URL.
@@ -10556,7 +10606,19 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
     if selected_ou!="All": work=work[work["__ME_OU_LABEL__"]==str(selected_ou)]
     if work.empty:
         st.warning("No records match the selected filters."); return
-    if selected_indicator!="All": indicator_cols=[c for c in indicator_cols if str(c)==str(selected_indicator)]
+    # The filter is a multi-select. ``All`` (or an empty selection) means all
+    # valid indicator columns; otherwise keep exactly the indicators selected
+    # by the user. A string is still accepted for backward compatibility.
+    if isinstance(selected_indicator, (list, tuple, set)):
+        selected_values = [str(x) for x in selected_indicator]
+    elif selected_indicator is None:
+        selected_values = []
+    else:
+        selected_values = [str(selected_indicator)]
+
+    if selected_values and "All" not in selected_values:
+        selected_lookup = set(selected_values)
+        indicator_cols = [c for c in indicator_cols if str(c) in selected_lookup]
     if not indicator_cols:
         st.warning("No numeric indicator values were detected in the M&E view.")
         st.caption(
@@ -10732,7 +10794,20 @@ def render_danip_me_management_hub():
     f1, f2, f3, f4, f5 = st.columns(5)
     with f1: f_period = st.selectbox("Period", period_options, key="mehub_period_filter")
     with f2: f_ou = st.selectbox("Organisation Unit Name", ou_options, key="mehub_ou_filter")
-    with f3: f_indicator = st.selectbox("Indicator", indicator_options, key="mehub_indicator_filter")
+    with f3:
+        # Streamlit may retain the old selectbox value after an app update.
+        # Convert/remove that legacy state before creating the multiselect so
+        # the widget always starts with a valid list value.
+        _old_indicator_state = st.session_state.get("mehub_indicator_filter")
+        if _old_indicator_state is not None and not isinstance(_old_indicator_state, list):
+            st.session_state.pop("mehub_indicator_filter", None)
+        f_indicator = st.multiselect(
+            "Indicator(s)",
+            indicator_options,
+            default=["All"],
+            key="mehub_indicator_filter",
+            help="Select one or more indicators. Period, organisation-unit and other structural metadata fields are excluded automatically.",
+        )
     with f4: f_program = st.selectbox("Program Name", program_options, key="mehub_program_filter")
     with f5: f_status = st.selectbox("Program Status", status_options, key="mehub_status_filter")
     g1, g2 = st.columns(2)
@@ -10742,7 +10817,7 @@ def render_danip_me_management_hub():
     # ---------------------------------------------------------
     # LIVE DASHBOARD STATUS / CHANGE NOTIFICATION
     # ---------------------------------------------------------
-    filter_signature = (f_period, f_ou, f_indicator, f_program, f_status, f_sponsor, f_dept)
+    filter_signature = (f_period, f_ou, tuple(f_indicator), f_program, f_status, f_sponsor, f_dept)
     previous_signature = st.session_state.get("mehub_previous_filter_signature")
     if previous_signature is not None and previous_signature != filter_signature:
         st.toast("Dashboard updated — charts and indicators refreshed for the new selection.", icon="🔄")
