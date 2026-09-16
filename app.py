@@ -10171,10 +10171,61 @@ def _me_hub_find_indicator_value(df):
 
 
 def _me_hub_is_long_indicator_data(df):
-    """Return True when the loaded DHIS2/API table is indicator-long format."""
+    """Detect true DHIS2 long-format data without misclassifying wide data.
+
+    The AI Public Website Builder treats numeric dataframe columns as the
+    indicator universe. Therefore M&E must NOT pivot a normal wide dataframe
+    merely because it happens to contain a column named ``indicator``. We only
+    enter long mode when the table clearly has a dimension column (normally
+    ``dx``) paired with a single value/measure column and there are no other
+    numeric indicator columns.
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return False
+
     indicator_col = _me_hub_find_indicator_dimension(df)
     value_col = _me_hub_find_indicator_value(df)
-    return bool(indicator_col and value_col and indicator_col != value_col)
+    if not indicator_col or not value_col or indicator_col == value_col:
+        return False
+
+    # ``dx`` is the canonical DHIS2 long-format indicator dimension.
+    if str(indicator_col).strip().lower() == "dx":
+        return True
+
+    # For generic indicator/data-element columns, require a genuinely long
+    # shape: one measure column and no other numeric columns.
+    numeric_like = []
+    for c in df.columns:
+        if c == indicator_col:
+            continue
+        vals = _me_hub_numeric_series(df[c])
+        if int(vals.notna().sum()) > 0:
+            numeric_like.append(c)
+
+    return len(numeric_like) == 1 and numeric_like[0] == value_col
+
+
+def _me_hub_ai_style_indicator_columns(df):
+    """Use the SAME indicator detection model as AI Public Website Builder.
+
+    The AI Public Website Builder classifies every pandas numeric column as an
+    indicator. This is intentionally simple and is the authoritative indicator
+    model for the M&E Hub as well, so both workspaces see the same indicators.
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return []
+
+    indicators = []
+    for col in df.columns:
+        if str(col).startswith("__ME_"):
+            continue
+        if pd.api.types.is_numeric_dtype(df[col]):
+            indicators.append(col)
+
+    return sorted(
+        indicators,
+        key=lambda x: str(x).lower(),
+    )
 
 
 def _me_hub_expand_long_indicator_data(df):
@@ -10320,86 +10371,16 @@ def _me_hub_expand_long_indicator_data(df):
 
 
 def _me_hub_indicator_columns(df):
-    """Return the COMPLETE indicator universe from wide or DHIS2 long data.
+    """Return indicators using the same model as AI Public Website Builder.
 
-    Wide data:
-        Numeric indicator columns are detected without requiring indicator
-        names to contain words such as VAS/WIFA/Zinc.
-
-    Long data:
-        Every distinct value in dx/indicator/data-element is returned after
-        conversion to the M&E Hub's wide representation.
+    The AI Public Website Builder identifies indicators from numeric dataframe
+    columns. The M&E Hub now uses that exact rule so both workspaces expose the
+    same indicator universe after true long-format data has been normalized.
     """
     if not isinstance(df, pd.DataFrame) or df.empty:
         return []
 
-    # DHIS2 analytics commonly returns dx + value. In that case the indicators
-    # live in ROW VALUES, not in dataframe column names.
-    if _me_hub_is_long_indicator_data(df):
-        indicator_col = _me_hub_find_indicator_dimension(df)
-        values = (
-            df[indicator_col]
-            .dropna()
-            .astype(str)
-            .str.strip()
-        )
-        values = values[values != ""].drop_duplicates().tolist()
-        return sorted(values, key=lambda x: x.lower())
-
-    period_col = find_period_column(df)
-    ou_col = find_ou_column(df)
-
-    excluded_words = [
-        "period", "event date", "date", "organisation", "organization",
-        "org unit", "facility", "program", "programme", "project",
-        "sponsor", "department", "status", "target", "forecast", "budget",
-        "actual cost", "expenditure", "eac", "start date", "finish date",
-        "end date", "created", "updated"
-    ]
-    exact_exclude = {
-        str(x).strip().lower()
-        for x in [period_col, ou_col]
-        if x is not None
-    }
-
-    candidates = []
-    for c in df.columns:
-        name = str(c).strip()
-        low = name.lower()
-
-        if low in exact_exclude:
-            continue
-
-        if low in {
-            "id", "uid", "uuid", "code", "year", "month",
-            "quarter", "level", "rank", "value", "values"
-        }:
-            continue
-
-        if any(w in low for w in excluded_words):
-            continue
-
-        vals = _me_hub_numeric_series(df[c])
-        n = int(vals.notna().sum())
-
-        # Keep only columns that actually contain a numeric observation.
-        if n == 0:
-            continue
-
-        candidates.append((c, n))
-
-    # Also include indicators explicitly requested by the source URL, even when
-    # DHIS2 returned no observation for one of them. The source-universe list is
-    # attached to the dataframe by _me_hub_add_source_indicator_universe().
-    source_universe = getattr(df, "attrs", {}).get("me_source_indicators", [])
-    existing = {str(x) for x, _ in candidates}
-    for indicator in source_universe:
-        indicator = str(indicator).strip()
-        if indicator and indicator not in existing and indicator in df.columns:
-            candidates.append((indicator, 0))
-
-    candidates.sort(key=lambda x: (-x[1], str(x[0]).lower()))
-    return [x[0] for x in candidates]
+    return _me_hub_ai_style_indicator_columns(df)
 
 def _me_hub_extract_source_indicators(source_url):
     """Extract the complete dx indicator universe from a DHIS2 analytics URL.
@@ -10685,25 +10666,25 @@ def render_danip_me_management_hub():
         # The original loaded dataframe remains untouched in session state.
         api_df = _me_hub_resolve_organisation_names(api_df, api_source_url)
 
-        # IMPORTANT:
-        # DHIS2 Analytics can return indicators in long format (dx + value).
-        # Convert that format to the same wide structure used by the Hub so
-        # every returned indicator becomes available to the dropdown/charts.
-        # This fixes the previous behaviour where only numeric COLUMN names
-        # were detected and many DHIS2 indicators were therefore invisible.
+        # IMPORTANT: use the AI Public Website Builder's indicator model.
+        # It treats numeric dataframe columns as the indicator universe.
+        # Only true DHIS2 long-format dx/value data is pivoted first. This
+        # prevents the M&E Hub from changing a correctly shaped AI dataset
+        # and accidentally replacing the real indicators with ``value`` or
+        # metadata-derived columns.
         if _me_hub_is_long_indicator_data(api_df):
             api_df = _me_hub_expand_long_indicator_data(api_df)
 
-        # IMPORTANT: The dataframe only contains indicators for which DHIS2
-        # returned observations. If the analytics URL explicitly requested
-        # additional dx members with no observations, those indicators would
-        # otherwise disappear from the M&E dropdown. Add the complete dx
-        # universe from the source URL as empty columns so every requested
-        # indicator remains selectable.
-        api_df = _me_hub_add_source_indicator_universe(
-            api_df,
-            api_source_url,
-        )
+        # For true long-format DHIS2 data, preserve every requested dx member
+        # from the source URL, including members with no observations. For a
+        # normal wide dataframe, the AI Public Website Builder's numeric-column
+        # model is authoritative and we must NOT inject raw dx IDs as fake
+        # indicator columns.
+        if _me_hub_is_long_indicator_data(st.session_state.get("loaded_df")):
+            api_df = _me_hub_add_source_indicator_universe(
+                api_df,
+                api_source_url,
+            )
 
     api_view = _me_hub_build_api_view(api_df)
     api_programs = api_view["programs"]
