@@ -20,9 +20,9 @@ def root():
         "status": "online",
         "service": "NEXUS Power BI API",
         "endpoints": [
-            "/api/powerbi/fact",
-            "/api/powerbi/wide",
-            "/api/powerbi/raw"
+            "/api/fact",
+            "/api/wide",
+            "/api/raw"
         ]
     }
 
