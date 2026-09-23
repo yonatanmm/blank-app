@@ -9305,6 +9305,66 @@ def _chat_result_area_table(question, rag=None):
     return "\n".join(lines)
 
 
+def _chat_danip_current_analysis_intent(question, df):
+    """Return True when the user question can be answered from the loaded DANIP dataset.
+
+    Matching is deliberately conservative: an explicit indicator code/name in the
+    question, or a strong token overlap with a numeric DANIP indicator column,
+    is enough to treat the request as DANIP analysis.
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return False
+
+    q = _chat_normalize_text(question)
+    if not q:
+        return False
+
+    # Normalize punctuation so codes such as 1300(iii).02 and 1300 iii 02
+    # can be matched consistently.
+    q_compact = re.sub(r"\s+", "", q)
+    q_tokens = set(q.split())
+
+    for col in df.columns:
+        col_text = str(col)
+        name = _chat_normalize_text(col_text)
+        if not name:
+            continue
+
+        name_compact = re.sub(r"\s+", "", name)
+
+        # Exact indicator-name match.
+        if name in q or q in name:
+            return True
+
+        # Explicit indicator-code match, e.g. 1300(iii).02.
+        code_match = re.search(
+            r"\b\d{3,4}\s*\(?[ivxIVX]{1,5}\)?\s*\.?\s*\d{1,3}\b",
+            col_text,
+        )
+        if code_match:
+            code = _chat_normalize_text(code_match.group(0))
+            if code and (code in q or re.sub(r"\s+", "", code) in q_compact):
+                return True
+
+        # Strong token overlap for numeric indicator columns.
+        if col not in get_numeric_columns(df):
+            continue
+        name_tokens = set(name.split())
+        overlap = q_tokens & name_tokens
+        if len(overlap) >= 3:
+            return True
+        if len(overlap) >= 2 and any(
+            t in overlap for t in (
+                "children", "women", "pregnant", "zinc", "ors", "diarrhoea",
+                "diarrhea", "wifa", "vas", "mms", "received", "consumed",
+                "coverage", "number", "additional",
+            )
+        ):
+            return True
+
+    return False
+
+
 def _chat_requires_current_data(question):
     q=str(question or "").lower()
     terms=(
