@@ -9614,112 +9614,110 @@ def _chat_parameter_table_answer(question, rag):
 
 
 def _chat_parameter_table_from_context(question, context):
-    """Build the ISG Parameter/Description table using the original
-    compendium breakdown and source order. No prose compression."""
+    """Render one indicator in the original ISG Parameter / Description format."""
     context = str(context or "").strip()
     if not context:
         return ""
 
     labels = [
-        "Intervention",
-        "Indicator name",
-        "PMF expected results statement",
-        "Indicator code",
-        "Rolls into",
-        "Akin indicators",
-        "Interventions",
-        "Definition",
-        "Recommended course public sector",
-        "Recommended course private sector",
-        "Purpose/ objective",
-        "Purpose/objective",
-        "Relevance",
-        "Measurement Unit",
-        "Data Source",
-        "Supply chain method",
-        "Data Collection Frequency",
-        "Baseline",
-        "Target",
-        "Routine data/HMIS",
-        "Calculation Method",
-        "Interpretation",
-        "Use/Application",
-        "Data quality considerations",
-        "Reporting and Dissemination",
-        "References",
-        "Version",
-        "Date of update",
+        "Intervention", "Indicator name", "PMF expected results statement",
+        "Indicator code", "Rolls into", "Akin indicators", "Interventions",
+        "Definition", "Recommended course public sector",
+        "Recommended course private sector", "Purpose/ objective",
+        "Purpose/objective", "Relevance", "Measurement Unit", "Data Source",
+        "Supply chain method", "Data Collection Frequency", "Baseline",
+        "Target", "Routine data/HMIS", "Calculation Method", "Interpretation",
+        "Use/Application", "Data quality considerations",
+        "Reporting and Dissemination", "References", "Version", "Date of update",
     ]
 
-    clean = re.sub(r"\[RAG\s+\d+\s*\|[^\]]+\]\s*", "", context)
+    clean = re.sub(r"\[RAG\s+\d+\s*\|[^\]]+\]\s*", "\n", context)
     clean = clean.replace("\r\n", "\n").replace("\r", "\n")
+    clean = re.sub(r"[ \t]+", " ", clean)
+    clean = re.sub(r"\n{3,}", "\n\n", clean).strip()
 
-    requested_codes = re.findall(
-        r"\b\d{4}[a-z]?(?:\.\d+)?(?:\([ivx]+\))?\b",
-        str(question or ""), flags=re.I,
+    code_match = re.search(
+        r"\b(\d{3,4}\s*\(\s*[ivxIVX]+\s*\)\s*\.?\s*\d{1,2})\b",
+        str(question or ""),
     )
-    requested_codes = [x.lower() for x in requested_codes if x not in {"2025", "2030"}]
+    if not code_match:
+        code_match = re.search(r"\b(\d{3,4}\s*\.\s*\d{1,2})\b", str(question or ""))
 
-    lines = [re.sub(r"\s+", " ", x).strip() for x in clean.splitlines()]
-    lines = [x for x in lines if x]
-    lines = [x for x in lines if x.lower() not in ("parameter description", "parameter", "description")]
+    def norm_code(value):
+        return re.sub(r"[\s.]", "", str(value or "").lower())
 
-    label_lookup = {re.sub(r"\s+", " ", x).strip().lower(): x for x in labels}
-    occurrences = []
-    for idx, line in enumerate(lines):
-        low = line.lower().strip()
-        matched = None
-        remainder = ""
-        if low in label_lookup:
-            matched = label_lookup[low]
-        else:
-            for norm, original in sorted(label_lookup.items(), key=lambda z: -len(z[0])):
-                if low.startswith(norm + ":"):
-                    matched = original
-                    remainder = line[len(norm) + 1:].strip()
-                    break
-                if low.startswith(norm + " ") and len(line) > len(norm) + 1:
-                    matched = original
-                    remainder = line[len(norm):].strip(" :")
-                    break
-        if matched:
-            occurrences.append((idx, matched, remainder))
+    requested_code = norm_code(code_match.group(1)) if code_match else ""
 
-    if not occurrences:
+    # Select the most relevant retrieved passage so adjacent indicators
+    # (e.g. .01, .03, .04) are not merged into the requested indicator.
+    passages = [p.strip() for p in re.split(r"\n\s*\n", clean) if p.strip()]
+    selected = clean
+    if requested_code:
+        candidates = []
+        for p in passages:
+            if requested_code not in norm_code(p):
+                continue
+            score = 0
+            if re.search(r"Parameter\s+Description", p, re.I): score += 6
+            if re.search(r"\bIndicator name\b", p, re.I): score += 3
+            if re.search(r"\bDefinition\b", p, re.I): score += 3
+            candidates.append((score, len(p), p))
+        if candidates:
+            candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+            selected = candidates[0][2]
+
+    pd_pos = re.search(r"Parameter\s+Description", selected, re.I)
+    if pd_pos:
+        selected = selected[pd_pos.end():].strip()
+
+    # Detect labels even when the Word table was flattened onto one line.
+    label_pattern = "|".join(
+        re.escape(x) for x in sorted(set(labels), key=len, reverse=True)
+    )
+    marker = re.compile(
+        rf"(?<![A-Za-z])(?P<label>{label_pattern})(?=(?:\s*:?\s+|$))",
+        re.I,
+    )
+    matches = list(marker.finditer(selected))
+    if not matches:
         return ""
 
     data = {}
-    for n, (start_i, label, same_line_value) in enumerate(occurrences):
-        end_i = occurrences[n + 1][0] if n + 1 < len(occurrences) else len(lines)
-        vals = []
-        if same_line_value:
-            vals.append(same_line_value)
-        vals.extend(lines[start_i + 1:end_i])
-        vals = [v for v in vals if v and v.lower() not in ("parameter description", "parameter", "description")]
-        value = re.sub(r"\s+", " ", " ".join(vals).strip())
-        if label not in data or len(value) > len(data[label]):
-            data[label] = value
+    for i, m in enumerate(matches):
+        raw_label = m.group("label")
+        canonical = next(
+            x for x in labels if x.lower() == raw_label.lower()
+        )
+        value_start = m.end()
+        if value_start < len(selected) and selected[value_start] == ":":
+            value_start += 1
+        value_end = matches[i + 1].start() if i + 1 < len(matches) else len(selected)
+        value = re.sub(r"\s+", " ", selected[value_start:value_end]).strip(" :;-")
+        if not value:
+            continue
+        if canonical == "Purpose/objective":
+            canonical = "Purpose/ objective"
+        if canonical not in data:
+            data[canonical] = value
 
-    if "Purpose/objective" in data and "Purpose/ objective" not in data:
-        data["Purpose/ objective"] = data.pop("Purpose/objective")
+    # The code may be represented with spaces in the compendium.
+    if requested_code:
+        if not any(requested_code in norm_code(v) for v in data.values()):
+            # Accept a strong indicator-name match if the flattened source
+            # separated the code from its Indicator name field.
+            q = str(question or "").lower()
+            q_words = set(re.findall(r"[a-z]{4,}", q))
+            i_words = set(re.findall(r"[a-z]{4,}", data.get("Indicator name", "").lower()))
+            if len(q_words & i_words) < 4:
+                return ""
 
-    if requested_codes:
-        joined = " ".join(data.values()).lower()
-        if not any(code in joined for code in requested_codes):
-            return ""
-
-    ordered = []
-    for label in labels:
-        if label in data and data[label] and label not in ordered:
-            ordered.append(label)
-
+    ordered = [x for x in labels if x in data and data[x]]
     if not ordered:
         return ""
 
     out = ["| Parameter | Description |", "|---|---|"]
     for label in ordered:
-        value = data[label].replace("|", r"\|")
-        out.append(f"| {label} | {value} |")
+        out.append(f"| {label} | {data[label].replace('|', r'\\|')} |")
     return "\n".join(out)
 
 
