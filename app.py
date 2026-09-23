@@ -8967,7 +8967,7 @@ If no credible source is found, say so explicitly.
         "error": error_text,
     }
 
-def research_mne_external_context(question, indicators=None):
+def research_mne_external_context(question, indicators=None, danip_evidence=None, rag_context=None):
     """Automatically retrieve authoritative external M&E context for every analysis question.
 
     Dashboard/DHIS2 values remain the numerical source of truth. External web evidence is
@@ -8983,41 +8983,69 @@ def research_mne_external_context(question, indicators=None):
     indicators = indicators or []
     indicator_text = "\n".join(f"- {str(x)}" for x in indicators[:5]) or "- No specific indicator confidently identified."
 
-    prompt = f"""
-You are the external evidence layer for a DHIS2 nutrition/public-health M&E analysis.
+    # The external layer receives the actual DANIP evidence and internal KM context.
+    # This is critical for a true comparison: external search must know exactly what
+    # DANIP measured before it decides whether an outside source is comparable.
+    danip_payload = danip_evidence or {}
+    km_payload = rag_context or {}
 
-Use web search for this request. Find authoritative external evidence that helps interpret the
-indicator(s) and the M&E question. The external evidence must NOT replace or modify any dashboard
-number.
+    prompt = f"""
+You are the THIRD and final evidence layer in a strict three-level DANIP M&E search hierarchy.
+
+SEARCH ORDER:
+1. INTERNAL DANIP / DHIS2 — source of truth for observed programme values.
+2. INTERNAL KM / ISG INDICATOR COMPENDIUM — source of truth for official internal definitions and metadata.
+3. EXTERNAL AUTHORITATIVE SOURCES — UNICEF, WHO, UN, World Bank and similar sources.
+
+The user explicitly requested external evidence or comparison. Use web search.
+Your job is NOT to produce a generic external summary. Your job is to determine whether
+a requested external source contains evidence that can actually be compared with the current DANIP result.
 
 USER QUESTION:
 {question}
 
-CURRENT INDICATORS:
+DANIP INDICATORS IDENTIFIED:
 {indicator_text}
 
-SOURCE PRIORITY:
-1. WHO / data.who.int
-2. UNICEF / data.unicef.org
-3. UNFPA / data.unfpa.org
-4. United Nations / UN Statistics
-5. World Bank
-6. Nutrition International
-7. DHIS2 / DHIS2 documentation
-8. Other major public-health institutions only when the above do not provide a suitable source
+LEVEL 1 — CURRENT DANIP / DHIS2 EVIDENCE:
+{safe_json_dumps(danip_payload)}
 
-MATCHING RULES:
-- Prefer sources whose population, timing, definition and measurement match the indicator.
-- Label a source EXACT MATCH only when the definition is materially aligned.
-- Otherwise label it RELATED MATCH.
-- Never invent a definition, target, benchmark, statistic, publication or URL.
-- Do not use dashboard values as external evidence.
-- Do not use external evidence to cap, recalculate, replace or alter dashboard values.
-- Do not infer programme causality from descriptive dashboard data.
-- If no suitable source is found, explicitly state: NO VERIFIED EXTERNAL MATCH.
+LEVEL 2 — INTERNAL KM / ISG COMPENDIUM:
+{_rag_context_text(km_payload) if km_payload else "No internal KM passage was retrieved."}
 
-Return concise evidence with organization, publication/title, date/year when available, match status,
-key contextual point, relevance to M&E interpretation, and source URL when available.
+EXTERNAL SEARCH PRIORITY:
+1. Explicitly requested organisation/source (for example UNICEF Ethiopia).
+2. Requested country/geography.
+3. Requested year/reporting period (for example 2026 / this year).
+4. WHO / UNICEF / UN / UNFPA / World Bank authoritative sources.
+
+COMPARABILITY TEST — REQUIRED:
+Before reporting an external number, compare all of these:
+- indicator concept/name
+- population
+- geography
+- reporting period/year
+- numerator and denominator, when applicable
+- measurement unit
+- coverage/count/rate definition
+
+Classify the external evidence as:
+- DIRECTLY COMPARABLE: materially aligned on the above dimensions.
+- RELATED BUT NOT DIRECTLY COMPARABLE: relevant, but one or more dimensions differ.
+- NO VERIFIED MATCH: no suitable authoritative evidence found.
+
+IMPORTANT:
+- Never invent an external number.
+- Never estimate an external number from another indicator.
+- Never treat IFA-or-MMS as MMS-only.
+- Never treat a regional value as a national value.
+- Never treat a target as an achieved result.
+- Never change, cap, replace or recalculate the DANIP value.
+- If no directly comparable value exists, explicitly return: NO DIRECTLY COMPARABLE EXTERNAL VALUE FOUND.
+- If a related source exists, report its actual value and explain the mismatch.
+- Include organisation, report/title, publication date/year, geography, value/unit, match status, comparison note and source URL.
+
+Return concise structured evidence suitable for insertion into a DANIP answer.
 """
 
     try:
@@ -9943,6 +9971,18 @@ def ask_analysis_chatbot(
             top_k=(50 if report_intent else RAG_TOP_K),
         )
 
+    # Build deterministic DANIP evidence BEFORE external search. The external layer
+    # must receive this evidence so it can perform a real comparability check.
+    evidence=build_analysis_chat_evidence(
+        df=current_df,
+        source_url=current_source,
+        chart_plan=chart_plan,
+        quality_issues=quality_issues,
+        quality_matrix=quality_matrix,
+        quality_summary=quality_summary,
+        question=question,
+    )
+
     # LEVEL 3 — EXTERNAL AUTHORITATIVE EVIDENCE
     # External research is performed after DANIP + KM. It can validate/contextualize
     # the interpretation or provide an explicit comparison requested by the user.
@@ -9958,6 +9998,8 @@ def ask_analysis_chatbot(
             external_context=research_mne_external_context(
                 question=question,
                 indicators=indicators,
+                danip_evidence=evidence,
+                rag_context=rag_context,
             ) or external_context
         except Exception as exc:
             external_context={
@@ -9994,16 +10036,6 @@ the DANIP result, include a clearly labelled **External comparison** section.
         chart_plan=chart_plan,
         quality_issues=quality_issues,
     )
-    evidence=build_analysis_chat_evidence(
-        df=current_df,
-        source_url=current_source,
-        chart_plan=chart_plan,
-        quality_issues=quality_issues,
-        quality_matrix=quality_matrix,
-        quality_summary=quality_summary,
-        question=question,
-    )
-
     # Never return external research as the answer for a DANIP analytical
     # question. It is context for interpretation only.
 
@@ -10030,7 +10062,7 @@ CRITICAL OUTPUT RULE:
 The final answer for a DANIP analytical question must be presented as DANIP analytics.
 Do NOT replace the DANIP result with internal KM or external statistics.
 Do NOT display external research results, external benchmarks, external URLs or a separate external-evidence section UNLESS the user explicitly asks for an external comparison/source/report.
-When the user explicitly asks for an external comparison, show the verified external evidence in a separate **External comparison** section after the DANIP analysis.
+When the user explicitly asks for an external comparison, show the verified external evidence in a separate **External comparison** section after the DANIP analysis. The section MUST state the DANIP value alongside the external value, match status, and the reason for comparability/non-comparability.
 Do NOT display the internal KM retrieval as the answer when the user is asking what the DANIP data show.
 Internal KM and external evidence are background/context unless the user explicitly requests the external comparison.
 
@@ -10066,9 +10098,21 @@ CURRENT DHIS2 SOURCE:
 CURRENT DHIS2 / DETERMINISTIC EVIDENCE:
 {safe_json_dumps(evidence)}
 
-EXTERNAL RESEARCH CONTEXT:
+EXTERNAL RESEARCH CONTEXT (LEVEL 3):
 {safe_json_dumps(external_context)}
 {external_comparison_instruction}
+
+EXTERNAL COMPARISON OUTPUT RULE:
+If external comparison was explicitly requested, do not hide the external result in the narrative.
+Use this format:
+## External comparison
+| Dimension | DANIP | External source | Assessment |
+|---|---|---|---|
+| Indicator | ... | ... | ... |
+| Geography | ... | ... | ... |
+| Period | ... | ... | ... |
+| Value | ... | ... | DIRECTLY COMPARABLE / RELATED BUT NOT DIRECTLY COMPARABLE / NO VERIFIED MATCH |
+Then explain the comparison in 1-3 sentences. If the external layer returned no directly comparable value, say exactly: **NO DIRECTLY COMPARABLE EXTERNAL VALUE FOUND.** Do not invent one.
 
 USER-FACING ANSWER REQUIREMENT:
 For DANIP analytical questions, present only the current DANIP/DHIS2 findings and their M&E interpretation. Internal KM and external research are supporting context and must not become a separate answer section.
