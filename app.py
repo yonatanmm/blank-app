@@ -9875,6 +9875,62 @@ Retrieved compendium passages:
     return {"status":"RAG_RETRIEVED","source":"ISG_INDICATOR_COMPENDIUM","text":f"### Indicator / M&E knowledge\n\n{context}"}
 
 
+def _chat_external_status_block(external_context, explicit_external_request=False):
+    """Build a visible, deterministic Level-3 external-RAG status block."""
+    if not explicit_external_request:
+        return "", "NOT_REQUESTED"
+
+    ctx = external_context or {}
+    status = str(ctx.get("status", "UNKNOWN")).upper()
+    text = str(ctx.get("text", "") or "").strip()
+    sources = ctx.get("sources", []) or []
+
+    lower = text.lower()
+    if status == "SUCCESS":
+        if "no directly comparable external value found" in lower or "no verified match" in lower:
+            label = "NOT FOUND — NO DIRECTLY COMPARABLE EXTERNAL DATA"
+        elif "related but not directly comparable" in lower or "not directly comparable" in lower:
+            label = "FOUND — RELATED BUT NOT DIRECTLY COMPARABLE"
+        elif "directly comparable" in lower:
+            label = "FOUND — DIRECTLY COMPARABLE"
+        else:
+            label = "FOUND — EXTERNAL EVIDENCE RETURNED"
+    elif status == "DISABLED":
+        label = "NOT AVAILABLE — EXTERNAL SEARCH DISABLED"
+    elif status == "ERROR":
+        label = "SEARCH ERROR — EXTERNAL SOURCE COULD NOT BE QUERIED"
+    else:
+        label = "NOT FOUND — NO VERIFIED EXTERNAL EVIDENCE"
+
+    lines = [
+        "## 🌐 External RAG Analysis",
+        "",
+        f"**Status: {label}**",
+        "",
+    ]
+
+    if text:
+        lines.append(text)
+        lines.append("")
+    else:
+        if "NOT FOUND" in label:
+            lines.append("No directly comparable external value was verified from the searched authoritative sources.")
+        elif "SEARCH ERROR" in label:
+            lines.append("The external search could not be completed. DANIP results were not replaced or altered.")
+        else:
+            lines.append("No external evidence was returned.")
+        lines.append("")
+
+    if sources:
+        lines.append("**External sources:**")
+        for url in sources[:12]:
+            lines.append(f"- {url}")
+        lines.append("")
+
+    lines.append("External evidence is contextual only and never replaces DANIP/DHIS2 observed values.")
+    return "\n".join(lines), label
+
+
 def ask_analysis_chatbot(
     user_question,
     df=None,
@@ -10265,13 +10321,42 @@ For a NORMAL NON-REPORT QUESTION, remain concise and use sections where useful:
             response=client.responses.create(model=model,input=prompt)
             answer=(response.output_text or "").strip()
             if answer:
-                return {"status":"SUCCESS","source":"OPENAI_M_AND_E","model":model,"text":answer,"sources":[]}
+                external_block, external_label = _chat_external_status_block(
+                    external_context, explicit_external_request=explicit_external_request
+                )
+                if explicit_external_request and external_block and "## 🌐 External RAG Analysis" not in answer:
+                    answer = answer.rstrip() + "\n\n---\n\n" + external_block
+                return {
+                    "status":"SUCCESS",
+                    "source":"OPENAI_M_AND_E",
+                    "model":model,
+                    "text":answer,
+                    "sources":external_context.get("sources", []) if explicit_external_request else [],
+                    "external_status":external_context.get("status", "NOT_REQUESTED"),
+                    "external_label":external_label,
+                    "external_engine":external_context.get("engine", ""),
+                }
         except Exception as exc:
             msg=str(exc); errors.append(f"{model}: {msg}")
             low=msg.lower()
             if any(t in low for t in ("insufficient_quota","credit_balance_exhausted","rate limit","429","invalid_api_key","401","authentication")):
                 break
-    return {"status":"FALLBACK","source":"LOCAL_M_AND_E","text":local_answer,"error":" | ".join(errors)[-3000:]}
+    external_block, external_label = _chat_external_status_block(
+        external_context, explicit_external_request=explicit_external_request
+    )
+    fallback_text = local_answer
+    if explicit_external_request and external_block and "## 🌐 External RAG Analysis" not in fallback_text:
+        fallback_text = fallback_text.rstrip() + "\n\n---\n\n" + external_block
+    return {
+        "status":"FALLBACK",
+        "source":"LOCAL_M_AND_E",
+        "text":fallback_text,
+        "error":" | ".join(errors)[-3000:],
+        "sources":external_context.get("sources", []) if explicit_external_request else [],
+        "external_status":external_context.get("status", "NOT_REQUESTED"),
+        "external_label":external_label,
+        "external_engine":external_context.get("engine", ""),
+    }
 
 
 def render_analysis_chatbot(
@@ -10342,7 +10427,11 @@ def render_analysis_chatbot(
         if (result or {}).get("source")=="ISG_INDICATOR_COMPENDIUM":
             st.caption("📚 Source: ISG Indicator Compendium (RAG)")
         elif (result or {}).get("source") in ("LOCAL_M_AND_E","OPENAI_M_AND_E"):
-            st.caption("📊 Current numerical evidence: DHIS2/API when loaded · 📚 Indicator knowledge: ISG Indicator Compendium when relevant")
+            base_caption = "📊 Current numerical evidence: DHIS2/API when loaded · 📚 Indicator knowledge: ISG Indicator Compendium when relevant"
+            external_label = (result or {}).get("external_label", "")
+            if external_label:
+                base_caption += f" · 🌐 External RAG: {external_label}"
+            st.caption(base_caption)
         elif (result or {}).get("source")=="NO_DHIS2_DATA":
             st.caption("ℹ️ No DHIS2/API data is loaded; this response is limited to knowledge/M&E content.")
 
