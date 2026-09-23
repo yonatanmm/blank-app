@@ -10383,6 +10383,34 @@ def render_analysis_chatbot(
     if "analysis_chat_messages" not in st.session_state:
         st.session_state["analysis_chat_messages"]=[]
 
+    # Chat-only controls: clear conversation context without touching DHIS2/API
+    # data, dashboard results, or other application state.
+    chat_col1, chat_col2, chat_col3 = st.columns([1.35, 1.35, 4.3])
+    with chat_col1:
+        new_question_clicked = st.button(
+            "🆕 New Question",
+            key="analysis_chat_new_question",
+            use_container_width=True,
+            help="Start a new independent question while keeping the loaded data."
+        )
+    with chat_col2:
+        reset_chat_clicked = st.button(
+            "🧹 Reset Chat",
+            key="analysis_chat_reset_only",
+            use_container_width=True,
+            help="Clear only chatbot analysis and conversation context."
+        )
+    with chat_col3:
+        st.caption("💡 New Question clears previous conversation context so the AI analyzes the next question independently.")
+
+    if new_question_clicked or reset_chat_clicked:
+        st.session_state["analysis_chat_messages"] = []
+        st.session_state["analysis_chat_last_result"] = None
+        st.session_state["analysis_chat_external_status"] = None
+        st.session_state["analysis_chat_new_question_mode"] = True
+        # Keep the current DHIS2/API source and all dashboard/application data.
+        st.rerun()
+
     st.markdown("""
     <div class="danip-analysis-chat">
       <div class="chat-kicker">NEXUS AI · INDEPENDENT M&E ASSISTANT</div>
@@ -10436,6 +10464,8 @@ def render_analysis_chatbot(
             st.caption("ℹ️ No DHIS2/API data is loaded; this response is limited to knowledge/M&E content.")
 
     st.session_state["analysis_chat_messages"].append({"role":"assistant","content":answer})
+    st.session_state["analysis_chat_last_result"] = result
+    st.session_state["analysis_chat_new_question_mode"] = False
 
 
 # ============================================================
