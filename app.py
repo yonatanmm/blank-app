@@ -10393,18 +10393,6 @@ def render_analysis_chatbot(
     clear_chat_clicked = False
 
     st.markdown("""
-    <style>
-      /* Compact clear-chat control beside the Streamlit chat input. */
-      div[data-testid="stButton"] button[kind="secondary"] {
-        border-radius: 10px;
-      }
-      [data-testid="stVerticalBlock"]:has(button[aria-label*="Clear only chatbot chat"]) {
-        min-width: 0;
-      }
-    </style>
-    """, unsafe_allow_html=True)
-
-    st.markdown("""
     <div class="danip-analysis-chat">
       <div class="chat-kicker">NEXUS AI · INDEPENDENT M&E ASSISTANT</div>
       <div class="chat-title">💬 Ask an Indicator or M&E Question</div>
@@ -10428,23 +10416,77 @@ def render_analysis_chatbot(
             # an HTML div would display the table syntax as plain text.
             st.markdown(message.get("content", ""))
 
-    # Put the clear-chat icon immediately beside the chat input.
-    # Current Streamlit supports st.chat_input inside columns/containers, which
-    # lets the reset icon stay visually attached to the chatbot rather than
-    # being hidden above the conversation.
-    input_col, clear_col = st.columns([12, 1], gap="small", vertical_alignment="bottom")
-    with input_col:
-        question=st.chat_input(
-            "Ask: What is VAS coverage? What is Impact Result 1000? What is the numerator?",
-            key="analysis_chat_input",
-        )
-    with clear_col:
-        clear_chat_clicked = st.button(
-            "🧹",
-            key="analysis_chat_clear_icon",
-            help="Clear only chatbot chat. DHIS2/API data and dashboard analysis will remain unchanged.",
-            use_container_width=True,
-        )
+    # Keep the clear control visually attached to the SAME chat composer.
+    # st.chat_input is rendered in Streamlit's fixed bottom layer, so putting
+    # the button in a normal second column makes it jump to the far right.
+    # We keep the widget in the same main content area and pull the clear
+    # control back to the right edge of the chat composer with responsive CSS.
+    question=st.chat_input(
+        "Ask: What is VAS coverage? What is Impact Result 1000? What is the numerator?",
+        key="analysis_chat_input",
+    )
+
+    clear_chat_clicked = st.button(
+        "🧹",
+        key="analysis_chat_clear_icon",
+        help="Clear only chatbot chat. DHIS2/API data and dashboard analysis will remain unchanged.",
+    )
+
+    st.markdown("""
+    <style>
+      /* Move ONLY this clear button into the chat-composer zone. */
+      div.st-key-analysis_chat_clear_icon {
+        position: fixed !important;
+        z-index: 1002 !important;
+        bottom: 17px !important;
+        left: calc(50% + 10px) !important;
+        width: 38px !important;
+        height: 38px !important;
+        margin: 0 !important;
+        padding: 0 !important;
+      }
+
+      div.st-key-analysis_chat_clear_icon button {
+        width: 38px !important;
+        height: 38px !important;
+        min-width: 38px !important;
+        min-height: 38px !important;
+        padding: 0 !important;
+        border-radius: 9px !important;
+        border: 1px solid #cbd5e1 !important;
+        background: #ffffff !important;
+        color: #334155 !important;
+        box-shadow: 0 2px 8px rgba(15,23,42,.08) !important;
+      }
+
+      div.st-key-analysis_chat_clear_icon button:hover {
+        background: #f8fafc !important;
+        border-color: #94a3b8 !important;
+      }
+
+      @media (max-width: 1000px) {
+        div.st-key-analysis_chat_clear_icon {
+          left: auto !important;
+          right: 58px !important;
+          bottom: 16px !important;
+        }
+      }
+
+      @media (max-width: 640px) {
+        div.st-key-analysis_chat_clear_icon {
+          right: 52px !important;
+          bottom: 15px !important;
+        }
+        div.st-key-analysis_chat_clear_icon button {
+          width: 34px !important;
+          height: 34px !important;
+          min-width: 34px !important;
+          min-height: 34px !important;
+          border-radius: 8px !important;
+        }
+      }
+    </style>
+    """, unsafe_allow_html=True)
 
     if clear_chat_clicked:
         st.session_state["analysis_chat_messages"] = []
