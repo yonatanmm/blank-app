@@ -9553,30 +9553,159 @@ def _chat_parameter_table_answer(question, rag):
     return _chat_parameter_table_fallback(context)
 
 
-def _chat_parameter_table_fallback(context):
-    """Conservative fallback for Parameter/Description formatting."""
-    text = re.sub(r'\[RAG\s+\d+\s*\|[^\]]+\]\s*', '', str(context or ''))
+def _chat_parameter_table_from_context(question, context):
+    """Build the ISG Parameter/Description table using the original
+    compendium breakdown and source order. No prose compression."""
+    context = str(context or "").strip()
+    if not context:
+        return ""
+
     labels = [
-        'Intervention','Indicator name','PMF expected results statement','Indicator code',
-        'Rolls into','Akin indicators','Definition','Purpose/ objective','Relevance',
-        'Measurement Unit','Data Source','Data Collection Frequency','Baseline','Target',
-        'Calculation Method','Interpretation','Use/Application','Data quality considerations',
-        'Reporting and Dissemination','References','Version','Date of update'
+        "Intervention",
+        "Indicator name",
+        "PMF expected results statement",
+        "Indicator code",
+        "Rolls into",
+        "Akin indicators",
+        "Interventions",
+        "Definition",
+        "Recommended course public sector",
+        "Recommended course private sector",
+        "Purpose/ objective",
+        "Purpose/objective",
+        "Relevance",
+        "Measurement Unit",
+        "Data Source",
+        "Supply chain method",
+        "Data Collection Frequency",
+        "Baseline",
+        "Target",
+        "Routine data/HMIS",
+        "Calculation Method",
+        "Interpretation",
+        "Use/Application",
+        "Data quality considerations",
+        "Reporting and Dissemination",
+        "References",
+        "Version",
+        "Date of update",
     ]
-    # This fallback only uses explicit label/value patterns; it never invents values.
-    rows=[]
+
+    clean = re.sub(r"\[RAG\s+\d+\s*\|[^\]]+\]\s*", "", context)
+    clean = clean.replace("\r\n", "\n").replace("\r", "\n")
+
+    requested_codes = re.findall(
+        r"\b\d{4}[a-z]?(?:\.\d+)?(?:\([ivx]+\))?\b",
+        str(question or ""), flags=re.I,
+    )
+    requested_codes = [x.lower() for x in requested_codes if x not in {"2025", "2030"}]
+
+    lines = [re.sub(r"\s+", " ", x).strip() for x in clean.splitlines()]
+    lines = [x for x in lines if x]
+    lines = [x for x in lines if x.lower() not in ("parameter description", "parameter", "description")]
+
+    label_lookup = {re.sub(r"\s+", " ", x).strip().lower(): x for x in labels}
+    occurrences = []
+    for idx, line in enumerate(lines):
+        low = line.lower().strip()
+        matched = None
+        remainder = ""
+        if low in label_lookup:
+            matched = label_lookup[low]
+        else:
+            for norm, original in sorted(label_lookup.items(), key=lambda z: -len(z[0])):
+                if low.startswith(norm + ":"):
+                    matched = original
+                    remainder = line[len(norm) + 1:].strip()
+                    break
+                if low.startswith(norm + " ") and len(line) > len(norm) + 1:
+                    matched = original
+                    remainder = line[len(norm):].strip(" :")
+                    break
+        if matched:
+            occurrences.append((idx, matched, remainder))
+
+    if not occurrences:
+        return ""
+
+    data = {}
+    for n, (start_i, label, same_line_value) in enumerate(occurrences):
+        end_i = occurrences[n + 1][0] if n + 1 < len(occurrences) else len(lines)
+        vals = []
+        if same_line_value:
+            vals.append(same_line_value)
+        vals.extend(lines[start_i + 1:end_i])
+        vals = [v for v in vals if v and v.lower() not in ("parameter description", "parameter", "description")]
+        value = re.sub(r"\s+", " ", " ".join(vals).strip())
+        if label not in data or len(value) > len(data[label]):
+            data[label] = value
+
+    if "Purpose/objective" in data and "Purpose/ objective" not in data:
+        data["Purpose/ objective"] = data.pop("Purpose/objective")
+
+    if requested_codes:
+        joined = " ".join(data.values()).lower()
+        if not any(code in joined for code in requested_codes):
+            return ""
+
+    ordered = []
     for label in labels:
-        m=re.search(rf'(?im)^\s*{re.escape(label)}\s*[:\-]?\s*(.+?)(?=\n\s*(?:' + '|'.join(re.escape(x) for x in labels if x != label) + r')\s*[:\-]?\s*|\Z)', text, re.S)
-        if m:
-            value=re.sub(r'\s+',' ',m.group(1)).strip(' |')
-            if value:
-                rows.append((label,value))
-    if not rows:
-        return ''
-    out=['| Parameter | Description |','|---|---|']
-    for k,v in rows:
-        out.append(f'| {k} | {v.replace(chr(10), " ").replace("|", "\\|")} |')
-    return '\n'.join(out)
+        if label in data and data[label] and label not in ordered:
+            ordered.append(label)
+
+    if not ordered:
+        return ""
+
+    out = ["| Parameter | Description |", "|---|---|"]
+    for label in ordered:
+        value = data[label].replace("|", r"\|")
+        out.append(f"| {label} | {value} |")
+    return "\n".join(out)
+
+
+def _chat_parameter_table_answer(question, rag):
+    """Original ISG compendium breakdown: one parameter per row."""
+    context = _rag_context_text(rag)
+    if not context:
+        return ""
+    return _chat_parameter_table_from_context(question, context)
+
+
+def _chat_add_danip_interpretation(result, question, current_df, chart_plan=None, quality_issues=None):
+    """Add ONLY the DANIP interpretation below the original compendium table."""
+    if not result or not isinstance(current_df, pd.DataFrame) or current_df.empty:
+        return result
+    if not _chat_is_indicator_detail_question(question):
+        return result
+
+    indicators = _chat_indicator_candidates(question, current_df, chart_plan=chart_plan, limit=3)
+    if not indicators and isinstance(chart_plan, dict):
+        indicators = [c for c in (chart_plan.get("y_columns") or []) if c in current_df.columns][:3]
+    if not indicators:
+        return result
+
+    try:
+        interpretation = _chat_local_mne_answer(
+            question=question,
+            df=current_df,
+            indicators=indicators,
+            chart_plan=chart_plan,
+            quality_issues=quality_issues,
+        )
+    except Exception:
+        interpretation = ""
+
+    if not interpretation:
+        return result
+
+    # Keep the compendium exactly as returned; append only a separate DANIP section.
+    result["text"] = (
+        result.get("text", "").rstrip()
+        + "\n\n---\n\n## DANIP Interpretation\n\n"
+        + str(interpretation).strip()
+    )
+    result["danip_interpretation"] = True
+    return result
 
 
 def _chat_rag_knowledge_answer(question, rag):
@@ -9675,6 +9804,8 @@ def ask_analysis_chatbot(
     if rag_intent and not mixed_intent and not (current_intent and not any(x in question.lower() for x in ("compendium","official definition","indicator definition","numerator","denominator","formula"))):
         rag=retrieve_rag_context(question, indicators=[], top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K))
         result=_chat_rag_knowledge_answer(question,rag)
+        if isinstance(current_df, pd.DataFrame) and not current_df.empty:
+            result=_chat_add_danip_interpretation(result, question, current_df, chart_plan=chart_plan, quality_issues=quality_issues)
         result["rag_warnings"]=rag.get("warnings",[])
         return result
 
@@ -9765,12 +9896,6 @@ RULES:
 6. Distinguish observation from possible explanation; do not claim causality from descriptive data.
 7. If asked for a report, generate the report directly from the evidence.
 8. Do not require a DHIS2 link for general M&E or indicator-definition questions.
-9. When the question is an indicator/compendium question AND current DANIP/DHIS2 evidence is available, preserve the existing compendium answer and its standard Parameter / Description format exactly. Then append one additional section only:
-
-## DANIP Interpretation
-
-Use the current DANIP/DHIS2 evidence to explain the observed result from an M&E perspective. Include only: observed value/result, trend or variation when available, programme/M&E meaning, data-quality caveats, and practical follow-up. Do not rewrite or replace the compendium fields. Do not invent official metadata, targets, denominators, formulas, causes or explanations.
-10. If the user asks only for the compendium definition/details and does not ask for interpretation, return the standard compendium format without adding DANIP interpretation.
 
 REQUEST TYPE:
 {"DETAILED NARRATIVE REPORT" if report_intent else "NORMAL CHAT QUESTION"}
@@ -9792,11 +9917,6 @@ CURRENT DHIS2 / DETERMINISTIC EVIDENCE:
 
 EXTERNAL EVIDENCE:
 {safe_json_dumps(external_context)}
-
-For a mixed indicator + current-DANIP question, the final answer must be:
-1. The existing standard ISG Indicator Compendium answer in its normal Parameter / Description table format.
-2. Immediately after it, exactly one additional section titled **DANIP Interpretation** based on the current DANIP/DHIS2 evidence.
-Do not change the compendium table structure.
 
 If this is a REPORT REQUEST (for example, the user asks to generate, write,
 prepare, create or produce a narrative report), DO NOT give a short answer.
