@@ -9554,16 +9554,8 @@ def _chat_parameter_table_answer(question, rag):
 
 
 def _chat_parameter_table_from_context(question, context):
-    """Extract one indicator in the original ISG Parameter/Description format.
-
-    The RAG export may flatten an entire Word table into one very long line.
-    Therefore fields cannot be detected only at line starts.  This parser:
-      1. isolates the requested indicator between Parameter Description
-         boundaries;
-      2. finds each original parameter label anywhere in that record;
-      3. stops each value exactly at the next parameter label;
-      4. returns the original two-column breakdown.
-    """
+    """Build the ISG Parameter/Description table using the original
+    compendium breakdown and source order. No prose compression."""
     context = str(context or "").strip()
     if not context:
         return ""
@@ -9600,159 +9592,76 @@ def _chat_parameter_table_from_context(question, context):
     ]
 
     clean = re.sub(r"\[RAG\s+\d+\s*\|[^\]]+\]\s*", "", context)
-    clean = re.sub(r"\s+", " ", clean).strip()
+    clean = clean.replace("\r\n", "\n").replace("\r", "\n")
 
-    def norm_code(value):
-        return re.sub(r"[^0-9a-z]", "", str(value or "").lower())
-
-    # Accept 1300(iii).06, 1300(iii) 06, 1300 (iii) 06.
-    code_matches = re.findall(
-        r"\b\d{3,4}\s*\(\s*[ivx]+\s*\)\s*\.?\s*\d{1,3}\b"
-        r"|\b\d{3,4}[a-z]?\s*\.\s*\d{1,3}\b",
-        str(question or ""),
-        flags=re.I,
+    requested_codes = re.findall(
+        r"\b\d{4}[a-z]?(?:\.\d+)?(?:\([ivx]+\))?\b",
+        str(question or ""), flags=re.I,
     )
-    requested_codes = [
-        norm_code(x) for x in code_matches
-        if norm_code(x) not in {"2025", "2030"}
-    ]
+    requested_codes = [x.lower() for x in requested_codes if x not in {"2025", "2030"}]
 
-    # ---- 1. Isolate the exact indicator record ---------------------------
-    boundary_re = re.compile(r"(?i)\bParameter\s+Description\b")
-    boundaries = list(boundary_re.finditer(clean))
+    lines = [re.sub(r"\s+", " ", x).strip() for x in clean.splitlines()]
+    lines = [x for x in lines if x]
+    lines = [x for x in lines if x.lower() not in ("parameter description", "parameter", "description")]
 
-    selected = clean
+    label_lookup = {re.sub(r"\s+", " ", x).strip().lower(): x for x in labels}
+    occurrences = []
+    for idx, line in enumerate(lines):
+        low = line.lower().strip()
+        matched = None
+        remainder = ""
+        if low in label_lookup:
+            matched = label_lookup[low]
+        else:
+            for norm, original in sorted(label_lookup.items(), key=lambda z: -len(z[0])):
+                if low.startswith(norm + ":"):
+                    matched = original
+                    remainder = line[len(norm) + 1:].strip()
+                    break
+                if low.startswith(norm + " ") and len(line) > len(norm) + 1:
+                    matched = original
+                    remainder = line[len(norm):].strip(" :")
+                    break
+        if matched:
+            occurrences.append((idx, matched, remainder))
 
-    if requested_codes and boundaries:
-        candidates = []
-
-        for i, b in enumerate(boundaries):
-            bs = b.start()
-            be = boundaries[i + 1].start() if i + 1 < len(boundaries) else len(clean)
-            block = clean[bs:be]
-
-            # Strongest signal is the requested code near "Indicator name".
-            score = 0
-            compact = re.sub(r"\s+", " ", block)
-            compact_norm = norm_code(compact)
-
-            for code in requested_codes:
-                if code in compact_norm:
-                    score += 10
-
-                # Remove punctuation/spaces only for the code portion, while
-                # retaining the readable source text around "Indicator name".
-                if re.search(
-                    r"(?is)\bIndicator\s+name\b.{0,180}?"
-                    + re.escape(code[:4]),
-                    compact,
-                ):
-                    score += 100
-
-            if score:
-                candidates.append((score, block))
-
-        if candidates:
-            candidates.sort(key=lambda x: x[0], reverse=True)
-            selected = candidates[0][1]
-
-    # If no boundary matched, locate the requested indicator name directly.
-    if requested_codes and not boundaries:
-        for code in requested_codes:
-            m = re.search(
-                r"(?is)\bIndicator\s+name\b.{0,180}?"
-                + re.escape(code[:4]),
-                clean,
-            )
-            if m:
-                selected = clean
-                break
-
-    # ---- 2. Parse labels anywhere in the flattened record ---------------
-    selected = re.sub(r"(?i)\bParameter\s+Description\b", " ", selected, count=1)
-    selected = re.sub(r"\s+", " ", selected).strip()
-
-    # Longest first so "Recommended course public sector" wins before
-    # "Recommended course" and "Purpose/ objective" is handled explicitly.
-    label_alts = sorted(
-        labels,
-        key=lambda x: len(x),
-        reverse=True,
-    )
-    label_pattern = "|".join(re.escape(x) for x in label_alts)
-
-    # A label is recognized only as a standalone phrase. A colon is optional
-    # because the Word/Google export frequently removes table-cell boundaries.
-    token_re = re.compile(
-        r"(?i)(?<![A-Za-z0-9])(" + label_pattern + r")"
-        r"(?=(?:\s*[:\-]?\s+)|\s*$)"
-    )
-
-    matches = list(token_re.finditer(selected))
-    if not matches:
+    if not occurrences:
         return ""
 
-    fields = []
-    for i, m in enumerate(matches):
-        label = m.group(1)
-        canonical = next(
-            (x for x in labels if x.lower() == label.lower()),
-            label,
-        )
-
-        value_start = m.end()
-        # Remove optional colon/dash and whitespace after the label.
-        tail = selected[value_start:]
-        tail = re.sub(r"^\s*[:\-]\s*", "", tail)
-
-        # Compute the real start in the original selected string after the
-        # optional separator.
-        consumed = len(selected[value_start:]) - len(tail)
-        real_value_start = value_start + consumed
-
-        value_end = matches[i + 1].start() if i + 1 < len(matches) else len(selected)
-        value = selected[real_value_start:value_end].strip(" :;-")
-
-        if value:
-            fields.append((canonical, value))
-
-    # Keep the first occurrence of each field. This is important when the
-    # flattened source contains a neighbouring/duplicated label.
     data = {}
-    for label, value in fields:
-        if label not in data:
-            data[label] = re.sub(r"\s+", " ", value).strip()
+    for n, (start_i, label, same_line_value) in enumerate(occurrences):
+        end_i = occurrences[n + 1][0] if n + 1 < len(occurrences) else len(lines)
+        vals = []
+        if same_line_value:
+            vals.append(same_line_value)
+        vals.extend(lines[start_i + 1:end_i])
+        vals = [v for v in vals if v and v.lower() not in ("parameter description", "parameter", "description")]
+        value = re.sub(r"\s+", " ", " ".join(vals).strip())
+        if label not in data or len(value) > len(data[label]):
+            data[label] = value
 
     if "Purpose/objective" in data and "Purpose/ objective" not in data:
         data["Purpose/ objective"] = data.pop("Purpose/objective")
 
-    # Verify the isolated record is actually the requested indicator.
     if requested_codes:
-        identity = norm_code(
-            " ".join([
-                data.get("Indicator name", ""),
-                data.get("Indicator code", ""),
-            ])
-        )
-        if not any(code in identity for code in requested_codes):
+        joined = " ".join(data.values()).lower()
+        if not any(code in joined for code in requested_codes):
             return ""
 
-    ordered = [
-        label for label in labels
-        if label in data and data[label]
-    ]
+    ordered = []
+    for label in labels:
+        if label in data and data[label] and label not in ordered:
+            ordered.append(label)
+
     if not ordered:
         return ""
 
-    out = [
-        "| Parameter | Description |",
-        "|---|---|",
-    ]
+    out = ["| Parameter | Description |", "|---|---|"]
     for label in ordered:
         value = data[label].replace("|", r"\|")
         out.append(f"| {label} | {value} |")
-
     return "\n".join(out)
+
 
 def _chat_parameter_table_answer(question, rag):
     """Original ISG compendium breakdown: one parameter per row."""
@@ -9770,8 +9679,22 @@ def _chat_add_danip_interpretation(result, question, current_df, chart_plan=None
         return result
 
     indicators = _chat_indicator_candidates(question, current_df, chart_plan=chart_plan, limit=3)
+    # For a compendium question, the code in the compendium is often NOT the
+    # numeric DHIS2 column name. In that case use the currently confirmed
+    # DANIP chart/analysis indicator instead of returning the compendium alone.
     if not indicators and isinstance(chart_plan, dict):
-        indicators = [c for c in (chart_plan.get("y_columns") or []) if c in current_df.columns][:3]
+        indicators = [
+            c for c in (chart_plan.get("y_columns") or [])
+            if c in current_df.columns
+        ][:3]
+    if not indicators:
+        # Reuse the most recently confirmed analysis plan when available.
+        saved_plan = st.session_state.get("guided_preview_plan")
+        if isinstance(saved_plan, dict):
+            indicators = [
+                c for c in (saved_plan.get("y_columns") or [])
+                if c in current_df.columns
+            ][:3]
     if not indicators:
         return result
 
@@ -9953,12 +9876,51 @@ def ask_analysis_chatbot(
     evidence=build_analysis_chat_evidence(df=current_df,source_url=current_source,chart_plan=chart_plan,quality_issues=quality_issues,quality_matrix=quality_matrix,quality_summary=quality_summary,question=question)
 
     if external_requested:
-        external=research_chat_external_question(question=question,indicators=indicators,current_evidence=evidence)
+        external=research_chat_external_question(
+            question=question,
+            indicators=indicators,
+            current_evidence=evidence,
+        )
         if external.get("status")=="SUCCESS":
             urls=external.get("sources") or []
             source_block=("\n\n**External source links**\n"+"\n".join(f"- {u}" for u in urls[:10])) if urls else ""
-            return {"status":"SUCCESS","source":"UN_WHO_EXTERNAL_RESEARCH","text":external.get("text","")+source_block,"sources":urls}
-        return {"status":"EXTERNAL_UNAVAILABLE","source":"UN_WHO_EXTERNAL_RESEARCH","text":"Your question requested external/UN/WHO evidence, so the chatbot did not substitute DHIS2 data for that evidence.\n\n"+external.get("text","External research is currently unavailable."),"sources":external.get("sources",[])}
+            return {
+                "status":"SUCCESS",
+                "source":"UN_WHO_EXTERNAL_RESEARCH",
+                "text":external.get("text","")+source_block,
+                "sources":urls,
+            }
+
+        # IMPORTANT: an external-search failure must NOT terminate the DANIP
+        # interpretation. Keep the requested external evidence separate, but
+        # continue with the current DANIP evidence when it is available.
+        danip_text = local_answer or ""
+        external_note = (
+            "### External research\n\n"
+            "The requested UN/WHO/external evidence could not be retrieved. "
+            "The external-search result is therefore not presented as evidence.\n\n"
+            + str(external.get("text", "External research is currently unavailable."))
+        )
+        if danip_text:
+            combined = (
+                "### DANIP Interpretation\n\n"
+                + str(danip_text).strip()
+                + "\n\n---\n\n"
+                + external_note.strip()
+            )
+            return {
+                "status":"DANIP_PLUS_EXTERNAL_UNAVAILABLE",
+                "source":"DANIP_CURRENT_DATA_PLUS_EXTERNAL_UNAVAILABLE",
+                "text":combined,
+                "sources":external.get("sources",[]),
+            }
+
+        return {
+            "status":"EXTERNAL_UNAVAILABLE",
+            "source":"UN_WHO_EXTERNAL_RESEARCH",
+            "text":external_note,
+            "sources":external.get("sources",[]),
+        }
 
     if client is None:
         return {"status":"FALLBACK","source":"LOCAL_M_AND_E","text":local_answer}
