@@ -2574,6 +2574,207 @@ else:
     client = None
 
 # ============================================================
+# RAG KNOWLEDGE BASE — GOOGLE DOC INDICATOR COMPENDIUM
+# ============================================================
+# The Google Doc is used as the indicator-definition knowledge source.
+# DHIS2 remains the source of truth for current numeric values.
+# RAG flow:
+#   Google Doc -> fetch -> clean -> chunk -> retrieve -> prompt context
+#
+# The document must be shared so the Streamlit server can read its export.
+# You can override the URL with RAG_GOOGLE_DOC_URL in Streamlit Secrets/.env.
+# ============================================================
+
+RAG_GOOGLE_DOC_URL = _get_secret(
+    "RAG_GOOGLE_DOC_URL",
+    "https://docs.google.com/document/d/159IpWlCdgzCp1GOckjeux93_IrkFx7pf/edit?usp=drive_link",
+)
+RAG_ENABLED = bool(RAG_GOOGLE_DOC_URL)
+RAG_TOP_K = int(_get_secret("RAG_TOP_K", "4") or "4")
+RAG_CHUNK_SIZE = int(_get_secret("RAG_CHUNK_SIZE", "1200") or "1200")
+RAG_CHUNK_OVERLAP = int(_get_secret("RAG_CHUNK_OVERLAP", "180") or "180")
+
+
+def _rag_google_doc_id(url):
+    """Extract a Google Docs document ID from a normal Docs URL."""
+    match = re.search(r"/document/d/([a-zA-Z0-9_-]+)", str(url or ""))
+    return match.group(1) if match else ""
+
+
+def _rag_clean_text(text):
+    """Clean exported Google Doc text while preserving indicator wording."""
+    text = str(text or "")
+    text = re.sub(r"\r\n?", "\n", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _rag_load_google_doc(url):
+    """Download the Google Doc as plain text.
+
+    Requires the document to be readable by the Streamlit server. For a
+    private document, use an approved Google Drive connector/service account
+    instead of making the document public.
+    """
+    doc_id = _rag_google_doc_id(url)
+    if not doc_id:
+        return {"status": "ERROR", "text": "Invalid Google Docs URL.", "url": str(url)}
+
+    export_url = f"https://docs.google.com/document/d/{doc_id}/export?format=txt"
+    try:
+        response = requests.get(
+            export_url,
+            timeout=30,
+            headers={"User-Agent": "NEXUS-DANIP-RAG/1.0"},
+        )
+        response.raise_for_status()
+        text = _rag_clean_text(response.text)
+        if not text:
+            return {
+                "status": "ERROR",
+                "text": "Google Doc export returned no text.",
+                "url": export_url,
+            }
+        return {
+            "status": "SUCCESS",
+            "text": text,
+            "url": export_url,
+            "doc_id": doc_id,
+        }
+    except Exception as exc:
+        return {
+            "status": "ERROR",
+            "text": f"Could not load Google Doc: {exc}",
+            "url": export_url,
+            "doc_id": doc_id,
+        }
+
+
+def _rag_chunk_text(text, chunk_size=RAG_CHUNK_SIZE, overlap=RAG_CHUNK_OVERLAP):
+    """Create overlapping knowledge chunks for retrieval."""
+    text = _rag_clean_text(text)
+    if not text:
+        return []
+
+    paragraphs = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    chunks = []
+    current = ""
+
+    for paragraph in paragraphs:
+        candidate = f"{current}\n\n{paragraph}".strip() if current else paragraph
+        if len(candidate) <= chunk_size:
+            current = candidate
+            continue
+
+        if current:
+            chunks.append(current)
+
+        # Keep long single paragraphs usable.
+        if len(paragraph) > chunk_size:
+            start = 0
+            while start < len(paragraph):
+                end = min(start + chunk_size, len(paragraph))
+                chunks.append(paragraph[start:end])
+                if end >= len(paragraph):
+                    break
+                start = max(end - overlap, start + 1)
+            current = ""
+        else:
+            tail = current[-overlap:] if current else ""
+            current = f"{tail}\n\n{paragraph}".strip()
+
+    if current:
+        chunks.append(current)
+
+    return chunks
+
+
+def _rag_tokens(value):
+    value = str(value or "").lower()
+    value = re.sub(r"[^a-z0-9%/+-]+", " ", value)
+    return {token for token in value.split() if len(token) > 1}
+
+
+def _rag_retrieve(question, indicators=None, top_k=RAG_TOP_K):
+    """Retrieve the most relevant indicator-definition chunks.
+
+    This is the retrieval stage of RAG. It does not generate an answer.
+    Retrieval uses deterministic lexical/phrase matching so it works even
+    when an embeddings package is not installed.
+    """
+    if not RAG_ENABLED:
+        return {
+            "status": "DISABLED",
+            "source": "GOOGLE_DOC_RAG",
+            "document_url": RAG_GOOGLE_DOC_URL,
+            "chunks": [],
+            "context": "",
+        }
+
+    loaded = _rag_load_google_doc(RAG_GOOGLE_DOC_URL)
+    if loaded.get("status") != "SUCCESS":
+        return {
+            "status": "ERROR",
+            "source": "GOOGLE_DOC_RAG",
+            "document_url": loaded.get("url", RAG_GOOGLE_DOC_URL),
+            "chunks": [],
+            "context": "",
+            "error": loaded.get("text", "Unknown Google Doc error"),
+        }
+
+    indicator_text = " ".join(str(x) for x in (indicators or [])[:8])
+    query = f"{question}\n{indicator_text}\nindicator definition numerator denominator target formula"
+    q_tokens = _rag_tokens(query)
+    q_norm = _chat_normalize_text(query) if "_chat_normalize_text" in globals() else " ".join(sorted(q_tokens))
+
+    scored = []
+    for index, chunk in enumerate(_rag_chunk_text(loaded.get("text", ""))):
+        c_tokens = _rag_tokens(chunk)
+        overlap = len(q_tokens & c_tokens)
+        phrase_bonus = 0.0
+        for phrase in [str(x).lower().strip() for x in (indicators or []) if str(x).strip()]:
+            phrase_norm = _chat_normalize_text(phrase) if "_chat_normalize_text" in globals() else phrase
+            if phrase_norm and phrase_norm in _chat_normalize_text(chunk):
+                phrase_bonus += 8.0
+        definition_bonus = 0.0
+        lower_chunk = chunk.lower()
+        for term in ("definition", "numerator", "denominator", "calculation", "formula", "indicator"):
+            if term in lower_chunk:
+                definition_bonus += 0.5
+        score = overlap + phrase_bonus + definition_bonus
+        scored.append((score, index, chunk))
+
+    scored.sort(key=lambda item: (item[0], -item[1]), reverse=True)
+    selected = [item for item in scored[:max(1, top_k)] if item[0] > 0]
+
+    chunks = [
+        {"rank": rank + 1, "score": round(item[0], 3), "text": item[2]}
+        for rank, item in enumerate(selected)
+    ]
+    context = "\n\n--- RAG SOURCE CHUNK ---\n\n".join(item["text"] for item in chunks)
+
+    return {
+        "status": "SUCCESS" if chunks else "NO_MATCH",
+        "source": "GOOGLE_DOC_RAG",
+        "document_url": loaded.get("url", RAG_GOOGLE_DOC_URL),
+        "doc_id": loaded.get("doc_id", ""),
+        "chunks": chunks,
+        "context": context,
+        "total_document_characters": len(loaded.get("text", "")),
+    }
+
+
+def build_rag_indicator_context(question, indicators=None):
+    """Public RAG helper used by the DANIP chatbot."""
+    result = _rag_retrieve(question, indicators=indicators, top_k=RAG_TOP_K)
+    if result.get("status") == "SUCCESS":
+        return result
+    return result
+
+
+# ============================================================
 # OPENAI CONFIGURATION SAFETY
 # ============================================================
 
@@ -8590,6 +8791,13 @@ def build_analysis_chat_evidence(
         quality_issues=quality_issues,
     )
 
+    # RAG: retrieve the approved indicator-definition context from the
+    # configured Google Doc before sending the question to the LLM.
+    rag_context = build_rag_indicator_context(
+        question=question,
+        indicators=indicators,
+    )
+
     selected = []
     if isinstance(chart_plan, dict):
         for column in (
@@ -8616,6 +8824,7 @@ def build_analysis_chat_evidence(
         "current_analysis": current_analysis,
         "relevant_indicators": indicators,
         "indicator_m_and_e_context": indicator_context,
+        "rag_indicator_definition_context": rag_context,
         "quality_summary": quality_summary or {},
         "quality_issues": (quality_issues or [])[:15],
         "quality_matrix": (quality_matrix or [])[:15],
@@ -9255,6 +9464,11 @@ NON-NEGOTIABLE RULES:
 22. For a report request, write the report from the supplied current API/DHIS2 indicators, periods, organisation units, calculated evidence and quality findings.
 23. If the user asks for a report, do not respond with instructions on how to make one; generate the report directly.
 24. Do not add an external-evidence section when external research was not requested.
+25. RAG knowledge from the approved Google Doc is the preferred source for official indicator definitions.
+26. Use RAG context to explain the indicator definition, numerator, denominator, formula, target or other metadata only when the retrieved text supports it.
+27. If RAG returns no exact matching definition, explicitly say that the official definition was not found in the RAG knowledge base. Do not invent one from the indicator label.
+28. RAG context must never replace, modify, cap or recalculate the current DHIS2 numeric values.
+29. Treat the retrieved RAG text as knowledge/context, not as current programme data.
 
 CURRENT SOURCE:
 {source_url}
@@ -9267,6 +9481,9 @@ RECENT CHAT:
 
 M&E INDICATOR CONTEXT AND DETERMINISTIC EVIDENCE:
 {safe_json_dumps(evidence)}
+
+RAG KNOWLEDGE / INDICATOR-DEFINITION CONTEXT:
+{safe_json_dumps(evidence.get("rag_indicator_definition_context", {}))}
 
 AUTHORITATIVE EXTERNAL EVIDENCE (CONTEXT ONLY — NEVER MODIFY DASHBOARD VALUES):
 {safe_json_dumps(external_context)}
@@ -9330,6 +9547,7 @@ Do not include sections that are not relevant.
                     "text": answer,
                     "sources": combined_sources[:15],
                     "external_context": external_context,
+                    "rag_context": evidence.get("rag_indicator_definition_context", {}),
                 }
 
             api_errors.append(f"{model}: empty response")
@@ -9391,6 +9609,15 @@ def render_analysis_chatbot(
 
     if "analysis_chat_messages" not in st.session_state:
         st.session_state["analysis_chat_messages"] = []
+
+    # RAG status is evaluated from the same knowledge source used by the
+    # chatbot, so the user can see whether the indicator-compendium context
+    # is available without exposing document contents.
+    rag_status = _rag_load_google_doc(RAG_GOOGLE_DOC_URL) if RAG_ENABLED else {"status": "DISABLED"}
+    if rag_status.get("status") == "SUCCESS":
+        st.caption("📚 RAG knowledge base: Google Docs indicator compendium connected")
+    else:
+        st.caption("📚 RAG knowledge base: unavailable — chatbot will state when an official definition is not found")
 
     st.markdown(
         """
@@ -15692,6 +15919,4 @@ elif workspace == "📅 My Reports & Monitoring":
 
 # ============================================================
 # END — DANIP AI + SEPARATE DANIP M&E MANAGEMENT HUB
-# ============================================================
-
-
+# ============================================================app
