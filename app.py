@@ -10005,12 +10005,21 @@ def ask_analysis_chatbot(
     current_df = df if isinstance(df,pd.DataFrame) and not df.empty else st.session_state.get("nexus_chat_df")
     current_source = str(source_url or st.session_state.get("nexus_chat_source_url", "") or "").strip()
 
+    # REPORTS MUST BE DATA-FIRST.
+    # A narrative/report request is different from an indicator-definition
+    # question.  If the user asks for a report from the selected/current
+    # indicators, DHIS2 evidence is sufficient to generate the report.  The
+    # ISG Indicator Compendium is optional enrichment only; a missing RAG
+    # match must NEVER block the report.
+    report_intent=_chat_report_intent(question)
+
     # 1. Pure RAG / M&E knowledge — independent of API.
     rag_intent=_chat_is_rag_or_me_knowledge(question)
     mixed_intent=_chat_mixed_rag_analysis_intent(question)
     current_intent=_chat_requires_current_data(question)
 
-    if rag_intent and not mixed_intent and not (current_intent and not any(x in question.lower() for x in ("compendium","official definition","indicator definition","numerator","denominator","formula"))):
+    # Report requests intentionally bypass the RAG-only branch.
+    if (not report_intent) and rag_intent and not mixed_intent and not (current_intent and not any(x in question.lower() for x in ("compendium","official definition","indicator definition","numerator","denominator","formula"))):
         rag=retrieve_rag_context(question, indicators=[], top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K))
         result=_chat_rag_knowledge_answer(question,rag)
         result["rag_warnings"]=rag.get("warnings",[])
@@ -10018,6 +10027,12 @@ def ask_analysis_chatbot(
 
     # 2. Current-data request with no dataset loaded.
     if current_df is None or current_df.empty:
+        if report_intent:
+            return {
+                "status":"NO_DHIS2_DATA",
+                "source":"NO_DHIS2_DATA",
+                "text":"A narrative report based on the selected indicators requires the loaded DHIS2/API analysis data. Please load the indicator data first."
+            }
         if mixed_intent or rag_intent:
             rag=retrieve_rag_context(question, indicators=[], top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K))
             result=_chat_rag_knowledge_answer(question,rag)
@@ -10047,7 +10062,137 @@ def ask_analysis_chatbot(
     if not indicators and isinstance(chart_plan,dict):
         indicators=[c for c in (chart_plan.get("y_columns") or []) if c in current_df.columns][:3]
 
-    # 4. Mixed RAG + DHIS2: compendium defines the indicator; DHIS2 supplies current numbers.
+    # 4. Narrative report mode.  This is deliberately executed before the
+    # optional RAG lookup so a missing compendium indicator cannot stop the
+    # report.  DHIS2/deterministic evidence is the source of truth for the
+    # actual reported values, trends, comparisons and data-quality findings.
+    if report_intent:
+        evidence=build_analysis_chat_evidence(
+            df=current_df, source_url=current_source, chart_plan=chart_plan,
+            quality_issues=quality_issues, quality_matrix=quality_matrix,
+            quality_summary=quality_summary, question=question
+        )
+
+        # RAG is enrichment only.  Failure/no match is intentionally harmless.
+        report_rag=retrieve_rag_context(
+            question, indicators=indicators, top_k=RAG_TOP_K
+        )
+        report_rag_text=_rag_context_text(report_rag)
+
+        local_report=_chat_local_mne_answer(
+            question=question, df=current_df, indicators=indicators,
+            chart_plan=chart_plan, quality_issues=quality_issues
+        )
+
+        if client is None:
+            # Keep the application useful without OpenAI credits/API.
+            return {
+                "status":"REPORT_FALLBACK",
+                "source":"LOCAL_M_AND_E",
+                "text":local_report,
+                "indicators":indicators,
+                "rag_used":bool(report_rag_text),
+            }
+
+        selected_text="\n".join(f"- {x}" for x in indicators) or "- Use the selected/chart indicators in the supplied evidence."
+        rag_for_report=(
+            report_rag_text
+            if report_rag_text
+            else "No matching ISG Indicator Compendium passage was found. Continue the report using the DHIS2/deterministic evidence; do not stop or invent compendium content."
+        )
+        prompt=f"""
+You are the DANIP-NI M&E Reporting Assistant.
+
+The user asked you to GENERATE A NARRATIVE REPORT from the currently
+selected/loaded indicators. This is a DATA-FIRST reporting request.
+
+NON-NEGOTIABLE SOURCE RULES:
+1. DHIS2/API data and deterministic Python evidence are the source of truth
+   for all current numerical values, trends, comparisons, reporting units,
+   periods and data-quality findings.
+2. The ISG Indicator Compendium is OPTIONAL enrichment. Use it only when a
+   matching passage is actually retrieved.
+3. If the compendium does NOT contain an indicator, DO NOT stop the report,
+   do not say the report cannot be generated, and do not ask the user to
+   provide the compendium. Continue with the available DHIS2 evidence.
+4. Never invent indicator definitions, targets, formulas or causal explanations.
+5. Do not replace, cap, alter or fabricate the reported numbers.
+6. Clearly distinguish observed results from possible explanations.
+7. If a target/benchmark is not present in the evidence, simply do not claim
+   one.
+
+SELECTED INDICATORS:
+{selected_text}
+
+USER REQUEST:
+{question}
+
+CURRENT SOURCE:
+{current_source or 'Loaded DHIS2/API dataset'}
+
+DETERMINISTIC DHIS2 / ANALYSIS EVIDENCE:
+{safe_json_dumps(evidence)}
+
+LOCAL M&E ANALYSIS:
+{local_report}
+
+OPTIONAL ISG INDICATOR COMPENDIUM CONTEXT:
+{rag_for_report}
+
+REPORT FORMAT:
+# Narrative Report
+
+## 1. Executive Summary
+Summarize the selected indicators and the main observed findings.
+
+## 2. Indicator Performance
+For each selected indicator, describe the reported level, period,
+organisation/country differences and trend where evidence supports it.
+
+## 3. Key Findings
+Highlight the most important descriptive findings from the loaded data.
+
+## 4. Data Quality and Reporting Considerations
+Use the supplied data-quality evidence. Do not invent issues.
+
+## 5. Programme Management Implications
+Translate the observed evidence into practical M&E follow-up actions.
+Do not claim causality.
+
+## 6. Conclusion
+Give a concise evidence-based conclusion based only on the supplied data.
+
+IMPORTANT:
+Even if the compendium section says “not found”, STILL GENERATE ALL
+REPORT SECTIONS from the DHIS2/deterministic evidence.
+"""
+        try:
+            response=client.responses.create(model=OPENAI_MODEL,input=prompt)
+            answer=(response.output_text or "").strip()
+            if answer:
+                return {
+                    "status":"SUCCESS",
+                    "source":"OPENAI_M_AND_E_REPORT",
+                    "model":OPENAI_MODEL,
+                    "text":answer,
+                    "indicators":indicators,
+                    "rag_used":bool(report_rag_text),
+                }
+        except Exception as exc:
+            # Fall through to the deterministic/local report rather than
+            # turning a missing RAG match or LLM error into a failed report.
+            report_error=str(exc)
+
+        return {
+            "status":"REPORT_FALLBACK",
+            "source":"LOCAL_M_AND_E",
+            "text":local_report,
+            "indicators":indicators,
+            "rag_used":bool(report_rag_text),
+            "error":locals().get("report_error", ""),
+        }
+
+    # 5. Mixed RAG + DHIS2: compendium defines the indicator; DHIS2 supplies current numbers.
     rag_context={"chunks":[],"warnings":[]}
     if mixed_intent:
         rag_context=retrieve_rag_context(question,indicators=indicators,top_k=RAG_TOP_K)
