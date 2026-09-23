@@ -7825,6 +7825,36 @@ def _chat_local_mne_answer(
     focus = "; ".join(primary.get("focus") or [])
 
     # ---------------------------------------------------------
+    # Local domain-aware interpretation
+    # ---------------------------------------------------------
+    # This is intentionally label/evidence based. It does not invent an
+    # official indicator definition, target, numerator or denominator.
+    label_lower = name_lower
+    local_domain_points = []
+    if any(x in label_lower for x in ["mms", "multiple micronutrient", "pregnancy", "pw ", "pregnant", "anc"]):
+        local_domain_points = [
+            "The indicator is relevant to monitoring recorded access or receipt of the maternal nutrition service among pregnant women, depending on the exact indicator definition.",
+            "For M&E interpretation, examine whether the observed result is changing over time, whether reporting is complete across organisations, and whether differences reflect service delivery, population coverage, or reporting practices.",
+            "A change in the recorded indicator should not by itself be interpreted as a causal change in maternal or newborn outcomes.",
+        ]
+    elif any(x in label_lower for x in ["vas", "vitamin a", "supplementation"]):
+        local_domain_points = [
+            "The indicator is relevant to monitoring delivery or receipt of a supplementation service, depending on the exact indicator definition.",
+            "Interpret the observed level alongside reporting completeness, eligible population, service availability and the relevant numerator/denominator where available.",
+            "Variation between reporting units may reflect differences in service delivery, population size, reporting completeness or data quality; the current dataset alone does not establish which explanation applies.",
+        ]
+    elif any(x in label_lower for x in ["coverage", "rate", "proportion", "percent", "%"]):
+        local_domain_points = [
+            "This appears to be a coverage/rate-type measure. The observed level should be interpreted with its denominator, reporting population and target when those are available.",
+            "Differences across organisations or periods should be investigated for both programme performance and data completeness before drawing conclusions.",
+        ]
+    elif any(x in label_lower for x in ["number of", "# of", "count", "women", "children", "people"]):
+        local_domain_points = [
+            "This appears to be a count/volume measure. A higher count is not automatically better because counts are influenced by population size, service utilisation and reporting completeness.",
+            "For programme monitoring, examine distribution across reporting units and periods and relate the count to the eligible population or target when available.",
+        ]
+
+    # ---------------------------------------------------------
     # Indicator meaning / M&E significance
     # ---------------------------------------------------------
     meaning_terms = (
@@ -7862,6 +7892,9 @@ def _chat_local_mne_answer(
                 "official DHIS2 indicator metadata. The current interpretation "
                 "is based on the indicator label and observed data only."
             )
+
+        if local_domain_points:
+            mne_role += "\n\n" + " ".join(local_domain_points)
 
         observed = (
             f"The current dataset contains **{primary['observations']:,}** valid "
@@ -9738,8 +9771,25 @@ def ask_analysis_chatbot(
             return {"status":"SUCCESS","source":"UN_WHO_EXTERNAL_RESEARCH","text":external.get("text","")+source_block,"sources":urls}
         return {"status":"EXTERNAL_UNAVAILABLE","source":"UN_WHO_EXTERNAL_RESEARCH","text":"Your question requested external/UN/WHO evidence, so the chatbot did not substitute DHIS2 data for that evidence.\n\n"+external.get("text","External research is currently unavailable."),"sources":external.get("sources",[])}
 
+    # =========================================================
+    # LOCAL-FIRST DANIP M&E INTERPRETATION
+    # =========================================================
+    # Ordinary current-DANIP questions do NOT require OpenAI credits.
+    # The deterministic/local M&E engine already has the actual DANIP
+    # values, indicator label, descriptive statistics and DQ evidence.
+    # Use that evidence directly for the chatbot answer. OpenAI remains
+    # optional for report/narrative enhancement only.
+    if not report_intent:
+        return {
+            "status": "SUCCESS",
+            "source": "LOCAL_DANIP_M_AND_E",
+            "text": local_answer,
+            "ai_required": False,
+            "external_research": False,
+        }
+
     if client is None:
-        return {"status":"FALLBACK","source":"LOCAL_M_AND_E","text":local_answer}
+        return {"status":"FALLBACK","source":"LOCAL_M_AND_E","text":local_answer,"ai_required":False}
 
     history=st.session_state.get("analysis_chat_messages",[])
     recent_history=[{"role":x.get("role"),"content":x.get("content")} for x in history[-6:] if isinstance(x,dict)]
