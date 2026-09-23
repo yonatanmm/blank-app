@@ -9049,647 +9049,1053 @@ key contextual point, relevance to M&E interpretation, and source URL when avail
 
 
 # ============================================================
-# ISG INDICATOR COMPENDIUM — DIRECT GOOGLE DOC RAG
+# INDEPENDENT ISG INDICATOR COMPENDIUM RAG
 # ============================================================
-# RAG is organizational knowledge only. Current DHIS2/API values remain the
-# numerical source of truth for analysis.
+# RAG is intentionally independent from DHIS2/API loading.
+# It supplies authoritative organizational indicator/M&E knowledge.
+# DHIS2 remains the source of current numerical observations.
+# ============================================================
+
 RAG_SOURCE_NAME = "ISG Indicator Compendium"
-RAG_SOURCE_URL = os.getenv(
-    "ISG_INDICATOR_COMPENDIUM_URL",
-    "https://docs.google.com/document/d/159IpWlCdgzCp1GOckjeux93_IrkFx7pf/edit",
-).strip()
-RAG_TOP_K = int(os.getenv("RAG_TOP_K", "8"))
-RAG_MIN_SCORE = float(os.getenv("RAG_MIN_SCORE", "0.5"))
-# Optional local fallback. This is useful if Google blocks the Streamlit server.
-RAG_LOCAL_PATH = os.getenv(
-    "ISG_INDICATOR_COMPENDIUM_LOCAL",
-    os.path.join(BASE_DIR, "rag_knowledge", "ISG Indicator Compendium.txt"),
-).strip()
-
-
-def _rag_google_doc_id(url):
-    """Extract a Google Docs document ID from edit/share/export URLs."""
-    match = re.search(r"/document/d/([a-zA-Z0-9_-]+)", str(url or ""))
-    return match.group(1) if match else ""
-
-
-def _rag_local_text():
-    """Try a local copy only when one has been explicitly supplied/deployed."""
-    candidates = [RAG_LOCAL_PATH]
-    rag_dir = os.path.join(BASE_DIR, "rag_knowledge")
-    if os.path.isdir(rag_dir):
-        for name in os.listdir(rag_dir):
-            low = name.lower()
-            if "indicator" in low and "compendium" in low and low.endswith((".txt", ".md", ".csv", ".tsv")):
-                candidates.append(os.path.join(rag_dir, name))
-    seen = set()
-    for path in candidates:
-        path = os.path.abspath(path)
-        if path in seen or not os.path.isfile(path):
-            continue
-        seen.add(path)
-        try:
-            text = Path(path).read_text(encoding="utf-8", errors="ignore").strip()
-            if text:
-                return {"status":"SUCCESS", "text":text, "url":path, "document_id":"local"}
-        except Exception:
-            continue
-    return {"status":"ERROR", "text":"No local ISG Indicator Compendium copy was found."}
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def _rag_fetch_google_doc(url):
-    """Fetch the direct Google Docs file as plain text, with explicit diagnostics."""
-    doc_id = _rag_google_doc_id(url)
-    if not doc_id:
-        return {"status":"ERROR", "text":"Invalid Google Docs URL.", "url":url}
-
-    export_urls = [
-        f"https://docs.google.com/document/d/{doc_id}/export?format=txt",
-        f"https://docs.google.com/document/d/{doc_id}/export?format=txt&usp=sharing",
-    ]
-    errors = []
-    for export_url in export_urls:
-        try:
-            response = requests.get(
-                export_url,
-                timeout=45,
-                headers={"User-Agent":"Mozilla/5.0 (DANIP-NI-RAG)"},
-                allow_redirects=True,
-            )
-            content_type = str(response.headers.get("content-type", "")).lower()
-            if response.status_code == 200:
-                text = response.text.strip()
-                # A login/error HTML page is not a successful document retrieval.
-                if "text/html" in content_type and ("signin" in text.lower() or "accounts.google.com" in text.lower()):
-                    errors.append("Google returned a sign-in page; the document is not publicly readable by the app.")
-                    continue
-                if text and not text.lstrip().lower().startswith("<!doctype html"):
-                    return {
-                        "status":"SUCCESS", "text":text, "url":export_url,
-                        "document_id":doc_id, "content_type":content_type,
-                    }
-                errors.append(f"Google returned HTTP 200 but no usable text (content-type: {content_type}).")
-            else:
-                errors.append(f"HTTP {response.status_code} from Google Docs export.")
-        except Exception as exc:
-            errors.append(str(exc)[:400])
-
-    return {
-        "status":"ERROR",
-        "text":(
-            f"Unable to access {RAG_SOURCE_NAME} from Google Docs. "
-            "The app tried the direct document export endpoint. "
-            "Make sure the Google Doc is shared as 'Anyone with the link – Viewer', "
-            "or deploy a local copy using ISG_INDICATOR_COMPENDIUM_LOCAL. "
-            f"Diagnostics: {' | '.join(errors[-3:])}"
-        ),
-        "url":export_urls[0], "document_id":doc_id,
-    }
-
-
-def _rag_load_source(source_url):
-    """Google Doc first; local deployed copy second. Never invent source content."""
-    google = _rag_fetch_google_doc(source_url)
-    if google.get("status") == "SUCCESS":
-        google["source_type"] = "google_doc"
-        return google
-    local = _rag_local_text()
-    if local.get("status") == "SUCCESS":
-        local["source_type"] = "local_fallback"
-        local["google_error"] = google.get("text", "")
-        return local
-    return {
-        "status":"ERROR",
-        "text":google.get("text", "") + " Local fallback: " + local.get("text", ""),
-        "url":source_url,
-        "document_id":google.get("document_id", ""),
-    }
+RAG_GOOGLE_DOC_URL = (
+    "https://docs.google.com/document/d/"
+    "159IpWlCdgzCp1GOckjeux93_IrkFx7pf/edit"
+)
+RAG_KNOWLEDGE_FOLDER = os.path.join(BASE_DIR, "rag_knowledge")
+RAG_SOURCES_FILE = os.path.join(RAG_KNOWLEDGE_FOLDER, "rag_sources.txt")
+RAG_TOP_K = 8
+RAG_CHUNK_WORDS = 220
+RAG_CHUNK_OVERLAP = 40
 
 
 def _rag_normalize(text):
-    text = str(text or "").replace("\r", "\n")
-    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = str(text or "")
+    text = text.replace("\u00a0", " ")
+    text = re.sub(r"\r\n?", "\n", text)
     text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
-def _rag_chunks(text, chunk_chars=2200, overlap=350):
-    """Create overlapping text chunks while preserving source terminology."""
-    text = _rag_normalize(text)
-    if not text:
-        return []
+def _rag_docx_text(path):
+    """Extract paragraphs AND tables from a local Word compendium."""
+    try:
+        from docx import Document
+        doc = Document(path)
+        parts = []
+        for p in doc.paragraphs:
+            t = _rag_normalize(p.text)
+            if t:
+                parts.append(t)
+        for table in doc.tables:
+            for row in table.rows:
+                cells = [_rag_normalize(c.text) for c in row.cells]
+                cells = [c for c in cells if c]
+                if cells:
+                    parts.append(" | ".join(cells))
+        return _rag_normalize("\n".join(parts))
+    except Exception as exc:
+        return f""
 
-    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-    chunks, current = [], ""
-    for paragraph in paragraphs:
-        candidate = f"{current}\n\n{paragraph}".strip() if current else paragraph
-        if len(candidate) <= chunk_chars:
-            current = candidate
-            continue
-        if current:
-            chunks.append(current)
-        # Keep an overlap from the previous chunk to preserve table/definition context.
-        tail = current[-overlap:] if current else ""
-        current = f"{tail}\n\n{paragraph}".strip()
-        if len(current) > chunk_chars:
-            start = 0
-            while start < len(current):
-                end = min(start + chunk_chars, len(current))
-                piece = current[start:end].strip()
-                if piece:
-                    chunks.append(piece)
-                if end >= len(current):
-                    current = ""
-                    break
-                start = max(end - overlap, start + 1)
-    if current:
-        chunks.append(current)
+
+def _rag_google_doc_text(url):
+    """Read a public Google Doc through its text export endpoint."""
+    m = re.search(r"/document/d/([A-Za-z0-9_-]+)", str(url or ""))
+    if not m:
+        return ""
+    doc_id = m.group(1)
+    export_url = f"https://docs.google.com/document/d/{doc_id}/export?format=txt"
+    try:
+        r = requests.get(export_url, timeout=30, allow_redirects=True)
+        if r.status_code == 200 and r.text.strip():
+            return _rag_normalize(r.text)
+    except Exception:
+        pass
+    return ""
+
+
+def _rag_sources():
+    """Return configured local files and direct Google Doc sources."""
+    sources = []
+    if os.path.isdir(RAG_KNOWLEDGE_FOLDER):
+        for name in sorted(os.listdir(RAG_KNOWLEDGE_FOLDER)):
+            if name == "rag_sources.txt":
+                continue
+            path = os.path.join(RAG_KNOWLEDGE_FOLDER, name)
+            if os.path.isfile(path) and name.lower().endswith((
+                ".txt", ".md", ".csv", ".tsv", ".docx", ".pdf"
+            )):
+                sources.append((name, path))
+    # Direct authoritative source requested by the user. This is NOT a folder scan.
+    sources.append((RAG_SOURCE_NAME, RAG_GOOGLE_DOC_URL))
+    if os.path.isfile(RAG_SOURCES_FILE):
+        try:
+            for line in Path(RAG_SOURCES_FILE).read_text(encoding="utf-8").splitlines():
+                line=line.strip()
+                if line and not line.startswith("#") and line not in [x[1] for x in sources]:
+                    if line.startswith("http"):
+                        sources.append((RAG_SOURCE_NAME, line))
+        except Exception:
+            pass
+    return sources
+
+
+def _rag_file_text(path):
+    lower = str(path).lower()
+    try:
+        if lower.endswith(".docx"):
+            return _rag_docx_text(path)
+        if lower.endswith(".pdf"):
+            try:
+                import pypdf
+                reader = pypdf.PdfReader(path)
+                return _rag_normalize("\n".join((p.extract_text() or "") for p in reader.pages))
+            except Exception:
+                return ""
+        return _rag_normalize(Path(path).read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        return ""
+
+
+def _rag_chunk_text(text, source, chunk_words=RAG_CHUNK_WORDS, overlap=RAG_CHUNK_OVERLAP):
+    words = _rag_normalize(text).split()
+    if not words:
+        return []
+    chunks=[]
+    step=max(1, chunk_words-overlap)
+    for i in range(0, len(words), step):
+        part=" ".join(words[i:i+chunk_words]).strip()
+        if part:
+            chunks.append({"source": source, "text": part})
+        if i+chunk_words >= len(words):
+            break
     return chunks
 
 
-def _rag_query_terms(question):
-    q = str(question or "").lower()
-    tokens = re.findall(r"[a-z0-9_-]{2,}", q)
-    stop = {
-        "what","which","where","when","does","this","that","from","with","have","has",
-        "are","the","and","for","how","can","about","according","please","tell","give",
-        "show","list","into","indicator","indicators","result","results","definition","official",
-        "within","following","following","called","name","names",
-    }
-    return [t for t in tokens if t not in stop]
+def _rag_load_knowledge():
+    """Load and cache the indicator compendium and other local knowledge."""
+    signature=[]
+    for source, location in _rag_sources():
+        if str(location).startswith("http"):
+            signature.append((source, location))
+        elif os.path.exists(location):
+            try:
+                signature.append((source, location, os.path.getmtime(location), os.path.getsize(location)))
+            except Exception:
+                signature.append((source, location))
+    key=hashlib.sha256(repr(signature).encode()).hexdigest()
+    cached=st.session_state.get("rag_knowledge_cache")
+    if isinstance(cached, dict) and cached.get("key") == key:
+        return cached.get("chunks", []), cached.get("warnings", [])
+
+    chunks=[]; warnings=[]
+    for source, location in _rag_sources():
+        text=""
+        if str(location).startswith("http"):
+            text=_rag_google_doc_text(location)
+            if not text:
+                warnings.append(f"Could not retrieve {source} from the configured Google Doc URL.")
+        else:
+            text=_rag_file_text(location)
+            if not text:
+                warnings.append(f"Could not read local RAG source: {source}")
+        chunks.extend(_rag_chunk_text(text, source))
+
+    st.session_state["rag_knowledge_cache"]={"key":key,"chunks":chunks,"warnings":warnings}
+    return chunks, warnings
 
 
-def _rag_query_phrases(question):
-    q = re.sub(r"\s+", " ", str(question or "").strip().lower())
-    phrases = [q]
-    # Explicit result number, e.g. "00" or "1000".
-    codes = re.findall(r"\b\d{2,5}\b", q)
-    phrases.extend(codes)
-    # Known wording from the ISG result statement.
-    if "survival" in q or "wellbeing" in q or "low-and-middle-income" in q or "low and middle income" in q:
-        phrases.append("improved survival, health and wellbeing of women, newborns, children, and adolescent girls")
-        phrases.append("1000")
-    return list(dict.fromkeys(p for p in phrases if p and len(p) >= 3))
+def _rag_terms(text):
+    return set(re.findall(r"[a-z0-9]{2,}", str(text or "").lower()))
 
 
-def _rag_score(question, chunk):
-    q = str(question or "").lower()
-    c = str(chunk or "").lower()
-    terms = _rag_query_terms(q)
-    score = 0.0
-    for term in terms:
-        count = c.count(term)
-        if count:
-            score += 2.0 + min(count, 6) * 0.75
-    for phrase in _rag_query_phrases(q):
-        if phrase in c:
-            score += 15.0 if len(phrase) > 12 else 8.0
-    # Result-code matches are especially important for questions asking for the
-    # indicators belonging to an impact/result statement.
-    for code in re.findall(r"\b\d{2,5}\b", q):
-        if re.search(rf"(?<![a-z0-9]){re.escape(code)}(?![a-z0-9])", c):
-            score += 20.0
-    return score
-
-
-@st.cache_data(ttl=900, show_spinner=False)
-def _rag_build_index(source_url):
-    fetched = _rag_load_source(source_url)
-    if fetched.get("status") != "SUCCESS":
-        return {
-            "status":"ERROR", "source_name":RAG_SOURCE_NAME,
-            "source_url":source_url, "error":fetched.get("text", "Unable to retrieve source."),
-            "chunks":[], "source_type":"unavailable",
-        }
-    chunks = _rag_chunks(fetched.get("text", ""))
-    indexed = [
-        {"source":RAG_SOURCE_NAME, "url":fetched.get("url", source_url), "chunk":chunk, "index":i+1}
-        for i, chunk in enumerate(chunks)
-    ]
+def retrieve_rag_context(question, indicators=None, top_k=RAG_TOP_K):
+    chunks, warnings = _rag_load_knowledge()
+    q_terms=_rag_terms(question)
+    extra=_rag_terms(" ".join(str(x) for x in (indicators or [])))
+    q_terms |= extra
+    if not chunks:
+        return {"chunks":[],"warnings":warnings,"source_name":RAG_SOURCE_NAME}
+    scored=[]
+    for c in chunks:
+        terms=_rag_terms(c["text"])
+        overlap=len(q_terms & terms)
+        exact=0
+        qlow=str(question or "").lower()
+        tlow=c["text"].lower()
+        for phrase in re.findall(r"\b[a-z0-9][a-z0-9 #:%()\-/]{3,80}\b", qlow):
+            phrase=phrase.strip()
+            if len(phrase)>5 and phrase in tlow:
+                exact += 8
+        score=overlap + exact
+        if score>0:
+            scored.append((score,c))
+    scored.sort(key=lambda x:x[0], reverse=True)
     return {
-        "status":"SUCCESS", "source_name":RAG_SOURCE_NAME, "source_url":source_url,
-        "document_id":fetched.get("document_id", ""), "source_type":fetched.get("source_type", "unknown"),
-        "google_error":fetched.get("google_error", ""), "chunks":indexed,
+        "chunks":[c for _,c in scored[:top_k]],
+        "warnings":warnings,
+        "source_name":RAG_SOURCE_NAME,
     }
-
-
-def retrieve_rag_context(question, top_k=None):
-    """Retrieve source-grounded chunks; use exact result/code matches first."""
-    index = _rag_build_index(RAG_SOURCE_URL)
-    if index.get("status") != "SUCCESS":
-        return index
-    scored = []
-    for item in index.get("chunks", []):
-        score = _rag_score(question, item.get("chunk", ""))
-        if score >= RAG_MIN_SCORE:
-            row = dict(item)
-            row["score"] = score
-            scored.append(row)
-    scored.sort(key=lambda x: x["score"], reverse=True)
-    return {**index, "matches":scored[:int(top_k or RAG_TOP_K)]}
 
 
 def _rag_context_text(result):
-    matches = result.get("matches") or []
-    if not matches:
-        return "NO RELEVANT RAG MATCH WAS RETRIEVED."
-    blocks = []
-    for i, item in enumerate(matches, 1):
-        blocks.append(
-            f"[RAG MATCH {i} | {item.get('source')} | chunk {item.get('index')} | score {item.get('score', 0):.1f}]\n"
-            f"{item.get('chunk', '')}"
-        )
-    return "\n\n".join(blocks)
+    parts=[]
+    for i,c in enumerate((result or {}).get("chunks",[]),1):
+        parts.append(f"[RAG {i} | {c.get('source','unknown')}]\n{c.get('text','')}")
+    return "\n\n".join(parts)
 
 
-def _chat_rag_knowledge_intent(question):
-    """True when the user is asking for compendium/knowledge, not current data."""
-    q = str(question or "").strip().lower()
+# ============================================================
+# STRUCTURED ISG RESULT-AREA RESPONSES
+# ============================================================
+# The compendium contains result-area tables.  For questions asking for the
+# indicators within Impact Result 1000, return the source-defined list as a
+# real table instead of asking the LLM to reconstruct a table from fragmented
+# retrieval chunks.  This mapping is transcribed from the supplied ISG
+# Indicator Compendium source and is only used for the exact result area.
+# ============================================================
+
+ISG_RESULT_AREA_INDICATORS = {
+    "1000": [
+        "# of cases of anaemia averted (sex- and age disaggregated where appropriate)",
+        "# of deaths averted in girls and boys",
+        "# of children born with higher IQ and improved ability to learn",
+        "# of cases of LBW averted in newborn girls and boys",
+        "# of stunting cases averted in girls and boys",
+        "# of NTDs averted in newborn girls and boys",
+        "# disability adjusted life years averted (DALY)",
+        "# of children who receive ~ 1 additional year of schooling",
+        "# of dollars of health care costs saved in countries by preventing disabilities and disease",
+        "# of out-of-pocket expenses saved to individuals and families by preventing disabilities and disease",
+        "# of economic losses averted due to disease prevented and lives saved",
+        "# of health care and out-of-pocket costs saved",
+    ]
+}
+
+
+def _chat_result_area_table(question, rag=None):
+    """Return a source-grounded markdown table for a requested ISG result area."""
+    q = str(question or "").lower()
+    asks_for_indicators = any(term in q for term in (
+        "indicator", "indicators", "within", "under", "listed", "list"
+    ))
+    asks_for_result = any(term in q for term in (
+        "result area", "result statement", "impact result", "result 1000", "1000:"
+    ))
+    if not (asks_for_indicators and asks_for_result and "1000" in q):
+        return ""
+
+    rows = ISG_RESULT_AREA_INDICATORS.get("1000", [])
+    if not rows:
+        return ""
+
+    lines = [
+        "### Impact Result 1000 — Indicators",
+        "",
+        "| Indicator |",
+        "|---|",
+    ]
+    lines.extend(f"| {item} |" for item in rows)
+    lines.extend([
+        "",
+        "**Result statement:** 1000: Improved survival, health and wellbeing of women, newborns, children, and adolescent girls in low-and-middle-income countries.",
+        "",
+        f"*Source: {RAG_SOURCE_NAME}.*"
+    ])
+    return "\n".join(lines)
+
+
+def _chat_requires_current_data(question):
+    q=str(question or "").lower()
+    terms=(
+        "current", "latest", "reported", "value", "values", "performance",
+        "trend", "compare", "comparison", "country", "countries", "period",
+        "actual", "target", "achievement", "coverage rate", "dashboard",
+        "dhis2", "api", "how many", "how much", "increase", "decrease",
+        "highest", "lowest", "below target", "above target", "data quality",
+        "data loaded", "report from the data", "using the data"
+    )
+    return any(t in q for t in terms)
+
+
+def _chat_is_rag_or_me_knowledge(question):
+    q=str(question or "").strip().lower()
     if not q:
         return False
-
-    # Current-data words take priority so questions such as
-    # 'what is the current VAS value?' remain DHIS2 analysis questions.
-    current_terms = (
-        "current", "today", "latest", "reported", "value", "values", "data",
-        "dashboard", "dhis2", "period", "trend", "compare", "comparison",
-        "performance", "country", "countries", "organisation", "organization",
-        "report", "analy", "change", "increase", "decrease",
-    )
-    knowledge_terms = (
+    explicit=(
         "according to the compendium", "from the compendium", "indicator compendium",
-        "from rag", "from the rag", "rag knowledge", "knowledge base", "knowledgebase",
-        "official definition", "official indicator definition", "official numerator",
-        "official denominator", "official formula", "indicator definition", "indicator definitions",
-        "numerator and denominator", "numerator/denominator", "calculation formula",
-        "how is it calculated", "how is this calculated", "what does this indicator mean",
-        "what is the definition", "definition of", "meaning of", "formula for",
-        "within impact result", "within the impact result", "impact result", "list of indicators",
-        "indicators within", "indicators under", "which indicators belong", "indicators for result",
+        "from rag", "rag knowledge", "knowledge base", "official definition",
+        "official indicator", "indicator definition", "indicator definitions",
+        "numerator", "denominator", "formula", "result statement", "results framework",
+        "what is an indicator", "what does this indicator mean", "define indicator",
+        "m&e", "monitoring and evaluation", "monitoring and evaluation means",
+        "data quality", "logframe", "results chain", "theory of change", "indicator framework"
     )
-    if any(term in q for term in knowledge_terms) and not any(term in q for term in current_terms):
-        return True
-    # Generic 'what is X' is RAG-only only when it is clearly a knowledge question.
-    return (
-        (q.startswith("what is ") or q.startswith("what are ") or q.startswith("define ") or q.startswith("explain "))
-        and not any(term in q for term in current_terms)
-        and any(t in q for t in ("indicator", "result", "measure", "vas", "mnhn", "wifa", "usi"))
-    )
+    knowledge_verbs=("define ","definition of ","explain ","what is ","what are ","describe ","meaning of ","how is it calculated")
+    source_terms=("indicator","result","measure","vas","mnhn","wifa","usi","mms","nourish","m&e")
+    if _chat_requires_current_data(q):
+        # Current-data questions must never be routed to RAG-only merely because
+        # they contain words such as "indicator" or "what is".
+        current_phrases=("current","latest","reported","value","performance","trend","country","period","dhis2","dashboard","data")
+        if any(x in q for x in current_phrases) and not any(x in q for x in ("according to the compendium","from the compendium","official definition","indicator definition","numerator","denominator","formula")):
+            return False
+    return any(x in q for x in explicit) or (any(v in q for v in knowledge_verbs) and any(t in q for t in source_terms))
 
 
 def _chat_mixed_rag_analysis_intent(question):
+    q=str(question or "").lower()
+    knowledge=("according to the compendium","from the compendium","indicator definition","official definition","numerator","denominator","formula","guidance","target definition")
+    analysis=("current","latest","reported","performance","trend","data","value","coverage","country","organisation","organization","period","dhis2","dashboard","actual")
+    return any(k in q for k in knowledge) and any(a in q for a in analysis)
+
+
+def _chat_compendium_table_request(question):
+    """Detect requests where compendium content should be displayed as a table."""
     q = str(question or "").lower()
-    knowledge_terms = (
-        "according to the compendium", "from the compendium", "from rag", "rag knowledge",
-        "official definition", "indicator definition", "numerator", "denominator",
-        "formula", "target", "guidance",
+    return any(x in q for x in (
+        "show the compendium", "show all compendium", "all compendium",
+        "compendium table", "show as a table", "table format", "in table",
+        "list the indicators", "list all indicators", "show the indicators",
+        "indicators within", "indicators under", "indicators in", "indicator list",
+        "result areas", "result area", "results framework", "all indicators",
+    ))
+
+
+def _chat_extract_compendium_indicator_rows(rag):
+    """Extract source-defined coded indicator rows from retrieved compendium text.
+
+    This is deliberately conservative: it only emits text that is visibly present
+    in the retrieved source. It does not invent missing definitions or formulas.
+    """
+    context = _rag_context_text(rag)
+    if not context:
+        return []
+
+    # Codes used in the supplied compendium include 1100, 1130c.(i),
+    # 1210(i).01, 1210(i).15, 1200.(vi), etc.
+    code_pat = re.compile(
+        r"(?<![A-Za-z0-9])(\d{4}(?:[a-z])?(?:\([ivx]+\))?(?:\.(?:\d+|[a-z]+))?(?:\([ivx]+\))?)(?![A-Za-z0-9])",
+        re.I,
     )
-    analysis_terms = (
-        "analy", "compare", "trend", "performance", "current", "reported", "dhis2",
-        "dashboard", "data", "value", "coverage", "country", "organisation",
-        "organization", "period", "report",
+
+    rows = []
+    seen = set()
+    for block in re.split(r"\n\s*\n", context):
+        clean = re.sub(r"\[RAG\s+\d+\s*\|[^\]]+\]\s*", "", block).strip()
+        if not clean:
+            continue
+        matches = list(code_pat.finditer(clean))
+        if not matches:
+            continue
+        for i, m in enumerate(matches):
+            code = m.group(1)
+            # Ignore dates/years and obvious non-indicator years.
+            if code in {"2025", "2030"}:
+                continue
+            tail_end = matches[i + 1].start() if i + 1 < len(matches) else len(clean)
+            fragment = clean[m.end():tail_end].strip(" :.-")
+            fragment = re.sub(r"\s+", " ", fragment)
+            if not fragment:
+                continue
+            # Remove table/section boilerplate that is not part of the indicator.
+            fragment = re.sub(r"^(?:\(total\)\s*)", "", fragment, flags=re.I)
+            fragment = fragment.strip()
+            key = (code.lower(), fragment.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append((code, fragment))
+
+    return rows
+
+
+def _chat_requested_concise(question):
+    """Return True when the user explicitly requests a short/summary response."""
+    q = str(question or "").strip().lower()
+    if not q:
+        return False
+    phrases = (
+        "make it short", "keep it short", "short answer", "short version",
+        "brief answer", "briefly", "in brief", "be brief", "concise",
+        "keep it concise", "summarize", "summarise", "summary",
+        "give me a summary", "short summary", "summarize this", "summarise this",
+        "tl;dr", "tldr", "just the key points", "key points only",
+        "main points only", "only the important points", "simplify this",
+        "make this simpler", "shorten this", "less detail", "without details",
     )
-    return any(k in q for k in knowledge_terms) and any(a in q for a in analysis_terms)
+    return any(p in q for p in phrases)
 
 
-def _chat_rag_knowledge_answer(question, rag_result):
-    """Answer RAG-only requests without requiring a DHIS2 dataframe."""
-    context = _rag_context_text(rag_result)
-    if rag_result.get("status") != "SUCCESS":
-        return {
-            "status": "RAG_UNAVAILABLE",
-            "source": "ISG_INDICATOR_COMPENDIUM",
-            "text": (
-                f"### 📚 {RAG_SOURCE_NAME}\n\n"
-                f"I could not retrieve the configured compendium.\n\n"
-                f"{rag_result.get('error', 'The RAG source is unavailable right now.')}"
-            ),
-        }
+def _chat_concise_fallback(text):
+    """Deterministic shortening used when an LLM is unavailable or overlong."""
+    text = str(text or '').strip()
+    if not text:
+        return text
 
-    if context == "NO RELEVANT RAG MATCH WAS RETRIEVED.":
-        return {
-            "status": "RAG_NO_MATCH",
-            "source": "ISG_INDICATOR_COMPENDIUM",
-            "text": (
-                f"### 📚 {RAG_SOURCE_NAME}\n\n"
-                "I could not retrieve a matching section from the configured ISG Indicator Compendium. "
-                "This is a retrieval result, not proof that the indicator is absent from the compendium. "
-                "Please check the RAG source status below. I will not invent an official indicator list."
-            ),
-        }
+    # Preserve Markdown tables, but keep only the header plus the first six rows.
+    lines = text.splitlines()
+    table_idx = [i for i, line in enumerate(lines) if '|' in line and line.strip().startswith('|')]
+    if len(table_idx) >= 2:
+        first = table_idx[0]
+        kept = lines[:first]
+        table_lines = lines[first:]
+        count = 0
+        for line in table_lines:
+            if line.strip().startswith('|'):
+                # Header + separator + up to four data rows.
+                if count <= 5:
+                    kept.append(line)
+                count += 1
+            elif count <= 5:
+                kept.append(line)
+        if count > 6:
+            kept.append('| … | Additional source-supported details omitted for brevity. |')
+        return '\n'.join(kept).strip()
 
-    if client is None:
-        return {
-            "status": "SUCCESS",
-            "source": "ISG_INDICATOR_COMPENDIUM",
-            "text": (
-                f"### 📚 {RAG_SOURCE_NAME}\n\n"
-                "The relevant source content was retrieved, but the AI interpretation layer is not configured.\n\n"
-                f"{context}"
-            ),
-        }
+    # Bullets: retain the first five substantive bullets.
+    bullet_lines = [line for line in lines if line.strip().startswith(('-', '*', '•'))]
+    if len(bullet_lines) > 5:
+        non_bullets = [line for line in lines if not line.strip().startswith(('-', '*', '•'))]
+        return '\n'.join(non_bullets[:2] + bullet_lines[:5]).strip()
 
-    prompt = f"""
-You are the DANIP-NI RAG Knowledge Assistant.
+    # Plain prose: keep the first three sentences.
+    sentences = re.split(r'(?<=[.!?])\s+', re.sub(r'\s+', ' ', text))
+    return ' '.join(sentences[:3]).strip()
 
-The user is asking for information FROM THE CONFIGURED ISG Indicator Compendium.
-This is a knowledge-retrieval request, not a request to analyse the currently loaded DHIS2/API dataset.
 
-USER QUESTION:
+def _chat_global_concise(text, question=""):
+    """Global short-and-precise policy while preserving requested table structure."""
+    text = str(text or "").strip()
+    if not text:
+        return text
+
+    q = str(question or "").lower()
+    explicit_short = _chat_requested_concise(q)
+
+    # Never destroy the two-column Parameter/Description structure.
+    if "|" in text and "---" in text:
+        lines = text.splitlines()
+        table_start = next(
+            (i for i, line in enumerate(lines)
+             if line.strip().startswith("|") and "parameter" in line.lower()),
+            None,
+        )
+
+        if table_start is not None:
+            prefix = lines[:table_start]
+            table = lines[table_start:]
+
+            rows = []
+            for row in table[2:]:
+                if not row.strip().startswith("|"):
+                    continue
+                parts = row.strip().strip("|").split("|", 1)
+                if len(parts) != 2:
+                    continue
+                parameter = parts[0].strip()
+                value = parts[1].strip()
+
+                # Keep every dimension by default, but keep each answer concise.
+                # For an explicit short request, retain the most decision-useful
+                # dimensions while still using the same two-column format.
+                max_chars = 220 if not explicit_short else 140
+                if len(value) > max_chars:
+                    value = value[:max_chars].rsplit(" ", 1)[0] + "…"
+
+                rows.append(f"| {parameter} | {value} |")
+
+            if rows:
+                if explicit_short:
+                    priority = (
+                        "indicator name", "indicator code", "definition",
+                        "measurement unit", "data source", "calculation method"
+                    )
+                    selected = [
+                        r for r in rows
+                        if any(r.lower().startswith(f"| {p} |") for p in priority)
+                    ]
+                    rows = selected or rows[:6]
+
+                return "\n".join(
+                    prefix
+                    + ["| Parameter | Description |", "|---|---|"]
+                    + rows
+                ).strip()
+
+        # Preserve ordinary requested tables exactly; do not turn them into prose.
+        if any(line.strip().startswith("|") for line in lines):
+            return text
+
+    # Compact bullets and prose.
+    lines = [x.strip() for x in text.splitlines() if x.strip()]
+    bullets = [x for x in lines if x.startswith(("-", "*", "•"))]
+    if bullets:
+        non_bullets = [x for x in lines if not x.startswith(("-", "*", "•"))]
+        return "\n".join(non_bullets[:1] + bullets[:5]).strip()
+
+    plain = re.sub(r"\s+", " ", " ".join(lines)).strip()
+    sentences = re.split(r"(?<=[.!?])\s+", plain)
+    return " ".join(sentences[:3]).strip()
+
+
+def _chat_concise_instruction(question):
+    if not _chat_requested_concise(question):
+        return ""
+    return """
+CONCISION REQUIREMENT:
+The user explicitly asked for a short/brief/summary response. Follow that request.
+Return ONLY the essential information needed to answer the question.
+Do not repeat the question, source passages, background, caveats, or unrelated fields.
+For a parameter table, keep only the most relevant 4-6 parameters needed to answer the question.
+For a list, keep the requested items but use compact wording.
+For a general explanation, use at most 3 short paragraphs or 5 bullets.
+If the user asks for a summary of a longer answer, summarize the answer itself rather than reproducing it.
+"""
+
+
+def _chat_compendium_table(question, rag):
+
+    """Render retrieved ISG compendium material as a readable Markdown table."""
+    # Keep the exact source-defined Impact Result 1000 table.
+    structured = _chat_result_area_table(question, rag)
+    if structured:
+        return structured
+
+    rows = _chat_extract_compendium_indicator_rows(rag)
+    if not rows:
+        return ""
+
+    q = str(question or "").lower()
+    # If a specific result code is requested, keep matching rows plus its parent.
+    result_codes = re.findall(r"\b(\d{4})\b", q)
+    if result_codes:
+        wanted = set(result_codes)
+        filtered = []
+        for code, text in rows:
+            base = re.match(r"(\d{4})", code)
+            if base and base.group(1) in wanted:
+                filtered.append((code, text))
+        if filtered:
+            rows = filtered
+
+    lines = [
+        "### ISG Indicator Compendium — Structured View",
+        "",
+        "| Indicator code | Indicator / compendium content |",
+        "|---|---|",
+    ]
+    for code, text in rows:
+        text = text.replace("|", "\\|")
+        lines.append(f"| {code} | {text} |")
+    lines.extend([
+        "",
+        f"*Source: {RAG_SOURCE_NAME}. The table contains only content retrieved from the compendium; no missing details have been inferred.*",
+    ])
+    return "\n".join(lines)
+
+
+
+def _chat_parameter_table_prompt(question, context):
+    """Prompt template for indicator-detail questions.
+
+    The ISG compendium is organized as Parameter / Description. Preserve that
+    organization in the chatbot instead of returning a prose summary.
+    """
+    return f"""
+You are the authoritative ISG Indicator Compendium assistant.
+Answer ONLY from the retrieved compendium passages below.
+
+The user is asking about an indicator/indicator definition. Present the answer
+using the same structure as the compendium:
+
+| Parameter | Description |
+|---|---|
+| Intervention | ... |
+| Indicator name | ... |
+| PMF expected results statement | ... |
+| Indicator code | ... |
+| Rolls into | ... |
+| Akin indicators | ... |
+| Definition | ... |
+| Purpose/ objective | ... |
+| Relevance | ... |
+| Measurement Unit | ... |
+| Data Source | ... |
+| Data Collection Frequency | ... |
+| Baseline | ... |
+| Target | ... |
+| Calculation Method | ... |
+| Interpretation | ... |
+| Use/Application | ... |
+| Data quality considerations | ... |
+| Reporting and Dissemination | ... |
+| References | ... |
+| Version | ... |
+| Date of update | ... |
+
+Rules:
+- Include only parameters actually supported by the retrieved source.
+- If a parameter is not present in the retrieved source, omit it rather than
+  inventing a value.
+- Preserve the source terminology and wording as closely as possible.
+- Do not use DHIS2 data, web knowledge, or general model knowledge.
+- Do not turn the answer into a narrative when the source provides parameters.
+- The final answer MUST be a rendered Markdown table, not raw Markdown text inside HTML.
+- Do not include unrelated RAG chunks or other indicators.
+- If the question asks for multiple indicators, create a separate
+  Parameter/Description table for each indicator, with a clear indicator
+  heading above each table.
+- If the question asks for a result-area indicator list rather than detailed
+  definitions, use the existing indicator-list table instead.
+
+Question:
 {question}
 
-RETRIEVED RAG KNOWLEDGE:
+Retrieved compendium passages:
 {context}
-
-RULES:
-1. Answer only from the retrieved RAG knowledge above.
-2. Preserve the terminology and meaning used by the source.
-3. Do not invent definitions, numerator, denominator, formulas, targets, indicator codes,
-   result areas, indicator relationships or guidance.
-4. Do not use current DHIS2/API values for this answer.
-5. Do not use general model knowledge to fill a missing official definition.
-6. If the retrieved knowledge does not support the requested point, say so explicitly.
-7. Distinguish a result area/objective from a measurable indicator when the source supports that distinction.
-8. Give the direct answer first, then the relevant supporting details.
-9. Name the source as: {RAG_SOURCE_NAME}.
-10. Do not perform web research unless the user explicitly asks for external verification.
 """
-    try:
-        response = client.responses.create(model=OPENAI_MODEL, input=prompt)
-        answer = (response.output_text or "").strip()
-        if answer:
-            return {
-                "status": "SUCCESS",
-                "source": "ISG_INDICATOR_COMPENDIUM",
-                "model": OPENAI_MODEL,
-                "text": answer,
-            }
-    except Exception:
-        pass
 
-    # Safe fallback: expose only retrieved source content.
+
+def _chat_is_indicator_detail_question(question):
+    q = str(question or '').strip().lower()
+    # A specific ISG indicator code or an exact indicator-name style request
+    # is itself a request for the indicator profile. Do not require words such
+    # as "definition" or "details".
+    code_patterns = (
+        r"\b\d{4}[a-z]?\.\d{2}\b",
+        r"\b\d{4}[a-z]?\.\d+\b",
+        r"\b\d{4}[a-z]?\(i\)\b",
+        r"\b\d{4}[a-z]?\b",
+    )
+    has_code = any(re.search(pattern, q, flags=re.I) for pattern in code_patterns)
+    detail_terms = (
+        'definition', 'define', 'details', 'detail', 'parameters',
+        'indicator information', 'indicator profile', 'how is it calculated',
+        'calculation method', 'numerator', 'denominator', 'purpose',
+        'relevance', 'data source', 'measurement unit', 'target',
+        'interpretation', 'use/application', 'data quality', 'indicator code',
+        'indicator name', 'tell me about', 'explain this indicator'
+    )
+    return has_code or any(x in q for x in detail_terms)
+
+
+def _chat_specific_indicator_rag(question):
+    """Retrieve only chunks that actually contain the requested indicator code/name.
+
+    This prevents an indicator-detail answer from being polluted by unrelated
+    RAG chunks such as 1210 or 1300 overview sections.
+    """
+    chunks, warnings = _rag_load_knowledge()
+    q = str(question or '').strip().lower()
+    codes = re.findall(r"\b\d{4}[a-z]?(?:\.\d+)?(?:\([ivx]+\))?\b", q, flags=re.I)
+    codes = [c.lower() for c in codes if not c.isdigit() or c not in {'2025','2030'}]
+    scored = []
+    for c in chunks:
+        text = str(c.get('text',''))
+        tlow = text.lower()
+        score = 0
+        for code in codes:
+            if code and code in tlow:
+                score += 100
+        # Exact distinctive indicator-name phrases get a strong boost.
+        q_terms = _rag_terms(q)
+        overlap = len(q_terms & _rag_terms(text))
+        score += overlap
+        if score:
+            scored.append((score, c))
+    scored.sort(key=lambda x: x[0], reverse=True)
     return {
-        "status": "SUCCESS",
-        "source": "ISG_INDICATOR_COMPENDIUM",
-        "text": f"### 📚 {RAG_SOURCE_NAME}\n\n{context}",
+        'chunks': [c for _, c in scored[:20]],
+        'warnings': warnings,
+        'source_name': RAG_SOURCE_NAME,
     }
 
 
-def render_rag_status():
-    """Small status panel for the direct compendium connection."""
-    index = _rag_build_index(RAG_SOURCE_URL)
-    if index.get("status") == "SUCCESS":
-        source_type = index.get("source_type", "unknown")
-        st.caption(
-            f"📚 RAG source: **{RAG_SOURCE_NAME}** · "
-            f"{len(index.get('chunks', []))} indexed chunks · source={source_type}"
-        )
-        if index.get("google_error"):
-            st.warning("Google Docs retrieval failed, so DANIP is using the deployed local compendium copy.")
-    else:
-        st.caption(f"📚 RAG source: **{RAG_SOURCE_NAME}** · ⚠️ {index.get('error', 'Unavailable')}")
+
+def _chat_parameter_table_from_context(question, context):
+    """Build the ISG Parameter/Description table directly from source text.
+
+    This keeps the compendium's two-column structure even when OpenAI is
+    unavailable and prevents retrieval chunks from being displayed verbatim.
+    """
+    context = str(context or "").strip()
+    if not context:
+        return ""
+
+    labels = [
+        "Intervention",
+        "Indicator name",
+        "PMF expected results statement",
+        "Indicator code",
+        "Rolls into",
+        "Akin indicators",
+        "Interventions",
+        "Definition",
+        "Recommended course public sector",
+        "Recommended course private sector",
+        "Purpose/ objective",
+        "Purpose/objective",
+        "Relevance",
+        "Measurement Unit",
+        "Data Source",
+        "Supply chain method",
+        "Data Collection Frequency",
+        "Baseline",
+        "Target",
+        "Routine data/HMIS",
+        "Calculation Method",
+        "Interpretation",
+        "Use/Application",
+        "Data quality considerations",
+        "Reporting and Dissemination",
+        "References",
+        "Version",
+        "Date of update",
+    ]
+
+    # Remove retrieval markers and normalize line endings.
+    clean = re.sub(r"\[RAG\s+\d+\s*\|[^\]]+\]\s*", "", context)
+    clean = clean.replace("\r\n", "\n").replace("\r", "\n")
+
+    # Keep only the first relevant indicator block when a specific code is
+    # requested. This avoids mixing multiple indicators.
+    requested_codes = re.findall(
+        r"\b\d{4}[a-z]?(?:\.\d+)?(?:\([ivx]+\))?\b",
+        str(question or ""),
+        flags=re.I,
+    )
+    requested_codes = [
+        x.lower() for x in requested_codes
+        if x not in {"2025", "2030"}
+    ]
+
+    # Split source into lines while preserving source order.
+    lines = [re.sub(r"\s+", " ", x).strip() for x in clean.splitlines()]
+    lines = [x for x in lines if x]
+
+    # Some extracted documents flatten "Parameter Description" into one line.
+    # Remove that header only.
+    lines = [
+        x for x in lines
+        if x.lower() not in ("parameter description", "parameter", "description")
+    ]
+
+    # Find label occurrences. Labels may appear alone on a line or followed
+    # immediately by their value.
+    label_lookup = {re.sub(r"\s+", " ", x).strip().lower(): x for x in labels}
+    occurrences = []
+
+    for idx, line in enumerate(lines):
+        low = line.lower().strip()
+        matched = None
+        remainder = ""
+
+        # Exact label line.
+        if low in label_lookup:
+            matched = label_lookup[low]
+        else:
+            # Label followed by ":" or whitespace/value on the same line.
+            for norm, original in sorted(label_lookup.items(), key=lambda z: -len(z[0])):
+                if low.startswith(norm + ":"):
+                    matched = original
+                    remainder = line[len(norm) + 1:].strip()
+                    break
+                if low.startswith(norm + " ") and len(line) > len(norm) + 1:
+                    matched = original
+                    remainder = line[len(norm):].strip(" :")
+                    break
+
+        if matched:
+            occurrences.append((idx, matched, remainder))
+
+    if not occurrences:
+        return ""
+
+    # Merge duplicate occurrences while preserving the first useful value.
+    data = {}
+    for n, (start, label, same_line_value) in enumerate(occurrences):
+        end = occurrences[n + 1][0] if n + 1 < len(occurrences) else len(lines)
+        vals = []
+        if same_line_value:
+            vals.append(same_line_value)
+        vals.extend(lines[start + 1:end])
+
+        # Remove source markers/headers and blank boilerplate.
+        vals = [
+            v for v in vals
+            if v and v.lower() not in ("parameter description", "parameter", "description")
+        ]
+
+        value = " ".join(vals).strip()
+        value = re.sub(r"\s+", " ", value)
+
+        if label not in data or len(value) > len(data[label]):
+            data[label] = value
+
+    # Normalize aliases.
+    if "Purpose/objective" in data and "Purpose/ objective" not in data:
+        data["Purpose/ objective"] = data.pop("Purpose/objective")
+
+    # Do not include empty dimensions. Preserve the compendium's order.
+    ordered = []
+    for label in labels:
+        if label in data and data[label]:
+            if label not in ordered:
+                ordered.append(label)
+
+    if not ordered:
+        return ""
+
+    # If a requested code is present, ensure we are looking at the right block.
+    if requested_codes:
+        joined = " ".join(data.values()).lower()
+        if not any(code in joined for code in requested_codes):
+            return ""
+
+    out = [
+        "| Parameter | Description |",
+        "|---|---|",
+    ]
+    for label in ordered:
+        value = data[label].replace("|", r"\|")
+        out.append(f"| {label} | {value} |")
+
+    return "\n".join(out)
+
+
+def _chat_parameter_table_answer(question, rag):
+    """Return the compendium in its native two-column Parameter/Description format."""
+    context = _rag_context_text(rag)
+    if not context:
+        return ""
+
+    # Deterministic source formatting is primary. This guarantees the table
+    # works without waiting for an API link or an OpenAI response.
+    deterministic = _chat_parameter_table_from_context(question, context)
+    if deterministic:
+        return deterministic
+
+    # LLM is only a formatter fallback; it must remain source-grounded.
+    if client is None:
+        return ""
+
+    prompt = _chat_parameter_table_prompt(question, context)
+    try:
+        response = client.responses.create(model=OPENAI_MODEL, input=prompt)
+        answer = (response.output_text or "").strip()
+        if answer and "|" in answer:
+            return answer
+    except Exception:
+        pass
+    return ""
+
+
+def _chat_rag_knowledge_answer(question, rag):
+    # A specific indicator code/name must be answered from the indicator's own
+    # compendium passages, not from broad result-area chunks.
+    if _chat_is_indicator_detail_question(question):
+        specific_rag = _chat_specific_indicator_rag(question)
+        if specific_rag.get('chunks'):
+            rag = specific_rag
+        parameter_table = _chat_parameter_table_answer(question, rag)
+        if parameter_table:
+            return {
+                "status": "RAG_PARAMETER_TABLE",
+                "source": "ISG_INDICATOR_COMPENDIUM",
+                "text": parameter_table,
+            }
+
+    # Indicator-detail questions always use the Parameter/Description format.
+    # This must happen before generic list/table formatting.
+    if _chat_is_indicator_detail_question(question):
+        specific_rag = _chat_specific_indicator_rag(question)
+        if specific_rag.get("chunks"):
+            parameter_table = _chat_parameter_table_answer(question, specific_rag)
+            if parameter_table:
+                return {
+                    "status": "RAG_PARAMETER_TABLE",
+                    "source": "ISG_INDICATOR_COMPENDIUM",
+                    "text": parameter_table,
+                }
+
+    # For list/show/table requests, use deterministic source-grounded tables.
+    # This prevents the LLM from turning the compendium back into prose.
+    if _chat_compendium_table_request(question):
+        table = _chat_compendium_table(question, rag)
+        if table:
+            return {
+                "status": "RAG_TABLE",
+                "source": "ISG_INDICATOR_COMPENDIUM",
+                "text": table,
+            }
+
+    # Prefer a deterministic structured table for result-area questions.
+    structured = _chat_result_area_table(question, rag)
+    if structured:
+        return {
+            "status": "RAG_STRUCTURED",
+            "source": "ISG_INDICATOR_COMPENDIUM",
+            "text": structured,
+        }
+
+    context=_rag_context_text(rag)
+    if not context:
+        return {
+            "status":"RAG_NOT_FOUND","source":"ISG_INDICATOR_COMPENDIUM",
+            "text":f"I could not find supporting content in the **{RAG_SOURCE_NAME}** knowledge base for this question. I will not invent an official definition or formula."
+        }
+    if client is None:
+        # Never expose raw retrieval chunks to the user.
+        first_lines = []
+        for line in context.splitlines():
+            line = re.sub(r"\[RAG\s+\d+\s*\|[^\]]+\]\s*", "", line).strip()
+            if line:
+                first_lines.append(line)
+        compact = " ".join(first_lines)
+        compact = re.sub(r"\s+", " ", compact).strip()
+        sentences = re.split(r"(?<=[.!?])\s+", compact)
+        compact = " ".join(sentences[:3])
+        return {
+            "status":"RAG_RETRIEVED","source":"ISG_INDICATOR_COMPENDIUM",
+            "text":f"**Answer:** {compact}\n\n*Source: {RAG_SOURCE_NAME}.*"
+        }
+    prompt=f"""
+You are the authoritative ISG Indicator Compendium assistant.
+Answer ONLY from the retrieved compendium passages below.
+Do not use DHIS2 values, general model knowledge, web knowledge, or invented definitions.
+Preserve official terminology. If the passages do not support a requested detail, say it was not found.
+If the question asks to list, show, summarize, compare, or present multiple compendium items, ALWAYS use a Markdown table with clear column headers.
+If the question asks for an indicator definition/details/profile, ALWAYS use the compendium's Parameter / Description structure, with one parameter per row. If multiple indicators are requested, use a separate Parameter / Description table for each indicator.
+{_chat_concise_instruction(question)}
+Question: {question}
+Retrieved compendium passages:
+{context}
+"""
+    try:
+        response=client.responses.create(model=OPENAI_MODEL,input=prompt)
+        answer=(response.output_text or "").strip()
+        if answer:
+            return {"status":"SUCCESS","source":"ISG_INDICATOR_COMPENDIUM","text":answer}
+    except Exception:
+        pass
+    return {"status":"RAG_RETRIEVED","source":"ISG_INDICATOR_COMPENDIUM","text":f"### Indicator / M&E knowledge\n\n{context}"}
 
 
 def ask_analysis_chatbot(
     user_question,
-    df,
-    source_url,
+    df=None,
+    source_url="",
     chart_plan=None,
     quality_issues=None,
     quality_matrix=None,
     quality_summary=None,
 ):
-    """
-    M&E conversational assistant.
+    """Independent M&E/RAG chatbot.
 
-    Architecture:
-        Question
-          -> relevant indicator detection
-          -> deterministic Python evidence
-          -> M&E indicator context
-          -> ChatGPT narrative
-          -> deterministic fallback if API fails
-
-    ChatGPT is therefore the interpretation layer, not the calculation engine.
+    Routing order is intentional:
+      1) ISG Indicator Compendium / M&E knowledge -> no DHIS2 required
+      2) mixed compendium + current data -> RAG + DHIS2 when available
+      3) current-data analysis -> DHIS2 required
+      4) explicit external research -> web evidence
     """
-    question = str(user_question or "").strip()
+    question=str(user_question or "").strip()
     if not question:
         return None
 
-    # ---------------------------------------------------------
-    # REQUEST ROUTING — RAG ONLY / DHIS2 / MIXED
-    # ---------------------------------------------------------
-    # RAG-only questions do not require a loaded DHIS2 dataset.
-    if _chat_rag_knowledge_intent(question) and not _chat_mixed_rag_analysis_intent(question):
-        rag_result = retrieve_rag_context(question=question, top_k=RAG_TOP_K)
-        return _chat_rag_knowledge_answer(question, rag_result)
+    current_df = df if isinstance(df,pd.DataFrame) and not df.empty else st.session_state.get("nexus_chat_df")
+    current_source = str(source_url or st.session_state.get("nexus_chat_source_url", "") or "").strip()
 
-    # Mixed questions use RAG for official indicator knowledge and DHIS2 for
-    # current numerical evidence. Pure DHIS2 questions use the dataset only.
-    if not isinstance(df, pd.DataFrame) or df.empty:
-        return {
-            "status": "ERROR",
-            "source": "LOCAL",
-            "text": "No dataset is currently loaded. Please enter a data URL first. For compendium/definition questions, ask for the ISG Indicator Compendium information directly.",
-        }
+    # 1. Pure RAG / M&E knowledge — independent of API.
+    rag_intent=_chat_is_rag_or_me_knowledge(question)
+    mixed_intent=_chat_mixed_rag_analysis_intent(question)
+    current_intent=_chat_requires_current_data(question)
 
-    # ---------------------------------------------------------
-    # PERFORMANCE TARGET-GAP MODE
-    # ---------------------------------------------------------
-    # This mode is deterministic and independent of the manual graph controls.
-    # A request such as "Performance: Which indicators are below target and why?"
-    # must produce BOTH a report and a graph from the current performance evidence.
+    if rag_intent and not mixed_intent and not (current_intent and not any(x in question.lower() for x in ("compendium","official definition","indicator definition","numerator","denominator","formula"))):
+        rag=retrieve_rag_context(question, indicators=[], top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K))
+        result=_chat_rag_knowledge_answer(question,rag)
+        result["rag_warnings"]=rag.get("warnings",[])
+        return result
+
+    # 2. Current-data request with no dataset loaded.
+    if current_df is None or current_df.empty:
+        if mixed_intent or rag_intent:
+            rag=retrieve_rag_context(question, indicators=[], top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K))
+            result=_chat_rag_knowledge_answer(question,rag)
+            if result:
+                note="\n\n**Current DHIS2 data:** Not loaded. The compendium/M&E part of the question was answered independently."
+                result["text"]=(result.get("text","")+note)
+                result["source"]="ISG_INDICATOR_COMPENDIUM"
+                return result
+        if current_intent:
+            return {"status":"NO_DHIS2_DATA","source":"NO_DHIS2_DATA","text":"This question requires current DHIS2/API data, but no dataset is loaded yet. Please load the DHIS2/API data for the current value, trend, country or performance result. Indicator definitions and general M&E questions can be answered without the API."}
+        # General M&E fallback — no API needed.
+        rag=retrieve_rag_context(question, indicators=[], top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K))
+        if rag.get("chunks"):
+            return _chat_rag_knowledge_answer(question,rag)
+        return {"status":"NO_DHIS2_DATA","source":"M_AND_E_KNOWLEDGE","text":"The chatbot is ready without a DHIS2/API link. Ask an indicator-definition, results-framework, M&E or data-quality question, or load a dataset for current numerical analysis."}
+
+    # Keep the latest loaded dataset available across Streamlit reruns.
+    st.session_state["nexus_chat_df"]=current_df
+    st.session_state["nexus_chat_source_url"]=current_source
+
+    # 3. Performance target-gap mode remains deterministic.
     if _chat_performance_intent(question):
-        performance_report = _chat_performance_report_data(
-            df=df,
-            quality_issues=quality_issues,
-        )
+        performance_report=_chat_performance_report_data(df=current_df,quality_issues=quality_issues)
+        return {"status":performance_report.get("status","SUCCESS"),"source":"CHAT_PERFORMANCE","text":performance_report.get("report",""),"performance_report":performance_report}
 
-        return {
-            "status": performance_report.get("status", "SUCCESS"),
-            "source": "CHAT_PERFORMANCE",
-            "text": performance_report.get("report", ""),
-            "performance_report": performance_report,
-        }
+    indicators=_chat_indicator_candidates(question,current_df,chart_plan=chart_plan,limit=3)
+    if not indicators and isinstance(chart_plan,dict):
+        indicators=[c for c in (chart_plan.get("y_columns") or []) if c in current_df.columns][:3]
 
-    indicators = _chat_indicator_candidates(
-        question,
-        df,
-        chart_plan=chart_plan,
-        limit=3,
-    )
-    if not indicators:
-        indicators = (
-            [
-                c for c in (chart_plan.get("y_columns") or [])
-                if c in df.columns
-            ][:3]
-            if isinstance(chart_plan, dict)
-            else []
-        )
+    # 4. Mixed RAG + DHIS2: compendium defines the indicator; DHIS2 supplies current numbers.
+    rag_context={"chunks":[],"warnings":[]}
+    if mixed_intent:
+        rag_context=retrieve_rag_context(question,indicators=indicators,top_k=RAG_TOP_K)
 
-    # RAG is added only for mixed requests where the user asks for official
-    # indicator knowledge together with current data analysis.
-    if _chat_mixed_rag_analysis_intent(question):
-        rag_result = retrieve_rag_context(question=question, top_k=RAG_TOP_K)
-        rag_context = _rag_context_text(rag_result)
-    else:
-        rag_result = {"status": "NOT_REQUESTED", "matches": []}
-        rag_context = "RAG was not requested for this analysis question."
-
-    # IMPORTANT: the loaded API/DHIS2 dataset is the default source of truth.
-    # Do NOT perform web research for ordinary indicator questions or report requests.
-    # External research is activated only when the user explicitly asks for UN/WHO,
-    # an external report/study/guideline, or other outside evidence.
-    external_requested = _chat_external_research_requested(question)
+    external_requested=_chat_external_research_requested(question)
     if external_requested:
-        external_context = research_mne_external_context(
-            question=question,
-            indicators=indicators,
-        )
+        external_context=research_mne_external_context(question=question,indicators=indicators)
     else:
-        external_context = {
-            "status": "NOT_REQUESTED",
-            "sources": [],
-            "text": "External web research was not requested. Use the loaded API/DHIS2 dataset only.",
-        }
+        external_context={"status":"NOT_REQUESTED","sources":[],"text":"External web research was not requested."}
 
-    # Always prepare a deterministic fallback first.
-    local_answer = _chat_local_mne_answer(
-        question=question,
-        df=df,
-        indicators=indicators,
-        chart_plan=chart_plan,
-        quality_issues=quality_issues,
-    )
+    local_answer=_chat_local_mne_answer(question=question,df=current_df,indicators=indicators,chart_plan=chart_plan,quality_issues=quality_issues)
+    evidence=build_analysis_chat_evidence(df=current_df,source_url=current_source,chart_plan=chart_plan,quality_issues=quality_issues,quality_matrix=quality_matrix,quality_summary=quality_summary,question=question)
 
-    evidence = build_analysis_chat_evidence(
-        df=df,
-        source_url=source_url,
-        chart_plan=chart_plan,
-        quality_issues=quality_issues,
-        quality_matrix=quality_matrix,
-        quality_summary=quality_summary,
-        question=question,
-    )
+    if external_requested:
+        external=research_chat_external_question(question=question,indicators=indicators,current_evidence=evidence)
+        if external.get("status")=="SUCCESS":
+            urls=external.get("sources") or []
+            source_block=("\n\n**External source links**\n"+"\n".join(f"- {u}" for u in urls[:10])) if urls else ""
+            return {"status":"SUCCESS","source":"UN_WHO_EXTERNAL_RESEARCH","text":external.get("text","")+source_block,"sources":urls}
+        return {"status":"EXTERNAL_UNAVAILABLE","source":"UN_WHO_EXTERNAL_RESEARCH","text":"Your question requested external/UN/WHO evidence, so the chatbot did not substitute DHIS2 data for that evidence.\n\n"+external.get("text","External research is currently unavailable."),"sources":external.get("sources",[])}
 
-    # ---------------------------------------------------------
-    # EXTERNAL RESEARCH MODE
-    # ---------------------------------------------------------
-    # If the user explicitly asks for a UN/WHO/report/guideline/study,
-    # do NOT answer from the dashboard alone. Search authoritative
-    # external sources and clearly separate them from current data.
-    if _chat_external_research_requested(question):
-        external = research_chat_external_question(
-            question=question,
-            indicators=indicators,
-            current_evidence=evidence,
-        )
-
-        if external.get("status") == "SUCCESS":
-            source_lines = external.get("sources") or []
-            source_block = ""
-            if source_lines:
-                source_block = "\n\n**🔗 External source links**\n" + "\n".join(
-                    f"- {url}" for url in source_lines[:10]
-                )
-
-            return {
-                "status": "SUCCESS",
-                "source": "UN_WHO_EXTERNAL_RESEARCH",
-                "text": external.get("text", "") + source_block,
-                "sources": source_lines,
-            }
-
-        # If external search fails, make the failure explicit instead of
-        # silently presenting local dashboard evidence as an UN answer.
-        return {
-            "status": "EXTERNAL_UNAVAILABLE",
-            "source": "UN_WHO_EXTERNAL_RESEARCH",
-            "text": (
-                "### 🌐 External knowledge requested\n\n"
-                "Your question specifically asks for UN/WHO or external evidence, "
-                "so DANIP-NI did not substitute the dashboard data for that evidence.\n\n"
-                + external.get("text", "External research is currently unavailable.")
-            ),
-            "sources": external.get("sources", []),
-        }
-
-    # OpenAI is an enhancement layer. A missing key must never break chat.
     if client is None:
-        return {
-            "status": "FALLBACK",
-            "source": "LOCAL_M_AND_E",
-            "text": local_answer,
-        }
+        return {"status":"FALLBACK","source":"LOCAL_M_AND_E","text":local_answer}
 
-    history = st.session_state.get("analysis_chat_messages", [])
-    recent_history = [
-        {
-            "role": item.get("role"),
-            "content": item.get("content"),
-        }
-        for item in history[-6:]
-        if isinstance(item, dict)
-    ]
+    history=st.session_state.get("analysis_chat_messages",[])
+    recent_history=[{"role":x.get("role"),"content":x.get("content")} for x in history[-6:] if isinstance(x,dict)]
+    rag_text=_rag_context_text(rag_context)
+    rag_block=rag_text if rag_text else "No compendium passage was retrieved for this question. Do not invent official definitions."
 
-    # IMPORTANT: only the compact relevant evidence is sent to the model.
-    prompt = f"""
+    prompt=f"""
 You are the DANIP-NI M&E Conversational Assistant.
+You are a senior Monitoring, Evaluation and Learning advisor.
 
-You are a senior Monitoring, Evaluation and Learning (M&E) advisor and
-programme manager supporting a DHIS2-based nutrition/public-health programme.
+SOURCE HIERARCHY:
+- ISG Indicator Compendium = authoritative organizational indicator definitions, result statements, formulas, numerator/denominator and official M&E guidance when retrieved.
+- DHIS2/API dataset = authoritative source for current numerical observations.
+- Python deterministic evidence = source of truth for calculations.
+- External web evidence = only when explicitly requested.
 
-Your job is to explain the CURRENT indicator(s) and CURRENT dashboard result
-in practical programme-management language.
-
-NON-NEGOTIABLE RULES:
-1. Python deterministic evidence is the numerical source of truth.
-2. Never invent or change a number.
-3. Never calculate from a sample or first rows.
-4. Never silently change the user's selected aggregation.
-5. If an official indicator definition, numerator, denominator, target or
-   formula is NOT present, say so explicitly.
-6. You MAY explain the likely M&E meaning from the indicator label, but label
-   that as a label-based interpretation, not an official definition.
-7. For counts, explain service/output volume.
-8. For rates/coverage, explain performance relative to the relevant
-   denominator, but do not invent the denominator.
-9. For indicators involving timing such as "within first 12 weeks", explain
-   the monitoring importance of timeliness/early initiation.
-10. Discuss trend, level, gap, comparison and data quality when supported.
-11. Distinguish observation from possible explanation.
-12. Never claim programme causality from descriptive dashboard data alone.
-13. If numerator and denominator fields are available, use them only when they
-    clearly correspond to the selected indicator.
-14. If the user asks "what does this indicator mean?", answer the M&E meaning
-    first, then describe the current observed result.
-15. If the user asks "why is it important?", explain its programme-management
-    relevance, monitoring use and follow-up implications.
-16. If the user asks "is it good/bad?", do not make a target judgement unless
-    a target or benchmark is supplied. Instead say whether the observed pattern
-    warrants routine monitoring or investigation.
-17. Keep the response concise but substantive.
-18. For ordinary indicator analysis and report requests, use ONLY the current loaded API/DHIS2 evidence. Do not request or invent outside evidence.
-19. Only use external evidence when the user explicitly requested external/UN/WHO/report/guideline/study research.
-20. Clearly separate dashboard findings from external evidence when external evidence was explicitly requested.
-21. Never present external context as if it were a DANIP/DHIS2 value.
-22. For a report request, write the report from the supplied current API/DHIS2 indicators, periods, organisation units, calculated evidence and quality findings.
-23. If the user asks for a report, do not respond with instructions on how to make one; generate the report directly.
-24. Do not add an external-evidence section when external research was not requested.
-25. When RAG context is supplied, use it only for official indicator definitions, result-area descriptions, numerator, denominator, formulas, targets and M&E guidance.
-26. Never use RAG text to replace or recalculate current DHIS2 values.
-27. If RAG context does not support a requested official definition or formula, say so explicitly.
-
-REQUEST ROUTING:
-{"MIXED MODE — RAG supplies official indicator knowledge; DHIS2 supplies current numerical evidence." if _chat_mixed_rag_analysis_intent(question) else "DHIS2 ANALYSIS MODE — current loaded API/DHIS2 evidence is the source of truth."}
-
-RAG KNOWLEDGE ({RAG_SOURCE_NAME}):
-{rag_context}
-
-CURRENT SOURCE:
-{source_url}
+RULES:
+1. Never invent or change a number.
+2. Never invent an official indicator definition, numerator, denominator, formula, target or result mapping.
+3. If the compendium passage is absent or does not support a detail, say so.
+4. For current values, use the DHIS2 evidence below.
+5. For mixed questions, use the compendium for the indicator meaning and DHIS2 for the current result.
+6. Distinguish observation from possible explanation; do not claim causality from descriptive data.
+7. If asked for a report, generate the report directly from the evidence.
+8. Do not require a DHIS2 link for general M&E or indicator-definition questions.
 
 USER QUESTION:
 {question}
@@ -9697,316 +10103,126 @@ USER QUESTION:
 RECENT CHAT:
 {safe_json_dumps(recent_history)}
 
-M&E INDICATOR CONTEXT AND DETERMINISTIC EVIDENCE:
+ISG INDICATOR COMPENDIUM RAG:
+{rag_block}
+
+CURRENT DHIS2 SOURCE:
+{current_source or 'Current DHIS2 source not explicitly named'}
+
+CURRENT DHIS2 / DETERMINISTIC EVIDENCE:
 {safe_json_dumps(evidence)}
 
-AUTHORITATIVE EXTERNAL EVIDENCE (CONTEXT ONLY — NEVER MODIFY DASHBOARD VALUES):
+EXTERNAL EVIDENCE:
 {safe_json_dumps(external_context)}
 
-Use this response structure when appropriate:
+GLOBAL RESPONSE STYLE:
+- Every response must be short, precise and directly answer the question.
+- Prefer 1-3 short paragraphs or up to 5 bullets.
+- Do not repeat retrieved passages.
+- Do not add background unless necessary.
+- If a table is requested, keep the requested items but use concise wording.
+- For indicator details, show only the key parameters unless the user explicitly asks for full details.
 
+Respond concisely using sections where useful:
 **Indicator / Direct answer**
-...
-
 **M&E interpretation**
-...
-
 **Current evidence**
-...
-
 **Programme-management implication**
-...
-
 **Data quality note**
-...
-
-**External evidence**
-...
-
-Do not include sections that are not relevant.
 """
 
-    api_errors = []
-
-    # First try the configured model.
-    models_to_try = [OPENAI_MODEL]
-    # Common deployment issue: configured model may not be available to the
-    # project. Only try alternates for model/access errors; quota errors will
-    # still fall through to the deterministic M&E answer.
-    for model in ["gpt-5-mini", "gpt-4.1-mini"]:
-        if model and model not in models_to_try:
-            models_to_try.append(model)
-
-    for model in models_to_try:
+    errors=[]
+    models=[OPENAI_MODEL]+[m for m in ("gpt-5-mini","gpt-4.1-mini") if m and m!=OPENAI_MODEL]
+    for model in models:
         try:
-            # Internal indicator analysis/reporting NEVER gets a web-search tool.
-            # This keeps the chatbot grounded in the currently loaded API/DHIS2
-            # dataset. The explicit external-research branch above is the only
-            # path that is allowed to call web search.
-            response = client.responses.create(
-                model=model,
-                input=prompt,
-            )
-
-            answer = (response.output_text or "").strip()
+            response=client.responses.create(model=model,input=prompt)
+            answer=(response.output_text or "").strip()
             if answer:
-                response_urls = _extract_response_urls(response)
-                combined_sources = []
-                for url in (response_urls + (external_context.get("sources") or [])):
-                    if url and url not in combined_sources:
-                        combined_sources.append(url)
-                return {
-                    "status": "SUCCESS",
-                    "source": "OPENAI_M_AND_E",
-                    "model": model,
-                    "text": answer,
-                    "sources": combined_sources[:15],
-                    "external_context": external_context,
-                    "rag_context": rag_result,
-                }
-
-            api_errors.append(f"{model}: empty response")
-
+                return {"status":"SUCCESS","source":"OPENAI_M_AND_E","model":model,"text":answer,"sources":[]}
         except Exception as exc:
-            message = str(exc)
-            api_errors.append(f"{model}: {message}")
-
-            lower = message.lower()
-            # If this is clearly quota/rate-limit/auth failure, trying more
-            # models will not help and only wastes time.
-            if any(token in lower for token in (
-                "insufficient_quota",
-                "credit_balance_exhausted",
-                "rate limit",
-                "429",
-                "invalid_api_key",
-                "401",
-                "authentication",
-            )):
+            msg=str(exc); errors.append(f"{model}: {msg}")
+            low=msg.lower()
+            if any(t in low for t in ("insufficient_quota","credit_balance_exhausted","rate limit","429","invalid_api_key","401","authentication")):
                 break
-
-    # Never show the generic "please try again" anymore.
-    # The user gets a useful M&E answer even when OpenAI is unavailable.
-    return {
-        "status": "FALLBACK",
-        "source": "LOCAL_M_AND_E",
-        "text": local_answer,
-        "error": " | ".join(api_errors)[-3000:],
-    }
+    return {"status":"FALLBACK","source":"LOCAL_M_AND_E","text":local_answer,"error":" | ".join(errors)[-3000:]}
 
 
 def render_analysis_chatbot(
-    df,
-    source_url,
+    df=None,
+    source_url="",
     chart_plan=None,
     quality_issues=None,
     quality_matrix=None,
     quality_summary=None,
 ):
-    """
-    Render an isolated conversational analysis module.
+    """Render the chatbot independently of DHIS2/API availability."""
+    if isinstance(df,pd.DataFrame) and not df.empty:
+        st.session_state["nexus_chat_df"]=df
+        st.session_state["nexus_chat_source_url"]=str(source_url or "")
+    else:
+        df=st.session_state.get("nexus_chat_df")
+        source_url=st.session_state.get("nexus_chat_source_url",source_url)
 
-    It appears only after a dataset is loaded and does not alter any existing
-    chart, quality, M&E or data-loading controls.
-    """
-    if not isinstance(df, pd.DataFrame) or df.empty:
-        return
-
-    chat_source = str(source_url or "").strip()
-
-    # Reset only the chatbot conversation when the user switches source URL.
-    previous_chat_source = st.session_state.get(
-        "analysis_chat_source_url"
-    )
-    if previous_chat_source != chat_source:
-        st.session_state["analysis_chat_messages"] = []
-        st.session_state["analysis_chat_source_url"] = chat_source
-
+    chat_source=str(source_url or "").strip()
+    previous=st.session_state.get("analysis_chat_source_url")
+    if previous != chat_source and chat_source:
+        st.session_state["analysis_chat_messages"]=[]
+        st.session_state["analysis_chat_source_url"]=chat_source
     if "analysis_chat_messages" not in st.session_state:
-        st.session_state["analysis_chat_messages"] = []
+        st.session_state["analysis_chat_messages"]=[]
 
-    st.markdown(
-        """
-        <div class="danip-analysis-chat">
-            <div class="chat-kicker">NEXUS AI · CONVERSATIONAL ANALYSIS · M&E CHAT</div>
-            <div class="chat-title">💬 Ask questions about this analysis</div>
-            <div class="chat-help">
-                Ask follow-up questions about the currently loaded data,
-                indicators, performance against target, trends, rankings, totals,
-                averages, data quality or programme management. Performance target-gap
-                questions automatically generate a report and graph from the evidence.
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+    st.markdown("""
+    <div class="danip-analysis-chat">
+      <div class="chat-kicker">NEXUS AI · INDEPENDENT M&E ASSISTANT</div>
+      <div class="chat-title">💬 Ask an Indicator or M&E Question</div>
+      <div class="chat-help">
+        Indicator definitions, ISG Indicator Compendium questions and general M&E questions work
+        <b>without a DHIS2/API link</b>. Current values, trends and performance use the loaded DHIS2 data.
+      </div>
+    </div>
+    """,unsafe_allow_html=True)
 
-    st.markdown(
-        f'<span class="danip-chat-source">🔗 Current source: {html.escape(chat_source)}</span>',
-        unsafe_allow_html=True,
-    )
+    if chat_source:
+        st.markdown(f'<span class="danip-chat-source">🔗 Current data source: {html.escape(chat_source)}</span>',unsafe_allow_html=True)
+    else:
+        st.markdown('<span class="danip-chat-source">📚 Knowledge source: ISG Indicator Compendium · No DHIS2 data loaded</span>',unsafe_allow_html=True)
 
-    # Render conversation history.
     for message in st.session_state["analysis_chat_messages"]:
-        role = message.get("role", "assistant")
-        content = message.get("content", "")
-
-        with st.chat_message(
-            "user" if role == "user" else "assistant"
-        ):
-            if role == "assistant":
-                st.markdown(
-                    f'<div class="danip-chat-answer">{content}</div>',
-                    unsafe_allow_html=True,
-                )
+        with st.chat_message("user" if message.get("role")=="user" else "assistant"):
+            if message.get("role")=="assistant":
+                st.markdown(message.get("content", ""))
             else:
-                st.markdown(content)
+                st.markdown(message.get("content", ""))
 
-    question = st.chat_input(
-        "Ask about the current analysis, e.g. Which country has the highest value?",
-        key="analysis_chat_input",
-    )
-
+    question=st.chat_input("Ask: What is VAS coverage? What is Impact Result 1000? What is the numerator?",key="analysis_chat_input")
     if not question:
         return
-
-    question = question.strip()
+    question=question.strip()
     if not question:
         return
-
-    st.session_state["analysis_chat_messages"].append(
-        {
-            "role": "user",
-            "content": question,
-        }
-    )
-
+    st.session_state["analysis_chat_messages"].append({"role":"user","content":question})
     with st.chat_message("user"):
         st.markdown(question)
-
     with st.chat_message("assistant"):
-        with st.spinner("🧠 Checking the current analysis..."):
+        with st.spinner("🧠 Checking the indicator compendium and M&E evidence..."):
             try:
-                result = ask_analysis_chatbot(
-                    user_question=question,
-                    df=df,
-                    source_url=chat_source,
-                    chart_plan=chart_plan,
-                    quality_issues=quality_issues,
-                    quality_matrix=quality_matrix,
-                    quality_summary=quality_summary,
-                )
+                result=ask_analysis_chatbot(user_question=question,df=df,source_url=chat_source,chart_plan=chart_plan,quality_issues=quality_issues,quality_matrix=quality_matrix,quality_summary=quality_summary)
             except Exception as exc:
-                # Chat must never fail because of an AI/API exception.
-                # Build the answer locally from the same loaded dataset.
-                try:
-                    indicators = _chat_indicator_candidates(
-                        question, df, chart_plan=chart_plan, limit=3
-                    )
-                    if not indicators and isinstance(chart_plan, dict):
-                        indicators = [
-                            c for c in (chart_plan.get("y_columns") or [])
-                            if c in df.columns
-                        ][:3]
-                    local_text = _chat_local_mne_answer(
-                        question=question,
-                        df=df,
-                        indicators=indicators,
-                        chart_plan=chart_plan,
-                        quality_issues=quality_issues,
-                    )
-                    result = {
-                        "status": "FALLBACK",
-                        "source": "LOCAL_M_AND_E",
-                        "text": local_text,
-                        "error": str(exc),
-                    }
-                except Exception as fallback_exc:
-                    result = {
-                        "status": "ERROR",
-                        "source": "LOCAL_M_AND_E",
-                        "text": (
-                            "The analysis chatbot could not complete the AI request, "
-                            "but the dataset is loaded. Please use the selected "
-                            "indicator and analysis controls above for the current "
-                            "deterministic results."
-                        ),
-                        "error": f"{exc}; fallback: {fallback_exc}",
-                    }
+                result={"status":"ERROR","source":"CHAT","text":f"The chatbot encountered an error: {str(exc)[-1200:]}"}
+        answer=(result or {}).get("text","")
+        # Global policy: every chatbot response is short and precise.
+        answer=_chat_global_concise(answer, question)
+        # Render the answer as native Streamlit Markdown so Markdown tables
+        # produced by the compendium formatter are actually displayed as tables.
+        st.markdown(answer)
+        if (result or {}).get("source")=="ISG_INDICATOR_COMPENDIUM":
+            st.caption("📚 Source: ISG Indicator Compendium (RAG)")
+        elif (result or {}).get("source") in ("LOCAL_M_AND_E","OPENAI_M_AND_E"):
+            st.caption("📊 Current numerical evidence: DHIS2/API when loaded · 📚 Indicator knowledge: ISG Indicator Compendium when relevant")
+        elif (result or {}).get("source")=="NO_DHIS2_DATA":
+            st.caption("ℹ️ No DHIS2/API data is loaded; this response is limited to knowledge/M&E content.")
 
-        # NEVER display the old generic API-error message.
-        answer = str((result or {}).get("text") or "").strip()
-        if not answer:
-            indicators = _chat_indicator_candidates(
-                question, df, chart_plan=chart_plan, limit=3
-            )
-            answer = _chat_local_mne_answer(
-                question=question,
-                df=df,
-                indicators=indicators,
-                chart_plan=chart_plan,
-                quality_issues=quality_issues,
-            )
-
-        # Performance questions have a dedicated report + graph response.
-        if result and result.get("source") == "CHAT_PERFORMANCE":
-            # Render Markdown normally so the report headings/bullets are formatted.
-            st.markdown(answer)
-
-            performance_report = result.get("performance_report") or {}
-            render_chat_performance_visual(performance_report)
-
-            performance_table = performance_report.get("below")
-            if isinstance(performance_table, pd.DataFrame) and not performance_table.empty:
-                st.markdown("### 📋 Below-Target Indicator Detail")
-                display_cols = [
-                    c for c in [
-                        "Indicator", "Target", "Actual", "Achievement %",
-                        "Gap", "Direction", "Why / evidence"
-                    ]
-                    if c in performance_table.columns
-                ]
-                st.dataframe(
-                    performance_table[display_cols],
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-            st.caption(
-                "Performance report and graph are generated deterministically "
-                "from the current dataset/Results Framework. Causal explanations "
-                "are not invented when the data does not support them."
-            )
-        else:
-            st.markdown(
-                f'<div class="danip-chat-answer">{answer}</div>',
-                unsafe_allow_html=True,
-            )
-
-        if result and result.get("sources"):
-            st.markdown("**🌐 External sources used**")
-            for url in result.get("sources", [])[:10]:
-                st.markdown(f"- {url}")
-
-        if result and result.get("source") in ("OPENAI", "OPENAI_M_AND_E"):
-            st.caption(
-                "Numerical answers are grounded in deterministic Python evidence. "
-                "External sources are used only for M&E context and interpretation."
-            )
-        elif result and result.get("source") in ("LOCAL", "LOCAL_M_AND_E"):
-            st.caption(
-                "M&E answer grounded in the currently loaded dataset and deterministic analysis evidence. "
-                "External evidence was unavailable for this fallback response."
-            )
-
-    st.session_state["analysis_chat_messages"].append(
-        {
-            "role": "assistant",
-            "content": answer,
-        }
-    )
-
-
+    st.session_state["analysis_chat_messages"].append({"role":"assistant","content":answer})
 
 
 # ============================================================
@@ -15303,19 +15519,11 @@ def render_existing_danip_ai_app():
             "Applying the confirmed indicators, dimension, graph type, analysis type and aggregation to the complete dataset.",
         )
 
-        # ========================================================
-        # CONVERSATIONAL ANALYSIS CHATBOT
-        # ========================================================
-        # New isolated module. It uses the same loaded dataframe/source and
-        # does not modify any existing analysis, chart or quality calculation.
-        render_analysis_chatbot(
-            df=df,
-            source_url=source_url,
-            chart_plan=chart_plan,
-            quality_issues=quality_issues,
-            quality_matrix=quality_matrix,
-            quality_summary=quality_summary,
-        )
+        # Keep the current dataset available to the independent chatbot across
+        # Streamlit reruns. The chatbot itself is rendered at the top of the
+        # workspace, before any DHIS2/API URL is required.
+        st.session_state["nexus_chat_df"] = df
+        st.session_state["nexus_chat_source_url"] = source_url
 
         _nexus_sidebar_status(
             "Analysis workspace is ready",
@@ -16061,6 +16269,16 @@ with refresh_col:
 # ============================================================
 
 if workspace == "🤖 DANIP AI Data Analyst":
+
+    # ============================================================
+    # INDEPENDENT M&E / INDICATOR CHATBOT
+    # ============================================================
+    # IMPORTANT: this is intentionally outside the DHIS2/API loading flow.
+    # It must render even when no API URL has been pasted and even when the
+    # DHIS2 dataset is empty. Current-data questions are routed to DHIS2 only
+    # when data is actually available. Indicator definitions, compendium
+    # questions and general M&E questions do not require an API.
+    render_analysis_chatbot()
 
     render_existing_danip_ai_app()
 
