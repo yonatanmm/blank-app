@@ -9863,6 +9863,57 @@ def _chat_compendium_question(question):
     return any(v in q for v in knowledge_verbs) and any(t in q for t in knowledge_terms)
 
 
+
+def _chat_extract_indicator_codes(question):
+    """Extract common ISG indicator-code forms, e.g. 1300(iii).06 / 1300(iii) 06."""
+    q = str(question or "")
+    patterns = [
+        r'\b(\d{3,4}\s*\(\s*[ivxIVX]+\s*\)\s*\.?\s*\d{1,3})\b',
+        r'\b(\d{3,4}\s*\.?\s*\d{1,3})\b',
+    ]
+    out=[]
+    for pat in patterns:
+        for m in re.findall(pat,q):
+            code=re.sub(r'\s+','',m).replace(').',')')
+            code=re.sub(r'\)0*(\d)',r')\1',code)
+            if code not in out: out.append(code)
+    return out
+
+
+def _chat_compendium_direct_code_lookup(question):
+    """Exact local RAG lookup by indicator code/name before semantic ranking."""
+    codes=_chat_extract_indicator_codes(question)
+    if not codes:
+        return None
+    # Search the loaded RAG corpus directly so a similar DHIS2 indicator cannot win.
+    corpus=_rag_load_knowledge()
+    if not corpus:
+        return None
+    normalized_codes=[re.sub(r'[^0-9a-z]','',c.lower()) for c in codes]
+    hits=[]
+    for item in corpus:
+        text=str(item.get('text',''))
+        norm=re.sub(r'[^0-9a-z]','',text.lower())
+        score=0
+        for c in normalized_codes:
+            if c and c in norm:
+                score=max(score,1000)
+        if score:
+            hits.append((score,item))
+    if not hits:
+        return None
+    hits.sort(key=lambda x:x[0],reverse=True)
+    selected=[x[1] for x in hits[:8]]
+    return {'chunks':selected,'warnings':[],'source':RAG_SOURCE_NAME}
+
+
+def _chat_exact_compendium_intent(question):
+    q=str(question or '').lower()
+    return bool(_chat_extract_indicator_codes(q)) and any(x in q for x in (
+        'compendium','define','definition','indicator details','indicator profile',
+        'indicator information','parameter','description','official'
+    ))
+
 def ask_analysis_chatbot(
     user_question,
     df=None,
@@ -9891,6 +9942,13 @@ def ask_analysis_chatbot(
     rag_intent=_chat_is_rag_or_me_knowledge(question)
     mixed_intent=_chat_mixed_rag_analysis_intent(question)
     current_intent=_chat_requires_current_data(question)
+    exact_compendium_intent=_chat_exact_compendium_intent(question)
+
+    # Explicit indicator-code + compendium/definition questions ALWAYS go to RAG.
+    if exact_compendium_intent:
+        rag_intent=True
+        mixed_intent=False
+        current_intent=False
 
     # HARD ROUTING RULE:
     # If the question matches a loaded DANIP indicator, current DANIP data
@@ -9912,7 +9970,7 @@ def ask_analysis_chatbot(
         rag_intent = True
 
     if rag_intent and not mixed_intent and not (current_intent and not any(x in question.lower() for x in ("compendium","official definition","indicator definition","numerator","denominator","formula"))):
-        rag=retrieve_rag_context(question, indicators=[], top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K))
+        rag=_chat_compendium_direct_code_lookup(question) or retrieve_rag_context(question, indicators=[], top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K))
         result=_chat_rag_knowledge_answer(question,rag)
         result["rag_warnings"]=rag.get("warnings",[])
         return result
@@ -9920,7 +9978,7 @@ def ask_analysis_chatbot(
     # 2. Current-data request with no dataset loaded.
     if current_df is None or current_df.empty:
         if mixed_intent or rag_intent:
-            rag=retrieve_rag_context(question, indicators=[], top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K))
+            rag=_chat_compendium_direct_code_lookup(question) or retrieve_rag_context(question, indicators=[], top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K))
             result=_chat_rag_knowledge_answer(question,rag)
             if result:
                 note="\n\n**Current DHIS2 data:** Not loaded. The compendium/M&E part of the question was answered independently."
