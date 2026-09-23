@@ -9676,6 +9676,44 @@ Retrieved compendium passages:
     return {"status":"RAG_RETRIEVED","source":"ISG_INDICATOR_COMPENDIUM","text":f"### Indicator / M&E knowledge\n\n{context}"}
 
 
+def _chat_danip_current_analysis_intent(question, df=None):
+    """Force current DANIP analysis when the question matches a loaded indicator.
+
+    This runs before the RAG-only router. It prevents indicator-result questions
+    such as "# PW who attended any ANC in supported program area" from being
+    misclassified as a pure knowledge question and sent to web_search/OpenAI.
+    """
+    q = str(question or "").strip().lower()
+    if not q:
+        return False
+
+    # Explicit DANIP/current-result language is always current-data intent.
+    explicit_terms = (
+        "danip", "current result", "current value", "current data",
+        "dashboard result", "dashboard data", "loaded data",
+        "interpret the result", "analyze the result", "analyse the result",
+        "interpret this indicator", "analyze this indicator", "analyse this indicator",
+        "what does the result show", "what does this show",
+        "trend in the data", "performance in the data",
+    )
+    if any(t in q for t in explicit_terms):
+        return True
+
+    # Most importantly, if the user's words match a real loaded indicator
+    # column, this is a DANIP-data question even when the word "DANIP" is absent.
+    if isinstance(df, pd.DataFrame) and not df.empty:
+        try:
+            matches = _chat_indicator_candidates(
+                question, df, chart_plan=None, limit=5
+            )
+            if matches:
+                return True
+        except Exception:
+            pass
+
+    return False
+
+
 def ask_analysis_chatbot(
     user_question,
     df=None,
@@ -9704,6 +9742,15 @@ def ask_analysis_chatbot(
     rag_intent=_chat_is_rag_or_me_knowledge(question)
     mixed_intent=_chat_mixed_rag_analysis_intent(question)
     current_intent=_chat_requires_current_data(question)
+
+    # HARD ROUTING RULE: a question matching a loaded DANIP indicator is a
+    # current-data analysis question, not a RAG/web-research question.
+    # This must happen BEFORE the RAG-only branch below.
+    danip_current_intent=_chat_danip_current_analysis_intent(question,current_df)
+    if danip_current_intent:
+        current_intent=True
+        # RAG may enrich the answer later, but it must never own the route.
+        rag_intent=False
 
     if rag_intent and not mixed_intent and not (current_intent and not any(x in question.lower() for x in ("compendium","official definition","indicator definition","numerator","denominator","formula"))):
         rag=retrieve_rag_context(question, indicators=[], top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K))
