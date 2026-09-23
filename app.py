@@ -9058,8 +9058,13 @@ RAG_SOURCE_URL = os.getenv(
     "ISG_INDICATOR_COMPENDIUM_URL",
     "https://docs.google.com/document/d/159IpWlCdgzCp1GOckjeux93_IrkFx7pf/edit",
 ).strip()
-RAG_TOP_K = int(os.getenv("RAG_TOP_K", "6"))
-RAG_MIN_SCORE = float(os.getenv("RAG_MIN_SCORE", "1.0"))
+RAG_TOP_K = int(os.getenv("RAG_TOP_K", "8"))
+RAG_MIN_SCORE = float(os.getenv("RAG_MIN_SCORE", "0.5"))
+# Optional local fallback. This is useful if Google blocks the Streamlit server.
+RAG_LOCAL_PATH = os.getenv(
+    "ISG_INDICATOR_COMPENDIUM_LOCAL",
+    os.path.join(BASE_DIR, "rag_knowledge", "ISG Indicator Compendium.txt"),
+).strip()
 
 
 def _rag_google_doc_id(url):
@@ -9068,49 +9073,98 @@ def _rag_google_doc_id(url):
     return match.group(1) if match else ""
 
 
+def _rag_local_text():
+    """Try a local copy only when one has been explicitly supplied/deployed."""
+    candidates = [RAG_LOCAL_PATH]
+    rag_dir = os.path.join(BASE_DIR, "rag_knowledge")
+    if os.path.isdir(rag_dir):
+        for name in os.listdir(rag_dir):
+            low = name.lower()
+            if "indicator" in low and "compendium" in low and low.endswith((".txt", ".md", ".csv", ".tsv")):
+                candidates.append(os.path.join(rag_dir, name))
+    seen = set()
+    for path in candidates:
+        path = os.path.abspath(path)
+        if path in seen or not os.path.isfile(path):
+            continue
+        seen.add(path)
+        try:
+            text = Path(path).read_text(encoding="utf-8", errors="ignore").strip()
+            if text:
+                return {"status":"SUCCESS", "text":text, "url":path, "document_id":"local"}
+        except Exception:
+            continue
+    return {"status":"ERROR", "text":"No local ISG Indicator Compendium copy was found."}
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def _rag_fetch_google_doc(url):
-    """Fetch the direct Google Docs file as plain text.
-
-    The document must be accessible to the deployed Streamlit application
-    (for example, 'Anyone with the link can view').
-    """
+    """Fetch the direct Google Docs file as plain text, with explicit diagnostics."""
     doc_id = _rag_google_doc_id(url)
     if not doc_id:
-        return {"status": "ERROR", "text": "Invalid Google Docs URL.", "url": url}
+        return {"status":"ERROR", "text":"Invalid Google Docs URL.", "url":url}
 
-    export_url = f"https://docs.google.com/document/d/{doc_id}/export?format=txt"
-    try:
-        response = requests.get(
-            export_url,
-            timeout=30,
-            headers={"User-Agent": "DANIP-NI-RAG/1.0"},
-        )
-        response.raise_for_status()
-        text = response.text.strip()
-        if not text:
-            return {
-                "status": "ERROR",
-                "text": "The Google Doc was reachable but returned no text.",
-                "url": export_url,
-            }
-        return {
-            "status": "SUCCESS",
-            "text": text,
-            "url": export_url,
-            "document_id": doc_id,
-        }
-    except Exception as exc:
-        return {
-            "status": "ERROR",
-            "text": (
-                "Could not retrieve the ISG Indicator Compendium directly from Google Docs. "
-                "Confirm that the document is shared with view access for the deployed app. "
-                f"Details: {str(exc)[:600]}"
-            ),
-            "url": export_url,
-            "document_id": doc_id,
-        }
+    export_urls = [
+        f"https://docs.google.com/document/d/{doc_id}/export?format=txt",
+        f"https://docs.google.com/document/d/{doc_id}/export?format=txt&usp=sharing",
+    ]
+    errors = []
+    for export_url in export_urls:
+        try:
+            response = requests.get(
+                export_url,
+                timeout=45,
+                headers={"User-Agent":"Mozilla/5.0 (DANIP-NI-RAG)"},
+                allow_redirects=True,
+            )
+            content_type = str(response.headers.get("content-type", "")).lower()
+            if response.status_code == 200:
+                text = response.text.strip()
+                # A login/error HTML page is not a successful document retrieval.
+                if "text/html" in content_type and ("signin" in text.lower() or "accounts.google.com" in text.lower()):
+                    errors.append("Google returned a sign-in page; the document is not publicly readable by the app.")
+                    continue
+                if text and not text.lstrip().lower().startswith("<!doctype html"):
+                    return {
+                        "status":"SUCCESS", "text":text, "url":export_url,
+                        "document_id":doc_id, "content_type":content_type,
+                    }
+                errors.append(f"Google returned HTTP 200 but no usable text (content-type: {content_type}).")
+            else:
+                errors.append(f"HTTP {response.status_code} from Google Docs export.")
+        except Exception as exc:
+            errors.append(str(exc)[:400])
+
+    return {
+        "status":"ERROR",
+        "text":(
+            f"Unable to access {RAG_SOURCE_NAME} from Google Docs. "
+            "The app tried the direct document export endpoint. "
+            "Make sure the Google Doc is shared as 'Anyone with the link – Viewer', "
+            "or deploy a local copy using ISG_INDICATOR_COMPENDIUM_LOCAL. "
+            f"Diagnostics: {' | '.join(errors[-3:])}"
+        ),
+        "url":export_urls[0], "document_id":doc_id,
+    }
+
+
+def _rag_load_source(source_url):
+    """Google Doc first; local deployed copy second. Never invent source content."""
+    google = _rag_fetch_google_doc(source_url)
+    if google.get("status") == "SUCCESS":
+        google["source_type"] = "google_doc"
+        return google
+    local = _rag_local_text()
+    if local.get("status") == "SUCCESS":
+        local["source_type"] = "local_fallback"
+        local["google_error"] = google.get("text", "")
+        return local
+    return {
+        "status":"ERROR",
+        "text":google.get("text", "") + " Local fallback: " + local.get("text", ""),
+        "url":source_url,
+        "document_id":google.get("document_id", ""),
+    }
 
 
 def _rag_normalize(text):
@@ -9156,69 +9210,75 @@ def _rag_chunks(text, chunk_chars=2200, overlap=350):
 
 def _rag_query_terms(question):
     q = str(question or "").lower()
-    # Preserve useful exact tokens such as result codes, indicator codes and acronyms.
     tokens = re.findall(r"[a-z0-9_-]{2,}", q)
     stop = {
-        "what", "which", "where", "when", "does", "this", "that", "from",
-        "with", "have", "has", "are", "the", "and", "for", "how", "can",
-        "about", "according", "please", "tell", "give", "show", "list", "into",
-        "indicator", "indicators", "result", "results", "definition", "official",
+        "what","which","where","when","does","this","that","from","with","have","has",
+        "are","the","and","for","how","can","about","according","please","tell","give",
+        "show","list","into","indicator","indicators","result","results","definition","official",
+        "within","following","following","called","name","names",
     }
     return [t for t in tokens if t not in stop]
+
+
+def _rag_query_phrases(question):
+    q = re.sub(r"\s+", " ", str(question or "").strip().lower())
+    phrases = [q]
+    # Explicit result number, e.g. "00" or "1000".
+    codes = re.findall(r"\b\d{2,5}\b", q)
+    phrases.extend(codes)
+    # Known wording from the ISG result statement.
+    if "survival" in q or "wellbeing" in q or "low-and-middle-income" in q or "low and middle income" in q:
+        phrases.append("improved survival, health and wellbeing of women, newborns, children, and adolescent girls")
+        phrases.append("1000")
+    return list(dict.fromkeys(p for p in phrases if p and len(p) >= 3))
 
 
 def _rag_score(question, chunk):
     q = str(question or "").lower()
     c = str(chunk or "").lower()
     terms = _rag_query_terms(q)
-    if not terms:
-        return 0.0
     score = 0.0
     for term in terms:
         count = c.count(term)
         if count:
-            # Exact token presence matters more than repeated generic words.
-            score += 2.0 + min(count, 4) * 0.5
-    # Strong boost for exact multi-word phrases from the question.
-    q_phrases = [p.strip() for p in re.split(r"[?.,:;]", q) if len(p.strip()) >= 8]
-    for phrase in q_phrases:
+            score += 2.0 + min(count, 6) * 0.75
+    for phrase in _rag_query_phrases(q):
         if phrase in c:
-            score += 8.0
+            score += 15.0 if len(phrase) > 12 else 8.0
+    # Result-code matches are especially important for questions asking for the
+    # indicators belonging to an impact/result statement.
+    for code in re.findall(r"\b\d{2,5}\b", q):
+        if re.search(rf"(?<![a-z0-9]){re.escape(code)}(?![a-z0-9])", c):
+            score += 20.0
     return score
 
 
 @st.cache_data(ttl=900, show_spinner=False)
 def _rag_build_index(source_url):
-    fetched = _rag_fetch_google_doc(source_url)
+    fetched = _rag_load_source(source_url)
     if fetched.get("status") != "SUCCESS":
         return {
-            "status": "ERROR",
-            "source_name": RAG_SOURCE_NAME,
-            "source_url": source_url,
-            "error": fetched.get("text", "Unable to retrieve source."),
-            "chunks": [],
+            "status":"ERROR", "source_name":RAG_SOURCE_NAME,
+            "source_url":source_url, "error":fetched.get("text", "Unable to retrieve source."),
+            "chunks":[], "source_type":"unavailable",
         }
-
     chunks = _rag_chunks(fetched.get("text", ""))
     indexed = [
-        {"source": RAG_SOURCE_NAME, "url": source_url, "chunk": chunk, "index": i + 1}
+        {"source":RAG_SOURCE_NAME, "url":fetched.get("url", source_url), "chunk":chunk, "index":i+1}
         for i, chunk in enumerate(chunks)
     ]
     return {
-        "status": "SUCCESS",
-        "source_name": RAG_SOURCE_NAME,
-        "source_url": source_url,
-        "document_id": fetched.get("document_id", ""),
-        "chunks": indexed,
+        "status":"SUCCESS", "source_name":RAG_SOURCE_NAME, "source_url":source_url,
+        "document_id":fetched.get("document_id", ""), "source_type":fetched.get("source_type", "unknown"),
+        "google_error":fetched.get("google_error", ""), "chunks":indexed,
     }
 
 
 def retrieve_rag_context(question, top_k=None):
-    """Retrieve relevant ISG Indicator Compendium chunks for a question."""
+    """Retrieve source-grounded chunks; use exact result/code matches first."""
     index = _rag_build_index(RAG_SOURCE_URL)
     if index.get("status") != "SUCCESS":
         return index
-
     scored = []
     for item in index.get("chunks", []):
         score = _rag_score(question, item.get("chunk", ""))
@@ -9227,11 +9287,7 @@ def retrieve_rag_context(question, top_k=None):
             row["score"] = score
             scored.append(row)
     scored.sort(key=lambda x: x["score"], reverse=True)
-
-    return {
-        **index,
-        "matches": scored[: int(top_k or RAG_TOP_K)],
-    }
+    return {**index, "matches":scored[:int(top_k or RAG_TOP_K)]}
 
 
 def _rag_context_text(result):
@@ -9269,6 +9325,8 @@ def _chat_rag_knowledge_intent(question):
         "numerator and denominator", "numerator/denominator", "calculation formula",
         "how is it calculated", "how is this calculated", "what does this indicator mean",
         "what is the definition", "definition of", "meaning of", "formula for",
+        "within impact result", "within the impact result", "impact result", "list of indicators",
+        "indicators within", "indicators under", "which indicators belong", "indicators for result",
     )
     if any(term in q for term in knowledge_terms) and not any(term in q for term in current_terms):
         return True
@@ -9315,9 +9373,9 @@ def _chat_rag_knowledge_answer(question, rag_result):
             "source": "ISG_INDICATOR_COMPENDIUM",
             "text": (
                 f"### 📚 {RAG_SOURCE_NAME}\n\n"
-                "I couldn't find the requested information in the configured ISG Indicator Compendium. "
-                "I will not invent an official definition, formula, numerator, denominator, target, "
-                "or indicator relationship that was not retrieved from the source."
+                "I could not retrieve a matching section from the configured ISG Indicator Compendium. "
+                "This is a retrieval result, not proof that the indicator is absent from the compendium. "
+                "Please check the RAG source status below. I will not invent an official indicator list."
             ),
         }
 
@@ -9382,10 +9440,13 @@ def render_rag_status():
     """Small status panel for the direct compendium connection."""
     index = _rag_build_index(RAG_SOURCE_URL)
     if index.get("status") == "SUCCESS":
+        source_type = index.get("source_type", "unknown")
         st.caption(
             f"📚 RAG source: **{RAG_SOURCE_NAME}** · "
-            f"{len(index.get('chunks', []))} indexed chunks · direct Google Docs file"
+            f"{len(index.get('chunks', []))} indexed chunks · source={source_type}"
         )
+        if index.get("google_error"):
+            st.warning("Google Docs retrieval failed, so DANIP is using the deployed local compendium copy.")
     else:
         st.caption(f"📚 RAG source: **{RAG_SOURCE_NAME}** · ⚠️ {index.get('error', 'Unavailable')}")
 
@@ -16064,4 +16125,4 @@ elif workspace == "📅 My Reports & Monitoring":
 
 # ============================================================
 # END — DANIP AI + SEPARATE DANIP M&E MANAGEMENT HUB
-# ============================================================
+# ============================================================app
