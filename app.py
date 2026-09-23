@@ -9679,22 +9679,8 @@ def _chat_add_danip_interpretation(result, question, current_df, chart_plan=None
         return result
 
     indicators = _chat_indicator_candidates(question, current_df, chart_plan=chart_plan, limit=3)
-    # For a compendium question, the code in the compendium is often NOT the
-    # numeric DHIS2 column name. In that case use the currently confirmed
-    # DANIP chart/analysis indicator instead of returning the compendium alone.
     if not indicators and isinstance(chart_plan, dict):
-        indicators = [
-            c for c in (chart_plan.get("y_columns") or [])
-            if c in current_df.columns
-        ][:3]
-    if not indicators:
-        # Reuse the most recently confirmed analysis plan when available.
-        saved_plan = st.session_state.get("guided_preview_plan")
-        if isinstance(saved_plan, dict):
-            indicators = [
-                c for c in (saved_plan.get("y_columns") or [])
-                if c in current_df.columns
-            ][:3]
+        indicators = [c for c in (chart_plan.get("y_columns") or []) if c in current_df.columns][:3]
     if not indicators:
         return result
 
@@ -9854,73 +9840,83 @@ def ask_analysis_chatbot(
     if not indicators and isinstance(chart_plan,dict):
         indicators=[c for c in (chart_plan.get("y_columns") or []) if c in current_df.columns][:3]
 
-    # 4. ISG Indicator Compendium + DHIS2 evidence.
-    # Report requests ALWAYS retrieve the compendium as enrichment.
-    # The compendium must never be a gate that prevents a report from being generated.
+    # 4. THREE-SOURCE RESEARCH LAYER for DANIP analysis.
+    #
+    # For a current DANIP analytical question, the chatbot now checks all three
+    # knowledge layers before producing the answer:
+    #   A) Internal KM / ISG Indicator Compendium
+    #   B) Current DANIP / DHIS2 evidence
+    #   C) External public-health / UN / WHO evidence when useful
+    #
+    # IMPORTANT: A/B/C are research inputs, NOT three competing answer sources.
+    # The user-facing answer remains DANIP analytics: observed values, trends,
+    # comparisons, data quality and M&E interpretation grounded in the loaded data.
+    # Internal KM and external evidence may explain/contextualize the result, but
+    # they must never replace, alter, cap, or become the displayed result.
     rag_context={"chunks":[],"warnings":[]}
     report_intent=_chat_report_intent(question)
-    if mixed_intent or report_intent:
+    danip_analysis_question = bool(
+        current_df is not None
+        and not current_df.empty
+        and (
+            _chat_danip_current_analysis_intent(question, current_df)
+            or current_intent
+            or mixed_intent
+            or report_intent
+            or _chat_is_indicator_detail_question(question)
+        )
+    )
+
+    # Internal KM is checked for every DANIP analytical request, not only when
+    # the user explicitly says "compendium".
+    if danip_analysis_question or mixed_intent or report_intent:
         rag_context=retrieve_rag_context(
             question,
             indicators=indicators,
             top_k=(50 if report_intent else RAG_TOP_K),
         )
 
-    external_requested=_chat_external_research_requested(question)
-    if external_requested:
-        external_context=research_mne_external_context(question=question,indicators=indicators)
-    else:
-        external_context={"status":"NOT_REQUESTED","sources":[],"text":"External web research was not requested."}
-
-    local_answer=_chat_local_mne_answer(question=question,df=current_df,indicators=indicators,chart_plan=chart_plan,quality_issues=quality_issues)
-    evidence=build_analysis_chat_evidence(df=current_df,source_url=current_source,chart_plan=chart_plan,quality_issues=quality_issues,quality_matrix=quality_matrix,quality_summary=quality_summary,question=question)
-
-    if external_requested:
-        external=research_chat_external_question(
-            question=question,
-            indicators=indicators,
-            current_evidence=evidence,
-        )
-        if external.get("status")=="SUCCESS":
-            urls=external.get("sources") or []
-            source_block=("\n\n**External source links**\n"+"\n".join(f"- {u}" for u in urls[:10])) if urls else ""
-            return {
-                "status":"SUCCESS",
-                "source":"UN_WHO_EXTERNAL_RESEARCH",
-                "text":external.get("text","")+source_block,
-                "sources":urls,
+    # External context is a hidden research/enrichment layer for DANIP analysis.
+    # Explicit external questions still trigger the same search, but the result
+    # is NEVER returned as the main chatbot answer when DANIP data are loaded.
+    # If the external provider has no quota, continue with DANIP + internal KM.
+    external_context={
+        "status":"NOT_REQUESTED",
+        "sources":[],
+        "text":"No external context retrieved."
+    }
+    if danip_analysis_question or _chat_external_research_requested(question):
+        try:
+            external_context=research_mne_external_context(
+                question=question,
+                indicators=indicators,
+            ) or external_context
+        except Exception as exc:
+            external_context={
+                "status":"ERROR",
+                "sources":[],
+                "text":"External context unavailable; continue using DANIP and internal KM.",
             }
 
-        # IMPORTANT: an external-search failure must NOT terminate the DANIP
-        # interpretation. Keep the requested external evidence separate, but
-        # continue with the current DANIP evidence when it is available.
-        danip_text = local_answer or ""
-        external_note = (
-            "### External research\n\n"
-            "The requested UN/WHO/external evidence could not be retrieved. "
-            "The external-search result is therefore not presented as evidence.\n\n"
-            + str(external.get("text", "External research is currently unavailable."))
-        )
-        if danip_text:
-            combined = (
-                "### DANIP Interpretation\n\n"
-                + str(danip_text).strip()
-                + "\n\n---\n\n"
-                + external_note.strip()
-            )
-            return {
-                "status":"DANIP_PLUS_EXTERNAL_UNAVAILABLE",
-                "source":"DANIP_CURRENT_DATA_PLUS_EXTERNAL_UNAVAILABLE",
-                "text":combined,
-                "sources":external.get("sources",[]),
-            }
+    local_answer=_chat_local_mne_answer(
+        question=question,
+        df=current_df,
+        indicators=indicators,
+        chart_plan=chart_plan,
+        quality_issues=quality_issues,
+    )
+    evidence=build_analysis_chat_evidence(
+        df=current_df,
+        source_url=current_source,
+        chart_plan=chart_plan,
+        quality_issues=quality_issues,
+        quality_matrix=quality_matrix,
+        quality_summary=quality_summary,
+        question=question,
+    )
 
-        return {
-            "status":"EXTERNAL_UNAVAILABLE",
-            "source":"UN_WHO_EXTERNAL_RESEARCH",
-            "text":external_note,
-            "sources":external.get("sources",[]),
-        }
+    # Never return external research as the answer for a DANIP analytical
+    # question. It is context for interpretation only.
 
     if client is None:
         return {"status":"FALLBACK","source":"LOCAL_M_AND_E","text":local_answer}
@@ -9934,21 +9930,28 @@ def ask_analysis_chatbot(
 You are the DANIP-NI M&E Conversational Assistant.
 You are a senior Monitoring, Evaluation and Learning advisor.
 
-SOURCE HIERARCHY:
-- ISG Indicator Compendium = authoritative organizational indicator definitions, result statements, formulas, numerator/denominator and official M&E guidance when retrieved.
-- DHIS2/API dataset = authoritative source for current numerical observations.
-- Python deterministic evidence = source of truth for calculations.
-- External web evidence = only when explicitly requested.
+RESEARCH ARCHITECTURE — THREE INPUTS, ONE USER-FACING ANSWER:
+1. INTERNAL KM / ISG INDICATOR COMPENDIUM: use it to understand the indicator definition, result framework, measurement, calculation, interpretation and data-quality context.
+2. CURRENT DANIP / DHIS2 DATA + deterministic Python evidence: this is the ONLY source of truth for the observed numerical result shown to the user.
+3. EXTERNAL PUBLIC-HEALTH / UN / WHO EVIDENCE: use it as contextual research to test or strengthen the M&E interpretation when available.
+
+CRITICAL OUTPUT RULE:
+The final answer for a DANIP analytical question must be presented as DANIP analytics.
+Do NOT replace the DANIP result with internal KM or external statistics.
+Do NOT display external research results, external benchmarks, external URLs or a separate external-evidence section unless the user explicitly asks to see those sources.
+Do NOT display the internal KM retrieval as the answer when the user is asking what the DANIP data show.
+Internal KM and external evidence are background/context used to interpret the DANIP result.
 
 RULES:
-1. Never invent or change a number.
-2. Never invent an official indicator definition, numerator, denominator, formula, target or result mapping.
-3. If the compendium passage is absent or does not support a detail, say so.
-4. For current values, use the DHIS2 evidence below.
-5. For mixed questions, use the compendium for the indicator meaning and DHIS2 for the current result.
-6. Distinguish observation from possible explanation; do not claim causality from descriptive data.
-7. If asked for a report, generate the report directly from the evidence.
-8. Do not require a DHIS2 link for general M&E or indicator-definition questions.
+1. Never invent, change, cap or replace a DANIP number.
+2. Use the exact DANIP indicator name, organisation, period and observed values.
+3. Use internal KM to understand the indicator; never invent missing official metadata.
+4. Use external evidence only as contextual support; never use it to alter the DANIP value.
+5. If external research is unavailable, continue normally using DANIP evidence + internal KM + general M&E expertise.
+6. Distinguish observed facts from interpretation and possible explanations; do not claim causality from descriptive data.
+7. The answer should follow: DANIP RESULT -> OBSERVATION -> M&E INTERPRETATION -> DATA QUALITY -> PROGRAMME IMPLICATION.
+8. If the indicator is absent from the compendium, continue using the exact DANIP indicator and general M&E expertise; clearly distinguish that from official compendium metadata.
+9. If asked for a report, generate it from the DANIP evidence first and use KM/external research only to contextualize the interpretation.
 
 REQUEST TYPE:
 {"DETAILED NARRATIVE REPORT" if report_intent else "NORMAL CHAT QUESTION"}
@@ -9968,8 +9971,11 @@ CURRENT DHIS2 SOURCE:
 CURRENT DHIS2 / DETERMINISTIC EVIDENCE:
 {safe_json_dumps(evidence)}
 
-EXTERNAL EVIDENCE:
+EXTERNAL RESEARCH CONTEXT (DO NOT DISPLAY AS A SEPARATE ANSWER):
 {safe_json_dumps(external_context)}
+
+USER-FACING ANSWER REQUIREMENT:
+For DANIP analytical questions, present only the current DANIP/DHIS2 findings and their M&E interpretation. Internal KM and external research are supporting context and must not become a separate answer section.
 
 If this is a REPORT REQUEST (for example, the user asks to generate, write,
 prepare, create or produce a narrative report), DO NOT give a short answer.
