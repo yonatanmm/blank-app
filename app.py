@@ -1,5 +1,4 @@
 
-
 import os
 import base64
 import hashlib
@@ -9744,7 +9743,12 @@ def ask_analysis_chatbot(
     history=st.session_state.get("analysis_chat_messages",[])
     recent_history=[{"role":x.get("role"),"content":x.get("content")} for x in history[-6:] if isinstance(x,dict)]
     rag_text=_rag_context_text(rag_context)
-    rag_block=rag_text if rag_text else "No compendium passage was retrieved for this question. Do not invent official definitions."
+    rag_block=rag_text if rag_text else (
+        "No ISG Indicator Compendium passage was retrieved for this question. "
+        "The assistant may still interpret the supplied DHIS2/current evidence using its own "
+        "general M&E, public-health, data-analysis and programme-monitoring expertise. "
+        "Do not present that interpretation as an official ISG Compendium definition."
+    )
 
     prompt=f"""
 You are the DANIP-NI M&E Conversational Assistant.
@@ -9759,12 +9763,13 @@ SOURCE HIERARCHY:
 RULES:
 1. Never invent or change a number.
 2. Never invent an official indicator definition, numerator, denominator, formula, target or result mapping.
-3. If the compendium passage is absent or does not support a detail, say so.
-4. For current values, use the DHIS2 evidence below.
-5. For mixed questions, use the compendium for the indicator meaning and DHIS2 for the current result.
-6. Distinguish observation from possible explanation; do not claim causality from descriptive data.
-7. If asked for a report, generate the report directly from the evidence.
-8. Do not require a DHIS2 link for general M&E or indicator-definition questions.
+3. If the compendium contains the indicator, use it as the authoritative source for official organizational definitions and metadata.
+4. If the indicator is NOT found in the compendium, DO NOT stop, refuse, or say that the result cannot be interpreted. Use your own M&E, public-health, data-analysis and programme-monitoring expertise to interpret the indicator and the observed result. Clearly label that interpretation as professional/general M&E interpretation rather than an official ISG Compendium definition.
+5. For current values, use the DHIS2 evidence below as the numerical source of truth. Never invent, change, recalculate, or replace supplied numbers unless the evidence itself provides the calculation.
+6. For mixed questions, use the compendium when available for indicator meaning, then combine it with DHIS2 evidence. If unavailable, proceed using the indicator name, supplied evidence and your M&E expertise.
+7. Distinguish observed facts from interpretation and possible explanations; do not claim causality from descriptive data.
+8. If asked for a report, generate the report directly from the evidence and continue even when RAG has no match.
+9. Do not require a DHIS2 link for general M&E or indicator-definition questions.
 
 REQUEST TYPE:
 {"DETAILED NARRATIVE REPORT" if report_intent else "NORMAL CHAT QUESTION"}
@@ -9786,6 +9791,8 @@ CURRENT DHIS2 / DETERMINISTIC EVIDENCE:
 
 EXTERNAL EVIDENCE:
 {safe_json_dumps(external_context)}
+
+If the requested indicator is not present in the ISG Indicator Compendium, continue with the analysis using the exact indicator name and current DHIS2 evidence supplied below. Apply standard M&E reasoning such as level/coverage interpretation, numerator-denominator logic when explicitly available, trend interpretation, variation across organisations or periods, data-quality implications, plausible operational explanations, and programme-management implications. Clearly distinguish these expert interpretations from official compendium metadata. Never invent an official definition, target, formula, numerator or denominator.
 
 If this is a REPORT REQUEST (for example, the user asks to generate, write,
 prepare, create or produce a narrative report), DO NOT give a short answer.
@@ -9895,6 +9902,8 @@ IMPORTANT TABLE RULES:
 - Preserve calculated values from deterministic evidence.
 - Do not invent values when evidence is unavailable; write "Not available in supplied evidence".
 - The report must remain detailed, not shortened into 4-6 bullets.
+
+For a NORMAL NON-REPORT QUESTION, remain concise and use sections where useful. If the indicator is not found in the compendium, still provide the M&E interpretation from the DHIS2 evidence and your general M&E expertise; do not answer only that the indicator was not found. Clearly state when an interpretation is general M&E expertise rather than official compendium metadata.
 
 For a NORMAL NON-REPORT QUESTION, remain concise and use sections where useful:
 **Indicator / Direct answer**
