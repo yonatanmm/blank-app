@@ -9796,54 +9796,105 @@ If an indicator is not found in the compendium, continue the report from the
 DHIS2 evidence and explicitly note that compendium metadata was unavailable for
 that indicator. Never stop or refuse the report because RAG returned no match.
 
-For a REPORT REQUEST use exactly this structure:
+For a REPORT REQUEST, use a CLEAR TABLE-FIRST FORMAT. Do not return a short prose summary.
+Use the following structure exactly. Tables must be real Markdown tables with a header row and separator row.
+
 ## 1. Report Scope
-State the indicators, reporting period/dimension and dataset covered.
+| Dimension | Details |
+|---|---|
+| Indicators | ... |
+| Reporting period | ... |
+| Organisation/country | ... |
+| Data source | ... |
+| Analysis scope | ... |
 
 ## 2. Executive Summary
-Provide a substantial management-level summary of the overall findings.
+| Area | Finding | Management meaning |
+|---|---|---|
+| Overall result | ... | ... |
+| Strongest indicator | ... | ... |
+| Weakest indicator | ... | ... |
+| Main variation | ... | ... |
+| Main data-quality consideration | ... | ... |
 
 ## 3. Indicator-by-Indicator Analysis
-Cover EVERY selected indicator. For each indicator include the observed
-values/statistics, geographic or organisational variation, period variation
-when available, notable high/low values, and the relevant compendium definition
-or interpretation when retrieved. Do not discuss only the first indicator.
+Cover EVERY selected indicator in ONE complete table:
+| Indicator | Current/observed result | Highest OU/period | Lowest OU/period | Variation | Data-quality note | Interpretation |
+|---|---:|---|---|---|---|---|
+Do not omit indicators because compendium metadata was not retrieved.
 
 ## 4. Comparative Analysis
-Compare the selected indicators directly. Identify differences, patterns,
-consistent strengths/weaknesses, exceptions and meaningful changes. Use only
-calculations supported by the deterministic evidence.
+| Comparison dimension | Indicator A | Indicator B | Indicator C | Interpretation |
+|---|---|---|---|---|
+Include all selected indicators. Add rows for level, difference, percentage-point difference where valid, trend, OU/period drivers, exceptions and data-quality effects.
 
 ## 5. Detailed M&E Narrative
-Explain what the findings mean for programme monitoring in clear professional
-language. Distinguish observed patterns from possible explanations and do not
-claim causality without evidence.
+After the tables, provide 3-6 substantive paragraphs explaining the observed patterns, programme-monitoring meaning and possible explanations. Do not claim causality.
 
 ## 6. Indicator Compendium Context
-For each indicator where compendium evidence was retrieved, explain the relevant
-official definition, purpose, measurement unit, calculation/interpretation or
-result-framework context. If not retrieved, state "Not found in the ISG Indicator
-Compendium retrieval for this report" and continue. Do not invent missing metadata.
+For EACH selected indicator with retrieved compendium evidence, create a separate table using the official Parameter / Description structure:
+| Parameter | Description |
+|---|---|
+| Intervention | ... |
+| Indicator name | ... |
+| Indicator code | ... |
+| PMF expected results statement | ... |
+| Rolls into | ... |
+| Akin indicators | ... |
+| Definition | ... |
+| Purpose/ objective | ... |
+| Relevance | ... |
+| Measurement Unit | ... |
+| Data Source | ... |
+| Data Collection Frequency | ... |
+| Baseline | ... |
+| Target | ... |
+| Calculation Method | ... |
+| Interpretation | ... |
+| Use/Application | ... |
+| Data quality considerations | ... |
+| Reporting and Dissemination | ... |
+| References | ... |
+| Version | ... |
+| Date of update | ... |
+Only include parameters actually supported by the retrieved compendium. Never invent missing values. If no match exists, use:
+| Parameter | Description |
+|---|---|
+| Compendium status | Not found in the ISG Indicator Compendium retrieval for this report |
 
 ## 7. Data Quality Assessment
-Explain completeness, missingness, consistency, plausibility, outliers, zeros,
-timeliness or other supplied quality findings and how they affect interpretation.
+| Quality dimension | Finding | Severity | Effect on analysis | Recommended action |
+|---|---|---|---|---|
 
 ## 8. Programme Management Implications
-Translate the evidence into practical implications for programme/M&E managers.
+| Finding | Programme implication | Management use |
+|---|---|---|
 
 ## 9. Areas Requiring Attention
-Identify specific indicators, countries/organisations or periods requiring
-follow-up, based on the evidence.
+| Priority area | Evidence | Why it matters | Follow-up |
+|---|---|---|---|
 
 ## 10. Recommendations
-Provide practical evidence-based actions linked to the findings.
+| # | Recommendation | Evidence/rationale | Responsible focus |
+|---:|---|---|---|
 
 ## 11. Conclusion
-Provide a substantive closing synthesis.
+Provide a substantive 1-3 paragraph conclusion after the tables.
 
 ## 12. Confidence and Limitations
-State confidence and explain important data or compendium limitations.
+| Item | Assessment |
+|---|---|
+| Confidence | High/Medium/Low with reason |
+| Data limitations | ... |
+| Compendium limitations | ... |
+| Interpretation limitations | ... |
+
+IMPORTANT TABLE RULES:
+- Keep tables complete, readable and detailed; do not collapse them into prose.
+- Use the exact indicator names from the evidence.
+- Preserve calculated values from deterministic evidence.
+- Do not invent values when evidence is unavailable; write "Not available in supplied evidence".
+- The report must remain detailed, not shortened into 4-6 bullets.
 
 For a NORMAL NON-REPORT QUESTION, remain concise and use sections where useful:
 **Indicator / Direct answer**
@@ -9933,7 +9984,7 @@ def render_analysis_chatbot(
             except Exception as exc:
                 result={"status":"ERROR","source":"CHAT","text":f"The chatbot encountered an error: {str(exc)[-1200:]}"}
         answer=(result or {}).get("text","")
-        st.markdown(f'<div class="danip-chat-answer">{answer}</div>',unsafe_allow_html=True)
+        st.markdown(answer)
         if (result or {}).get("source")=="ISG_INDICATOR_COMPENDIUM":
             st.caption("📚 Source: ISG Indicator Compendium (RAG)")
         elif (result or {}).get("source") in ("LOCAL_M_AND_E","OPENAI_M_AND_E"):
