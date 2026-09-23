@@ -7825,36 +7825,6 @@ def _chat_local_mne_answer(
     focus = "; ".join(primary.get("focus") or [])
 
     # ---------------------------------------------------------
-    # Local domain-aware interpretation
-    # ---------------------------------------------------------
-    # This is intentionally label/evidence based. It does not invent an
-    # official indicator definition, target, numerator or denominator.
-    label_lower = name_lower
-    local_domain_points = []
-    if any(x in label_lower for x in ["mms", "multiple micronutrient", "pregnancy", "pw ", "pregnant", "anc"]):
-        local_domain_points = [
-            "The indicator is relevant to monitoring recorded access or receipt of the maternal nutrition service among pregnant women, depending on the exact indicator definition.",
-            "For M&E interpretation, examine whether the observed result is changing over time, whether reporting is complete across organisations, and whether differences reflect service delivery, population coverage, or reporting practices.",
-            "A change in the recorded indicator should not by itself be interpreted as a causal change in maternal or newborn outcomes.",
-        ]
-    elif any(x in label_lower for x in ["vas", "vitamin a", "supplementation"]):
-        local_domain_points = [
-            "The indicator is relevant to monitoring delivery or receipt of a supplementation service, depending on the exact indicator definition.",
-            "Interpret the observed level alongside reporting completeness, eligible population, service availability and the relevant numerator/denominator where available.",
-            "Variation between reporting units may reflect differences in service delivery, population size, reporting completeness or data quality; the current dataset alone does not establish which explanation applies.",
-        ]
-    elif any(x in label_lower for x in ["coverage", "rate", "proportion", "percent", "%"]):
-        local_domain_points = [
-            "This appears to be a coverage/rate-type measure. The observed level should be interpreted with its denominator, reporting population and target when those are available.",
-            "Differences across organisations or periods should be investigated for both programme performance and data completeness before drawing conclusions.",
-        ]
-    elif any(x in label_lower for x in ["number of", "# of", "count", "women", "children", "people"]):
-        local_domain_points = [
-            "This appears to be a count/volume measure. A higher count is not automatically better because counts are influenced by population size, service utilisation and reporting completeness.",
-            "For programme monitoring, examine distribution across reporting units and periods and relate the count to the eligible population or target when available.",
-        ]
-
-    # ---------------------------------------------------------
     # Indicator meaning / M&E significance
     # ---------------------------------------------------------
     meaning_terms = (
@@ -7892,9 +7862,6 @@ def _chat_local_mne_answer(
                 "official DHIS2 indicator metadata. The current interpretation "
                 "is based on the indicator label and observed data only."
             )
-
-        if local_domain_points:
-            mne_role += "\n\n" + " ".join(local_domain_points)
 
         observed = (
             f"The current dataset contains **{primary['observations']:,}** valid "
@@ -8668,6 +8635,9 @@ def _chat_report_intent(question):
         "report on this indicator", "report on these indicators",
         "summarize this indicator", "summarise this indicator",
         "write a summary", "prepare a summary",
+        "narrate the report", "narrate report", "narrative report",
+        "narrate this indicator", "narrate this result",
+        "provide a narrative", "write a narrative",
     )
     return any(term in q for term in report_terms)
 
@@ -9676,31 +9646,30 @@ Retrieved compendium passages:
     return {"status":"RAG_RETRIEVED","source":"ISG_INDICATOR_COMPENDIUM","text":f"### Indicator / M&E knowledge\n\n{context}"}
 
 
-def _chat_danip_current_analysis_intent(question, df=None):
-    """Force current DANIP analysis when the question matches a loaded indicator.
 
-    This runs before the RAG-only router. It prevents indicator-result questions
-    such as "# PW who attended any ANC in supported program area" from being
-    misclassified as a pure knowledge question and sent to web_search/OpenAI.
-    """
-    q = str(question or "").strip().lower()
+def _chat_danip_current_analysis_intent(question, df=None):
+    """Hard-route questions about a loaded DANIP indicator to current-data analysis."""
+    q = _chat_normalize_text(question)
     if not q:
         return False
 
-    # Explicit DANIP/current-result language is always current-data intent.
+    # Explicit DANIP/current-result language always means current-data analysis.
     explicit_terms = (
         "danip", "current result", "current value", "current data",
         "dashboard result", "dashboard data", "loaded data",
         "interpret the result", "analyze the result", "analyse the result",
-        "interpret this indicator", "analyze this indicator", "analyse this indicator",
+        "interpret this indicator", "analyze this indicator",
+        "analyse this indicator", "interpret the indicator",
         "what does the result show", "what does this show",
         "trend in the data", "performance in the data",
+        "narrate the report", "narrate report", "narrative report",
+        "narrate this indicator", "narrate this result",
     )
     if any(t in q for t in explicit_terms):
         return True
 
-    # Most importantly, if the user's words match a real loaded indicator
-    # column, this is a DANIP-data question even when the word "DANIP" is absent.
+    # If the question matches a numeric column, it is a DANIP question even
+    # when words such as "what is", "meaning", or "report" make it look like RAG.
     if isinstance(df, pd.DataFrame) and not df.empty:
         try:
             matches = _chat_indicator_candidates(
@@ -9713,6 +9682,156 @@ def _chat_danip_current_analysis_intent(question, df=None):
 
     return False
 
+
+def _chat_scope_current_dataframe(question, df):
+    """Apply an explicit country/organisation scope from the user's question when present."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return df
+
+    q = _chat_normalize_text(question)
+    dimensions = _chat_dimension_candidates(df)
+
+    # Only filter when a dimension value is explicitly present in the question.
+    for col in dimensions:
+        if col not in df.columns:
+            continue
+        values = df[col].dropna().astype(str)
+        if values.empty:
+            continue
+
+        normalized_values = {
+            _chat_normalize_text(v): v for v in values.unique()
+        }
+        # Longest exact value first prevents "India" matching a longer label accidentally.
+        for norm_value in sorted(normalized_values, key=len, reverse=True):
+            if len(norm_value) < 3:
+                continue
+            if norm_value in q:
+                original = normalized_values[norm_value]
+                mask = df[col].astype(str).map(
+                    lambda x: _chat_normalize_text(x) == norm_value
+                )
+                scoped = df.loc[mask].copy()
+                if not scoped.empty:
+                    return scoped
+
+    return df
+
+
+def _chat_local_narrative_report(question, df, indicators, chart_plan=None,
+                                 quality_issues=None, quality_summary=None):
+    """Generate a deterministic narrative report from current DANIP data only."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return "No DANIP dataset is currently loaded."
+
+    scoped_df = _chat_scope_current_dataframe(question, df)
+    if not indicators:
+        indicators = _chat_indicator_candidates(
+            question, scoped_df, chart_plan=chart_plan, limit=3
+        )
+    if not indicators:
+        indicators = get_numeric_columns(scoped_df)[:3]
+
+    rows = []
+    narrative_parts = []
+
+    for indicator in indicators[:5]:
+        if indicator not in scoped_df.columns:
+            continue
+        values = pd.to_numeric(scoped_df[indicator], errors="coerce")
+        valid = values.dropna()
+        if valid.empty:
+            rows.append(
+                f"| {indicator} | Not available | Not available | Not available | "
+                f"Not available | No numeric observations |"
+            )
+            continue
+
+        rows.append(
+            f"| {indicator} | {valid.sum():,.2f} | {valid.mean():,.2f} | "
+            f"{valid.min():,.2f} | {valid.max():,.2f} | "
+            f"{int(values.isna().sum())} missing / {len(valid):,} valid |"
+        )
+
+        direction = ""
+        if isinstance(chart_plan, dict):
+            xcol = chart_plan.get("x_column")
+            if xcol in scoped_df.columns:
+                tmp = pd.DataFrame({
+                    "__x": scoped_df[xcol].astype(str),
+                    "__v": values
+                }).dropna(subset=["__v"])
+                if len(tmp) >= 2:
+                    first = float(tmp["__v"].iloc[0])
+                    last = float(tmp["__v"].iloc[-1])
+                    if last > first:
+                        direction = f" The displayed sequence increased from {first:,.2f} to {last:,.2f}."
+                    elif last < first:
+                        direction = f" The displayed sequence decreased from {first:,.2f} to {last:,.2f}."
+                    else:
+                        direction = f" The displayed sequence remained at {last:,.2f}."
+
+        narrative_parts.append(
+            f"**{indicator}:** The dataset contains {len(valid):,} valid observations "
+            f"with a total of {valid.sum():,.2f}, an average of {valid.mean():,.2f}, "
+            f"a minimum of {valid.min():,.2f}, and a maximum of {valid.max():,.2f}."
+            f"{direction}"
+        )
+
+    if not rows:
+        return "I could not identify a numeric DANIP indicator for this report."
+
+    scope_text = "the currently loaded DANIP dataset"
+    if len(scoped_df) < len(df):
+        scope_text = "the DANIP records matching the country/organisation explicitly named in the question"
+
+    quality_text = ""
+    if quality_summary:
+        quality_text = f"\n\n**Data-quality context:** {safe_json_dumps(quality_summary)}"
+
+    return f"""## 1. Report Scope
+
+| Dimension | Details |
+|---|---|
+| Indicators | {", ".join(str(x) for x in indicators[:5])} |
+| Organisation/country | Explicit question scope applied where available |
+| Data source | Current DANIP/DHIS2 dataset |
+| Analysis scope | {scope_text} |
+| External research | Not used |
+
+## 2. Executive Summary
+
+The report is based on the current DANIP numerical evidence. No external web evidence is required for this analysis.
+
+## 3. Indicator-by-Indicator Analysis
+
+| Indicator | Total observed | Average | Minimum | Maximum | Data-quality note |
+|---|---:|---:|---:|---:|---|
+{chr(10).join(rows)}
+
+## 4. Detailed M&E Narrative
+
+{chr(10).join(narrative_parts)}
+
+These findings describe the reported data only. They should be interpreted together with the approved target, denominator, reporting completeness and the official indicator definition where those are available.
+
+## 5. Programme Management Implication
+
+The observed values can be used to monitor reported service/output levels and identify records or reporting periods requiring review. The data should not be treated as causal evidence without additional programme or contextual information.
+
+## 6. Data Quality Assessment
+
+| Quality dimension | Finding |
+|---|---|
+| Missingness | Reported above for each selected indicator |
+| Numerical evidence | Calculated directly from the loaded DANIP dataset |
+| External evidence | Not requested and not used |
+| Compendium | Used only when retrieved separately; it is not required to generate this report |
+
+## 7. Conclusion
+
+The narrative above provides a DANIP-first interpretation of the selected indicator(s). Any performance judgement should be made only after comparing the observed result with the applicable denominator, target, reporting period and data-quality context.{quality_text}
+"""
 
 def ask_analysis_chatbot(
     user_question,
@@ -9743,14 +9862,16 @@ def ask_analysis_chatbot(
     mixed_intent=_chat_mixed_rag_analysis_intent(question)
     current_intent=_chat_requires_current_data(question)
 
-    # HARD ROUTING RULE: a question matching a loaded DANIP indicator is a
-    # current-data analysis question, not a RAG/web-research question.
-    # This must happen BEFORE the RAG-only branch below.
-    danip_current_intent=_chat_danip_current_analysis_intent(question,current_df)
+    # HARD ROUTING RULE:
+    # If the question matches a loaded DANIP indicator, current DANIP data
+    # always takes precedence over the RAG-only route. "Narrate/report" is
+    # still a DANIP analysis request, not an external-research request.
+    danip_current_intent = _chat_danip_current_analysis_intent(
+        question, current_df
+    )
     if danip_current_intent:
-        current_intent=True
-        # RAG may enrich the answer later, but it must never own the route.
-        rag_intent=False
+        current_intent = True
+        rag_intent = False
 
     if rag_intent and not mixed_intent and not (current_intent and not any(x in question.lower() for x in ("compendium","official definition","indicator definition","numerator","denominator","formula"))):
         rag=retrieve_rag_context(question, indicators=[], top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K))
@@ -9801,11 +9922,41 @@ def ask_analysis_chatbot(
             top_k=(50 if report_intent else RAG_TOP_K),
         )
 
-    external_requested=_chat_external_research_requested(question)
+    # External research is opt-in only. A normal DANIP report never triggers web search.
+    external_requested = bool(
+        _chat_external_research_requested(question)
+        and not danip_current_intent
+    )
+
     if external_requested:
-        external_context=research_mne_external_context(question=question,indicators=indicators)
+        external_context=research_mne_external_context(
+            question=question,
+            indicators=indicators
+        )
     else:
-        external_context={"status":"NOT_REQUESTED","sources":[],"text":"External web research was not requested."}
+        external_context={
+            "status":"NOT_REQUESTED",
+            "sources":[],
+            "text":"External web research was not requested."
+        }
+
+    # For current DANIP narrative/report requests, generate the report locally
+    # first. This makes normal reporting independent of OpenAI credits/web search.
+    if danip_current_intent and report_intent:
+        local_report = _chat_local_narrative_report(
+            question=question,
+            df=current_df,
+            indicators=indicators,
+            chart_plan=chart_plan,
+            quality_issues=quality_issues,
+            quality_summary=quality_summary,
+        )
+        return {
+            "status": "SUCCESS",
+            "source": "LOCAL_DANIP_M_AND_E_REPORT",
+            "text": local_report,
+            "sources": [],
+        }
 
     local_answer=_chat_local_mne_answer(question=question,df=current_df,indicators=indicators,chart_plan=chart_plan,quality_issues=quality_issues)
     evidence=build_analysis_chat_evidence(df=current_df,source_url=current_source,chart_plan=chart_plan,quality_issues=quality_issues,quality_matrix=quality_matrix,quality_summary=quality_summary,question=question)
@@ -9818,81 +9969,33 @@ def ask_analysis_chatbot(
             return {"status":"SUCCESS","source":"UN_WHO_EXTERNAL_RESEARCH","text":external.get("text","")+source_block,"sources":urls}
         return {"status":"EXTERNAL_UNAVAILABLE","source":"UN_WHO_EXTERNAL_RESEARCH","text":"Your question requested external/UN/WHO evidence, so the chatbot did not substitute DHIS2 data for that evidence.\n\n"+external.get("text","External research is currently unavailable."),"sources":external.get("sources",[])}
 
-    # =========================================================
-    # LOCAL-FIRST DANIP M&E INTERPRETATION
-    # =========================================================
-    # Ordinary current-DANIP questions do NOT require OpenAI credits.
-    # The deterministic/local M&E engine already has the actual DANIP
-    # values, indicator label, descriptive statistics and DQ evidence.
-    # Use that evidence directly for the chatbot answer. OpenAI remains
-    # optional for report/narrative enhancement only.
-    if not report_intent:
-        return {
-            "status": "SUCCESS",
-            "source": "LOCAL_DANIP_M_AND_E",
-            "text": local_answer,
-            "ai_required": False,
-            "external_research": False,
-        }
-
     if client is None:
-        return {"status":"FALLBACK","source":"LOCAL_M_AND_E","text":local_answer,"ai_required":False}
+        return {"status":"FALLBACK","source":"LOCAL_M_AND_E","text":local_answer}
 
     history=st.session_state.get("analysis_chat_messages",[])
     recent_history=[{"role":x.get("role"),"content":x.get("content")} for x in history[-6:] if isinstance(x,dict)]
     rag_text=_rag_context_text(rag_context)
-    rag_block=rag_text if rag_text else "No compendium passage was retrieved for this question."
-
-    # CRITICAL DANIP-FIRST RULE: the deterministic local analysis is supplied
-    # directly to the narrative model so it interprets DANIP results rather
-    # than drifting into a generic indicator explanation.
-    danip_local_block = local_answer or "No deterministic local M&E narrative was generated."
-    explicit_external = _chat_external_research_requested(question)
+    rag_block=rag_text if rag_text else "No compendium passage was retrieved for this question. Do not invent official definitions."
 
     prompt=f"""
 You are the DANIP-NI M&E Conversational Assistant.
 You are a senior Monitoring, Evaluation and Learning advisor.
 
-==================== HIGHEST PRIORITY: DANIP CURRENT ANALYSIS ====================
-When the user asks about a DANIP indicator, dashboard result, chart, current value,
-trend, country, organisation, period, comparison, performance or analysis, the answer
-MUST be grounded first in the CURRENT DANIP/DHIS2 EVIDENCE below.
-
-DO NOT replace the DANIP result with a generic explanation of the indicator.
-DO NOT answer from an external website or generic internet knowledge when DANIP evidence is available.
-
-Your job is:
-DATA -> OBSERVATION -> M&E INTERPRETATION -> PROGRAMME IMPLICATION.
-Use the exact observed numbers, periods, organisation names and indicator names from DANIP.
-
-Example: if asked about “Ethiopia NOURISH: # PW who received MMS at ANC-1 in supported
-program area”, first identify and discuss the DANIP result for that indicator, then
-interpret the observed result using M&E expertise. Do not switch to a general ANC/MMS
-article as the answer.
-
 SOURCE HIERARCHY:
-1. CURRENT DANIP/DHIS2 DATA + deterministic Python evidence = source of truth for observed results.
-2. ISG Indicator Compendium = authoritative organizational context when retrieved.
-3. General M&E expertise = interpretation when the compendium does not contain the indicator.
-4. External web evidence = ONLY when the user explicitly requests external/UN/WHO/research evidence.
+- ISG Indicator Compendium = authoritative organizational indicator definitions, result statements, formulas, numerator/denominator and official M&E guidance when retrieved.
+- DHIS2/API dataset = authoritative source for current numerical observations.
+- Python deterministic evidence = source of truth for calculations.
+- External web evidence = only when explicitly requested.
 
 RULES:
-1. Never invent, change, cap or replace a DANIP number.
-2. Always state the DANIP/current result when it is available and relevant.
-3. Interpret the observed DANIP result using M&E reasoning: level, trend, variation,
-   programme meaning, data-quality considerations and possible operational explanations.
-4. If the indicator is not in the compendium, DO NOT stop and DO NOT say only
-   “indicator not found”. Use the exact DANIP indicator name and current DANIP evidence
-   plus general M&E expertise. Clearly label this as general M&E interpretation, not
-   official compendium metadata.
-5. Never invent an official definition, numerator, denominator, formula, target or mapping.
-6. Distinguish observed facts from possible explanations; never claim causality unless
-   the supplied evidence establishes it.
-7. Current/trend/comparison/performance questions MUST be answered from DANIP evidence first.
-8. External research is forbidden for ordinary DANIP analysis. It is allowed only when
-   explicitly requested, and must be clearly separated from the DANIP result.
-9. The compendium is supporting context, not a gate for analysing DANIP data.
-10. If DANIP evidence is incomplete, explain exactly what can and cannot be concluded.
+1. Never invent or change a number.
+2. Never invent an official indicator definition, numerator, denominator, formula, target or result mapping.
+3. If the compendium passage is absent or does not support a detail, say so.
+4. For current values, use the DHIS2 evidence below.
+5. For mixed questions, use the compendium for the indicator meaning and DHIS2 for the current result.
+6. Distinguish observation from possible explanation; do not claim causality from descriptive data.
+7. If asked for a report, generate the report directly from the evidence.
+8. Do not require a DHIS2 link for general M&E or indicator-definition questions.
 
 REQUEST TYPE:
 {"DETAILED NARRATIVE REPORT" if report_intent else "NORMAL CHAT QUESTION"}
@@ -9909,14 +10012,11 @@ ISG INDICATOR COMPENDIUM RAG:
 CURRENT DHIS2 SOURCE:
 {current_source or 'Current DHIS2 source not explicitly named'}
 
-CURRENT DANIP / DHIS2 / DETERMINISTIC EVIDENCE:
+CURRENT DHIS2 / DETERMINISTIC EVIDENCE:
 {safe_json_dumps(evidence)}
 
-DETERMINISTIC DANIP M&E ANALYSIS (USE THIS TO GROUND THE NARRATIVE):
-{danip_local_block}
-
 EXTERNAL EVIDENCE:
-{safe_json_dumps(external_context) if explicit_external else "NOT REQUESTED — DO NOT USE EXTERNAL EVIDENCE."}
+{safe_json_dumps(external_context)}
 
 If this is a REPORT REQUEST (for example, the user asks to generate, write,
 prepare, create or produce a narrative report), DO NOT give a short answer.
