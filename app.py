@@ -10383,33 +10383,26 @@ def render_analysis_chatbot(
     if "analysis_chat_messages" not in st.session_state:
         st.session_state["analysis_chat_messages"]=[]
 
-    # Chat-only controls: clear conversation context without touching DHIS2/API
-    # data, dashboard results, or other application state.
-    chat_col1, chat_col2, chat_col3 = st.columns([1.35, 1.35, 4.3])
-    with chat_col1:
-        new_question_clicked = st.button(
-            "🆕 New Question",
-            key="analysis_chat_new_question",
-            use_container_width=True,
-            help="Start a new independent question while keeping the loaded data."
-        )
-    with chat_col2:
-        reset_chat_clicked = st.button(
-            "🧹 Reset Chat",
-            key="analysis_chat_reset_only",
-            use_container_width=True,
-            help="Clear only chatbot analysis and conversation context."
-        )
-    with chat_col3:
-        st.caption("💡 New Question clears previous conversation context so the AI analyzes the next question independently.")
-
-    if new_question_clicked or reset_chat_clicked:
+    # Chat-only controls: the clear control is deliberately placed directly
+    # beside the chat input so it is always visible. It clears ONLY the chatbot
+    # conversation/state and never clears the loaded DHIS2/API data, dashboard
+    # analysis, M&E Hub data, or application source URL.
+    if "analysis_chat_messages" not in st.session_state:
         st.session_state["analysis_chat_messages"] = []
-        st.session_state["analysis_chat_last_result"] = None
-        st.session_state["analysis_chat_external_status"] = None
-        st.session_state["analysis_chat_new_question_mode"] = True
-        # Keep the current DHIS2/API source and all dashboard/application data.
-        st.rerun()
+
+    clear_chat_clicked = False
+
+    st.markdown("""
+    <style>
+      /* Compact clear-chat control beside the Streamlit chat input. */
+      div[data-testid="stButton"] button[kind="secondary"] {
+        border-radius: 10px;
+      }
+      [data-testid="stVerticalBlock"]:has(button[aria-label*="Clear only chatbot chat"]) {
+        min-width: 0;
+      }
+    </style>
+    """, unsafe_allow_html=True)
 
     st.markdown("""
     <div class="danip-analysis-chat">
@@ -10435,7 +10428,33 @@ def render_analysis_chatbot(
             # an HTML div would display the table syntax as plain text.
             st.markdown(message.get("content", ""))
 
-    question=st.chat_input("Ask: What is VAS coverage? What is Impact Result 1000? What is the numerator?",key="analysis_chat_input")
+    # Put the clear-chat icon immediately beside the chat input.
+    # Current Streamlit supports st.chat_input inside columns/containers, which
+    # lets the reset icon stay visually attached to the chatbot rather than
+    # being hidden above the conversation.
+    input_col, clear_col = st.columns([12, 1], gap="small", vertical_alignment="bottom")
+    with input_col:
+        question=st.chat_input(
+            "Ask: What is VAS coverage? What is Impact Result 1000? What is the numerator?",
+            key="analysis_chat_input",
+        )
+    with clear_col:
+        clear_chat_clicked = st.button(
+            "🧹",
+            key="analysis_chat_clear_icon",
+            help="Clear only chatbot chat. DHIS2/API data and dashboard analysis will remain unchanged.",
+            use_container_width=True,
+        )
+
+    if clear_chat_clicked:
+        st.session_state["analysis_chat_messages"] = []
+        st.session_state["analysis_chat_last_result"] = None
+        st.session_state["analysis_chat_external_status"] = None
+        st.session_state["analysis_chat_new_question_mode"] = True
+        # Do NOT clear nexus_chat_df, nexus_chat_source_url, dashboard data,
+        # loaded API results, or other application/session state.
+        st.rerun()
+
     if not question:
         return
     question=question.strip()
