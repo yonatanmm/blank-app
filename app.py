@@ -9839,13 +9839,16 @@ def ask_analysis_chatbot(
     quality_matrix=None,
     quality_summary=None,
 ):
-    """Independent M&E/RAG chatbot.
+    """Independent M&E/RAG chatbot with strict three-level search hierarchy.
 
-    Routing order is intentional:
-      1) ISG Indicator Compendium / M&E knowledge -> no DHIS2 required
-      2) mixed compendium + current data -> RAG + DHIS2 when available
-      3) current-data analysis -> DHIS2 required
-      4) explicit external research -> web evidence
+    SEARCH HIERARCHY (highest to lowest priority):
+      1) Internal DANIP / DHIS2 current evidence
+      2) Internal KM / ISG Indicator Compendium
+      3) External authoritative evidence (UNICEF, WHO, UN, etc.)
+
+    DANIP is always the source of truth for observed programme values.
+    Internal KM explains the indicator. External evidence is used only for
+    contextual validation/comparison and never replaces DANIP values.
     """
     question=str(user_question or "").strip()
     if not question:
@@ -9898,19 +9901,15 @@ def ask_analysis_chatbot(
     if not indicators and isinstance(chart_plan,dict):
         indicators=[c for c in (chart_plan.get("y_columns") or []) if c in current_df.columns][:3]
 
-    # 4. THREE-SOURCE RESEARCH LAYER for DANIP analysis.
+    # 4. THREE-LEVEL SEARCH HIERARCHY for DANIP analysis.
     #
-    # For a current DANIP analytical question, the chatbot now checks all three
-    # knowledge layers before producing the answer:
-    #   A) Internal KM / ISG Indicator Compendium
-    #   B) Current DANIP / DHIS2 evidence
-    #   C) External public-health / UN / WHO evidence when useful
+    # The order is strict:
+    #   1) Internal DANIP / DHIS2 current evidence FIRST
+    #   2) Internal KM / ISG Indicator Compendium SECOND
+    #   3) External authoritative evidence THIRD
     #
-    # IMPORTANT: A/B/C are research inputs, NOT three competing answer sources.
-    # The user-facing answer remains DANIP analytics: observed values, trends,
-    # comparisons, data quality and M&E interpretation grounded in the loaded data.
-    # Internal KM and external evidence may explain/contextualize the result, but
-    # they must never replace, alter, cap, or become the displayed result.
+    # These are supporting research layers, not competing values. DANIP remains
+    # the source of truth for observed programme results.
     rag_context={"chunks":[],"warnings":[]}
     report_intent=_chat_report_intent(question)
     danip_analysis_question = bool(
@@ -9925,8 +9924,18 @@ def ask_analysis_chatbot(
         )
     )
 
-    # Internal KM is checked for every DANIP analytical request, not only when
-    # the user explicitly says "compendium".
+    # LEVEL 1 — INTERNAL DANIP / DHIS2
+    # The current dataframe and deterministic evidence have already been resolved
+    # above. This is always the first and authoritative numerical layer.
+    danip_source_context = {
+        "status": "AVAILABLE",
+        "source": "DANIP_DHIS2",
+        "indicator_count": len(indicators),
+    }
+
+    # LEVEL 2 — INTERNAL KM / ISG INDICATOR COMPENDIUM
+    # Search KM only after the DANIP indicator candidates have been identified,
+    # so retrieval is anchored to the actual DANIP question/indicator.
     if danip_analysis_question or mixed_intent or report_intent:
         rag_context=retrieve_rag_context(
             question,
@@ -9934,16 +9943,17 @@ def ask_analysis_chatbot(
             top_k=(50 if report_intent else RAG_TOP_K),
         )
 
-    # External context is a hidden research/enrichment layer for DANIP analysis.
-    # Explicit external questions still trigger the same search, but the result
-    # is NEVER returned as the main chatbot answer when DANIP data are loaded.
-    # If the external provider has no quota, continue with DANIP + internal KM.
+    # LEVEL 3 — EXTERNAL AUTHORITATIVE EVIDENCE
+    # External research is performed after DANIP + KM. It can validate/contextualize
+    # the interpretation or provide an explicit comparison requested by the user.
+    # It must never replace, recalculate, cap, or override DANIP observations.
     external_context={
         "status":"NOT_REQUESTED",
         "sources":[],
         "text":"No external context retrieved."
     }
-    if danip_analysis_question or _chat_external_research_requested(question):
+    explicit_external_request = _chat_external_research_requested(question)
+    if danip_analysis_question or explicit_external_request:
         try:
             external_context=research_mne_external_context(
                 question=question,
@@ -9955,6 +9965,27 @@ def ask_analysis_chatbot(
                 "sources":[],
                 "text":"External context unavailable; continue using DANIP and internal KM.",
             }
+
+    # When the user explicitly names an external source/country/report (for example
+    # "compare with UNICEF Ethiopia this year"), the external result is part of the
+    # requested answer rather than hidden background context.
+    external_comparison_instruction = ""
+    if explicit_external_request:
+        external_comparison_instruction = """
+
+EXPLICIT EXTERNAL COMPARISON REQUEST:
+The user explicitly requested an external source/report. Therefore, after presenting
+the DANIP result, include a clearly labelled **External comparison** section.
+- Identify the requested organization (e.g. UNICEF), country (e.g. Ethiopia), and
+  reporting year/time period (e.g. this year) from the question.
+- Compare DANIP with the external source ONLY if the external source provides a
+  materially comparable indicator, population, geography and period.
+- State the external reported value exactly as found; do not invent or estimate it.
+- If the external source is not directly comparable, say **No directly comparable
+  UNICEF Ethiopia value was verified** and explain why briefly.
+- Include the external source name, report/title and URL when available.
+- Never replace the DANIP value with the external value.
+"""
 
     local_answer=_chat_local_mne_answer(
         question=question,
@@ -9988,17 +10019,20 @@ def ask_analysis_chatbot(
 You are the DANIP-NI M&E Conversational Assistant.
 You are a senior Monitoring, Evaluation and Learning advisor.
 
-RESEARCH ARCHITECTURE — THREE INPUTS, ONE USER-FACING ANSWER:
-1. INTERNAL KM / ISG INDICATOR COMPENDIUM: use it to understand the indicator definition, result framework, measurement, calculation, interpretation and data-quality context.
-2. CURRENT DANIP / DHIS2 DATA + deterministic Python evidence: this is the ONLY source of truth for the observed numerical result shown to the user.
-3. EXTERNAL PUBLIC-HEALTH / UN / WHO EVIDENCE: use it as contextual research to test or strengthen the M&E interpretation when available.
+RESEARCH ARCHITECTURE — STRICT THREE-LEVEL SEARCH HIERARCHY:
+1. INTERNAL DANIP / DHIS2 — FIRST: identify the current indicator, period, organisation/country and observed values. This is the ONLY source of truth for DANIP numerical results.
+2. INTERNAL KM / ISG INDICATOR COMPENDIUM — SECOND: use it to explain the official indicator definition, result framework, measurement, calculation, interpretation and data-quality context.
+3. EXTERNAL AUTHORITATIVE SOURCES — THIRD: use UNICEF, WHO, UN and other authoritative sources for contextual validation or an explicitly requested comparison.
+
+The search order is DANIP -> Internal KM -> External. Never allow a lower-priority source to replace a higher-priority DANIP observation.
 
 CRITICAL OUTPUT RULE:
 The final answer for a DANIP analytical question must be presented as DANIP analytics.
 Do NOT replace the DANIP result with internal KM or external statistics.
-Do NOT display external research results, external benchmarks, external URLs or a separate external-evidence section unless the user explicitly asks to see those sources.
+Do NOT display external research results, external benchmarks, external URLs or a separate external-evidence section UNLESS the user explicitly asks for an external comparison/source/report.
+When the user explicitly asks for an external comparison, show the verified external evidence in a separate **External comparison** section after the DANIP analysis.
 Do NOT display the internal KM retrieval as the answer when the user is asking what the DANIP data show.
-Internal KM and external evidence are background/context used to interpret the DANIP result.
+Internal KM and external evidence are background/context unless the user explicitly requests the external comparison.
 
 RULES:
 1. Never invent, change, cap or replace a DANIP number.
@@ -10020,7 +10054,10 @@ USER QUESTION:
 RECENT CHAT:
 {safe_json_dumps(recent_history)}
 
-ISG INDICATOR COMPENDIUM RAG:
+LEVEL 1 — CURRENT DANIP / DHIS2:
+{safe_json_dumps(danip_source_context)}
+
+LEVEL 2 — INTERNAL KM / ISG INDICATOR COMPENDIUM:
 {rag_block}
 
 CURRENT DHIS2 SOURCE:
@@ -10029,8 +10066,9 @@ CURRENT DHIS2 SOURCE:
 CURRENT DHIS2 / DETERMINISTIC EVIDENCE:
 {safe_json_dumps(evidence)}
 
-EXTERNAL RESEARCH CONTEXT (DO NOT DISPLAY AS A SEPARATE ANSWER):
+EXTERNAL RESEARCH CONTEXT:
 {safe_json_dumps(external_context)}
+{external_comparison_instruction}
 
 USER-FACING ANSWER REQUIREMENT:
 For DANIP analytical questions, present only the current DANIP/DHIS2 findings and their M&E interpretation. Internal KM and external research are supporting context and must not become a separate answer section.
