@@ -9126,7 +9126,7 @@ def _rag_sources():
                 continue
             path = os.path.join(RAG_KNOWLEDGE_FOLDER, name)
             if os.path.isfile(path) and name.lower().endswith((
-                ".txt", ".md", ".csv", ".tsv", ".docx", ".pdf"
+                ".txt", ".md", ".csv", ".tsv", ".docx", ".pdf", ".xlsx", ".xls"
             )):
                 sources.append((name, path))
     # Direct authoritative source requested by the user. This is NOT a folder scan.
@@ -9153,6 +9153,20 @@ def _rag_file_text(path):
                 import pypdf
                 reader = pypdf.PdfReader(path)
                 return _rag_normalize("\n".join((p.extract_text() or "") for p in reader.pages))
+            except Exception:
+                return ""
+        if lower.endswith((".xlsx", ".xls")):
+            try:
+                sheets = pd.read_excel(path, sheet_name=None, header=None)
+                parts = []
+                for sheet_name, frame in sheets.items():
+                    if isinstance(frame, pd.DataFrame) and not frame.empty:
+                        parts.append(f"Sheet: {sheet_name}")
+                        for row in frame.fillna("").astype(str).values.tolist():
+                            vals = [str(x).strip() for x in row if str(x).strip()]
+                            if vals:
+                                parts.append(" | ".join(vals))
+                return _rag_normalize("\n".join(parts))
             except Exception:
                 return ""
         return _rag_normalize(Path(path).read_text(encoding="utf-8", errors="ignore"))
@@ -9226,10 +9240,15 @@ def retrieve_rag_context(question, indicators=None, top_k=RAG_TOP_K):
         exact=0
         qlow=str(question or "").lower()
         tlow=c["text"].lower()
-        for phrase in re.findall(r"\b[a-z0-9][a-z0-9 #:%()\-/]{3,80}\b", qlow):
+        for phrase in re.findall(r"\b[a-z0-9][a-z0-9 #:%()\-/]{3,120}\b", qlow):
             phrase=phrase.strip()
             if len(phrase)>5 and phrase in tlow:
-                exact += 8
+                exact += 10
+        # Strong boost for exact indicator codes and distinctive indicator names.
+        codes = re.findall(r"\b\d{4}[a-z]?(?:\([ivx]+\))?(?:\.\d+)?\b", qlow, re.I)
+        for code in codes:
+            if code.lower() in tlow:
+                exact += 25
         score=overlap + exact
         if score>0:
             scored.append((score,c))
@@ -9620,30 +9639,14 @@ def _chat_rag_knowledge_answer(question, rag):
             "status":"RAG_NOT_FOUND","source":"ISG_INDICATOR_COMPENDIUM",
             "text":f"I could not find supporting content in the **{RAG_SOURCE_NAME}** knowledge base for this question. I will not invent an official definition or formula."
         }
-    if client is None:
-        return {
-            "status":"RAG_RETRIEVED","source":"ISG_INDICATOR_COMPENDIUM",
-            "text":f"### Indicator / M&E knowledge\n\nBased on the **{RAG_SOURCE_NAME}**:\n\n{context}"
-        }
-    prompt=f"""
-You are the authoritative ISG Indicator Compendium assistant.
-Answer ONLY from the retrieved compendium passages below.
-Do not use DHIS2 values, general model knowledge, web knowledge, or invented definitions.
-Preserve official terminology. If the passages do not support a requested detail, say it was not found.
-If the question asks to list, show, summarize, compare, or present multiple compendium items, ALWAYS use a Markdown table with clear column headers.
-If the question asks for an indicator definition/details/profile, ALWAYS use the compendium's Parameter / Description structure, with one parameter per row. If multiple indicators are requested, use a separate Parameter / Description table for each indicator.
-Question: {question}
-Retrieved compendium passages:
-{context}
-"""
-    try:
-        response=client.responses.create(model=OPENAI_MODEL,input=prompt)
-        answer=(response.output_text or "").strip()
-        if answer:
-            return {"status":"SUCCESS","source":"ISG_INDICATOR_COMPENDIUM","text":answer}
-    except Exception:
-        pass
-    return {"status":"RAG_RETRIEVED","source":"ISG_INDICATOR_COMPENDIUM","text":f"### Indicator / M&E knowledge\n\n{context}"}
+    # RAG answers are deliberately local-first. This prevents an indicator
+    # compendium question from failing just because the OpenAI quota is empty.
+    # The retrieved compendium text is the source; no web search is involved.
+    return {
+        "status":"RAG_RETRIEVED",
+        "source":"ISG_INDICATOR_COMPENDIUM",
+        "text":f"### Indicator / M&E knowledge\n\nBased on the **{RAG_SOURCE_NAME}**:\n\n{context}"
+    }
 
 
 
@@ -9833,6 +9836,33 @@ The observed values can be used to monitor reported service/output levels and id
 The narrative above provides a DANIP-first interpretation of the selected indicator(s). Any performance judgement should be made only after comparing the observed result with the applicable denominator, target, reporting period and data-quality context.{quality_text}
 """
 
+def _chat_explicit_compendium_intent(question):
+    q = _chat_normalize_text(question)
+    phrases = (
+        "according to the compendium", "from the compendium", "indicator compendium",
+        "isg indicator compendium", "official indicator definition",
+        "official definition", "compendium definition", "compendium details",
+        "compendium profile", "from rag", "rag knowledge", "knowledge base",
+        "indicator framework", "results framework", "result statement",
+        "numerator", "denominator", "calculation method", "measurement unit",
+        "purpose objective", "data quality considerations", "indicator code",
+    )
+    return any(p in q for p in phrases)
+
+
+def _chat_compendium_question(question):
+    q = _chat_normalize_text(question)
+    if _chat_explicit_compendium_intent(q):
+        return True
+    knowledge_terms = (
+        "indicator", "result", "definition", "meaning", "purpose", "objective",
+        "calculation", "measure", "measurement", "target", "baseline", "interpretation",
+        "data source", "frequency", "reporting", "rolls into", "akin indicator",
+    )
+    knowledge_verbs = ("what is", "what are", "define", "explain", "describe", "tell me about", "show me")
+    return any(v in q for v in knowledge_verbs) and any(t in q for t in knowledge_terms)
+
+
 def ask_analysis_chatbot(
     user_question,
     df=None,
@@ -9866,12 +9896,20 @@ def ask_analysis_chatbot(
     # If the question matches a loaded DANIP indicator, current DANIP data
     # always takes precedence over the RAG-only route. "Narrate/report" is
     # still a DANIP analysis request, not an external-research request.
+    explicit_compendium_intent = _chat_explicit_compendium_intent(question)
+    compendium_question = _chat_compendium_question(question)
+
     danip_current_intent = _chat_danip_current_analysis_intent(
         question, current_df
     )
-    if danip_current_intent:
+    # Explicit compendium questions ALWAYS stay in RAG, even when the same
+    # indicator also exists in the currently loaded DANIP dataset.
+    if danip_current_intent and not explicit_compendium_intent:
         current_intent = True
         rag_intent = False
+
+    if compendium_question and not danip_current_intent:
+        rag_intent = True
 
     if rag_intent and not mixed_intent and not (current_intent and not any(x in question.lower() for x in ("compendium","official definition","indicator definition","numerator","denominator","formula"))):
         rag=retrieve_rag_context(question, indicators=[], top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K))
