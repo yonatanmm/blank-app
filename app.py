@@ -8635,9 +8635,6 @@ def _chat_report_intent(question):
         "report on this indicator", "report on these indicators",
         "summarize this indicator", "summarise this indicator",
         "write a summary", "prepare a summary",
-        "narrate the report", "narrate report", "narrative report",
-        "narrate this indicator", "narrate this result",
-        "provide a narrative", "write a narrative",
     )
     return any(term in q for term in report_terms)
 
@@ -9126,7 +9123,7 @@ def _rag_sources():
                 continue
             path = os.path.join(RAG_KNOWLEDGE_FOLDER, name)
             if os.path.isfile(path) and name.lower().endswith((
-                ".txt", ".md", ".csv", ".tsv", ".docx", ".pdf", ".xlsx", ".xls"
+                ".txt", ".md", ".csv", ".tsv", ".docx", ".pdf"
             )):
                 sources.append((name, path))
     # Direct authoritative source requested by the user. This is NOT a folder scan.
@@ -9153,20 +9150,6 @@ def _rag_file_text(path):
                 import pypdf
                 reader = pypdf.PdfReader(path)
                 return _rag_normalize("\n".join((p.extract_text() or "") for p in reader.pages))
-            except Exception:
-                return ""
-        if lower.endswith((".xlsx", ".xls")):
-            try:
-                sheets = pd.read_excel(path, sheet_name=None, header=None)
-                parts = []
-                for sheet_name, frame in sheets.items():
-                    if isinstance(frame, pd.DataFrame) and not frame.empty:
-                        parts.append(f"Sheet: {sheet_name}")
-                        for row in frame.fillna("").astype(str).values.tolist():
-                            vals = [str(x).strip() for x in row if str(x).strip()]
-                            if vals:
-                                parts.append(" | ".join(vals))
-                return _rag_normalize("\n".join(parts))
             except Exception:
                 return ""
         return _rag_normalize(Path(path).read_text(encoding="utf-8", errors="ignore"))
@@ -9240,15 +9223,10 @@ def retrieve_rag_context(question, indicators=None, top_k=RAG_TOP_K):
         exact=0
         qlow=str(question or "").lower()
         tlow=c["text"].lower()
-        for phrase in re.findall(r"\b[a-z0-9][a-z0-9 #:%()\-/]{3,120}\b", qlow):
+        for phrase in re.findall(r"\b[a-z0-9][a-z0-9 #:%()\-/]{3,80}\b", qlow):
             phrase=phrase.strip()
             if len(phrase)>5 and phrase in tlow:
-                exact += 10
-        # Strong boost for exact indicator codes and distinctive indicator names.
-        codes = re.findall(r"\b\d{4}[a-z]?(?:\([ivx]+\))?(?:\.\d+)?\b", qlow, re.I)
-        for code in codes:
-            if code.lower() in tlow:
-                exact += 25
+                exact += 8
         score=overlap + exact
         if score>0:
             scored.append((score,c))
@@ -9639,280 +9617,31 @@ def _chat_rag_knowledge_answer(question, rag):
             "status":"RAG_NOT_FOUND","source":"ISG_INDICATOR_COMPENDIUM",
             "text":f"I could not find supporting content in the **{RAG_SOURCE_NAME}** knowledge base for this question. I will not invent an official definition or formula."
         }
-    # RAG answers are deliberately local-first. This prevents an indicator
-    # compendium question from failing just because the OpenAI quota is empty.
-    # The retrieved compendium text is the source; no web search is involved.
-    return {
-        "status":"RAG_RETRIEVED",
-        "source":"ISG_INDICATOR_COMPENDIUM",
-        "text":f"### Indicator / M&E knowledge\n\nBased on the **{RAG_SOURCE_NAME}**:\n\n{context}"
-    }
-
-
-
-def _chat_danip_current_analysis_intent(question, df=None):
-    """Hard-route questions about a loaded DANIP indicator to current-data analysis."""
-    q = _chat_normalize_text(question)
-    if not q:
-        return False
-
-    # Explicit DANIP/current-result language always means current-data analysis.
-    explicit_terms = (
-        "danip", "current result", "current value", "current data",
-        "dashboard result", "dashboard data", "loaded data",
-        "interpret the result", "analyze the result", "analyse the result",
-        "interpret this indicator", "analyze this indicator",
-        "analyse this indicator", "interpret the indicator",
-        "what does the result show", "what does this show",
-        "trend in the data", "performance in the data",
-        "narrate the report", "narrate report", "narrative report",
-        "narrate this indicator", "narrate this result",
-    )
-    if any(t in q for t in explicit_terms):
-        return True
-
-    # If the question matches a numeric column, it is a DANIP question even
-    # when words such as "what is", "meaning", or "report" make it look like RAG.
-    if isinstance(df, pd.DataFrame) and not df.empty:
-        try:
-            matches = _chat_indicator_candidates(
-                question, df, chart_plan=None, limit=5
-            )
-            if matches:
-                return True
-        except Exception:
-            pass
-
-    return False
-
-
-def _chat_scope_current_dataframe(question, df):
-    """Apply an explicit country/organisation scope from the user's question when present."""
-    if not isinstance(df, pd.DataFrame) or df.empty:
-        return df
-
-    q = _chat_normalize_text(question)
-    dimensions = _chat_dimension_candidates(df)
-
-    # Only filter when a dimension value is explicitly present in the question.
-    for col in dimensions:
-        if col not in df.columns:
-            continue
-        values = df[col].dropna().astype(str)
-        if values.empty:
-            continue
-
-        normalized_values = {
-            _chat_normalize_text(v): v for v in values.unique()
+    if client is None:
+        return {
+            "status":"RAG_RETRIEVED","source":"ISG_INDICATOR_COMPENDIUM",
+            "text":f"### Indicator / M&E knowledge\n\nBased on the **{RAG_SOURCE_NAME}**:\n\n{context}"
         }
-        # Longest exact value first prevents "India" matching a longer label accidentally.
-        for norm_value in sorted(normalized_values, key=len, reverse=True):
-            if len(norm_value) < 3:
-                continue
-            if norm_value in q:
-                original = normalized_values[norm_value]
-                mask = df[col].astype(str).map(
-                    lambda x: _chat_normalize_text(x) == norm_value
-                )
-                scoped = df.loc[mask].copy()
-                if not scoped.empty:
-                    return scoped
-
-    return df
-
-
-def _chat_local_narrative_report(question, df, indicators, chart_plan=None,
-                                 quality_issues=None, quality_summary=None):
-    """Generate a deterministic narrative report from current DANIP data only."""
-    if not isinstance(df, pd.DataFrame) or df.empty:
-        return "No DANIP dataset is currently loaded."
-
-    scoped_df = _chat_scope_current_dataframe(question, df)
-    if not indicators:
-        indicators = _chat_indicator_candidates(
-            question, scoped_df, chart_plan=chart_plan, limit=3
-        )
-    if not indicators:
-        indicators = get_numeric_columns(scoped_df)[:3]
-
-    rows = []
-    narrative_parts = []
-
-    for indicator in indicators[:5]:
-        if indicator not in scoped_df.columns:
-            continue
-        values = pd.to_numeric(scoped_df[indicator], errors="coerce")
-        valid = values.dropna()
-        if valid.empty:
-            rows.append(
-                f"| {indicator} | Not available | Not available | Not available | "
-                f"Not available | No numeric observations |"
-            )
-            continue
-
-        rows.append(
-            f"| {indicator} | {valid.sum():,.2f} | {valid.mean():,.2f} | "
-            f"{valid.min():,.2f} | {valid.max():,.2f} | "
-            f"{int(values.isna().sum())} missing / {len(valid):,} valid |"
-        )
-
-        direction = ""
-        if isinstance(chart_plan, dict):
-            xcol = chart_plan.get("x_column")
-            if xcol in scoped_df.columns:
-                tmp = pd.DataFrame({
-                    "__x": scoped_df[xcol].astype(str),
-                    "__v": values
-                }).dropna(subset=["__v"])
-                if len(tmp) >= 2:
-                    first = float(tmp["__v"].iloc[0])
-                    last = float(tmp["__v"].iloc[-1])
-                    if last > first:
-                        direction = f" The displayed sequence increased from {first:,.2f} to {last:,.2f}."
-                    elif last < first:
-                        direction = f" The displayed sequence decreased from {first:,.2f} to {last:,.2f}."
-                    else:
-                        direction = f" The displayed sequence remained at {last:,.2f}."
-
-        narrative_parts.append(
-            f"**{indicator}:** The dataset contains {len(valid):,} valid observations "
-            f"with a total of {valid.sum():,.2f}, an average of {valid.mean():,.2f}, "
-            f"a minimum of {valid.min():,.2f}, and a maximum of {valid.max():,.2f}."
-            f"{direction}"
-        )
-
-    if not rows:
-        return "I could not identify a numeric DANIP indicator for this report."
-
-    scope_text = "the currently loaded DANIP dataset"
-    if len(scoped_df) < len(df):
-        scope_text = "the DANIP records matching the country/organisation explicitly named in the question"
-
-    quality_text = ""
-    if quality_summary:
-        quality_text = f"\n\n**Data-quality context:** {safe_json_dumps(quality_summary)}"
-
-    return f"""## 1. Report Scope
-
-| Dimension | Details |
-|---|---|
-| Indicators | {", ".join(str(x) for x in indicators[:5])} |
-| Organisation/country | Explicit question scope applied where available |
-| Data source | Current DANIP/DHIS2 dataset |
-| Analysis scope | {scope_text} |
-| External research | Not used |
-
-## 2. Executive Summary
-
-The report is based on the current DANIP numerical evidence. No external web evidence is required for this analysis.
-
-## 3. Indicator-by-Indicator Analysis
-
-| Indicator | Total observed | Average | Minimum | Maximum | Data-quality note |
-|---|---:|---:|---:|---:|---|
-{chr(10).join(rows)}
-
-## 4. Detailed M&E Narrative
-
-{chr(10).join(narrative_parts)}
-
-These findings describe the reported data only. They should be interpreted together with the approved target, denominator, reporting completeness and the official indicator definition where those are available.
-
-## 5. Programme Management Implication
-
-The observed values can be used to monitor reported service/output levels and identify records or reporting periods requiring review. The data should not be treated as causal evidence without additional programme or contextual information.
-
-## 6. Data Quality Assessment
-
-| Quality dimension | Finding |
-|---|---|
-| Missingness | Reported above for each selected indicator |
-| Numerical evidence | Calculated directly from the loaded DANIP dataset |
-| External evidence | Not requested and not used |
-| Compendium | Used only when retrieved separately; it is not required to generate this report |
-
-## 7. Conclusion
-
-The narrative above provides a DANIP-first interpretation of the selected indicator(s). Any performance judgement should be made only after comparing the observed result with the applicable denominator, target, reporting period and data-quality context.{quality_text}
+    prompt=f"""
+You are the authoritative ISG Indicator Compendium assistant.
+Answer ONLY from the retrieved compendium passages below.
+Do not use DHIS2 values, general model knowledge, web knowledge, or invented definitions.
+Preserve official terminology. If the passages do not support a requested detail, say it was not found.
+If the question asks to list, show, summarize, compare, or present multiple compendium items, ALWAYS use a Markdown table with clear column headers.
+If the question asks for an indicator definition/details/profile, ALWAYS use the compendium's Parameter / Description structure, with one parameter per row. If multiple indicators are requested, use a separate Parameter / Description table for each indicator.
+Question: {question}
+Retrieved compendium passages:
+{context}
 """
+    try:
+        response=client.responses.create(model=OPENAI_MODEL,input=prompt)
+        answer=(response.output_text or "").strip()
+        if answer:
+            return {"status":"SUCCESS","source":"ISG_INDICATOR_COMPENDIUM","text":answer}
+    except Exception:
+        pass
+    return {"status":"RAG_RETRIEVED","source":"ISG_INDICATOR_COMPENDIUM","text":f"### Indicator / M&E knowledge\n\n{context}"}
 
-def _chat_explicit_compendium_intent(question):
-    q = _chat_normalize_text(question)
-    phrases = (
-        "according to the compendium", "from the compendium", "indicator compendium",
-        "isg indicator compendium", "official indicator definition",
-        "official definition", "compendium definition", "compendium details",
-        "compendium profile", "from rag", "rag knowledge", "knowledge base",
-        "indicator framework", "results framework", "result statement",
-        "numerator", "denominator", "calculation method", "measurement unit",
-        "purpose objective", "data quality considerations", "indicator code",
-    )
-    return any(p in q for p in phrases)
-
-
-def _chat_compendium_question(question):
-    q = _chat_normalize_text(question)
-    if _chat_explicit_compendium_intent(q):
-        return True
-    knowledge_terms = (
-        "indicator", "result", "definition", "meaning", "purpose", "objective",
-        "calculation", "measure", "measurement", "target", "baseline", "interpretation",
-        "data source", "frequency", "reporting", "rolls into", "akin indicator",
-    )
-    knowledge_verbs = ("what is", "what are", "define", "explain", "describe", "tell me about", "show me")
-    return any(v in q for v in knowledge_verbs) and any(t in q for t in knowledge_terms)
-
-
-
-def _chat_extract_indicator_codes(question):
-    """Extract common ISG indicator-code forms, e.g. 1300(iii).06 / 1300(iii) 06."""
-    q = str(question or "")
-    patterns = [
-        r'\b(\d{3,4}\s*\(\s*[ivxIVX]+\s*\)\s*\.?\s*\d{1,3})\b',
-        r'\b(\d{3,4}\s*\.?\s*\d{1,3})\b',
-    ]
-    out=[]
-    for pat in patterns:
-        for m in re.findall(pat,q):
-            code=re.sub(r'\s+','',m).replace(').',')')
-            code=re.sub(r'\)0*(\d)',r')\1',code)
-            if code not in out: out.append(code)
-    return out
-
-
-def _chat_compendium_direct_code_lookup(question):
-    """Exact local RAG lookup by indicator code/name before semantic ranking."""
-    codes=_chat_extract_indicator_codes(question)
-    if not codes:
-        return None
-    # Search the loaded RAG corpus directly so a similar DHIS2 indicator cannot win.
-    corpus=_rag_load_knowledge()
-    if not corpus:
-        return None
-    normalized_codes=[re.sub(r'[^0-9a-z]','',c.lower()) for c in codes]
-    hits=[]
-    for item in corpus:
-        text=str(item.get('text',''))
-        norm=re.sub(r'[^0-9a-z]','',text.lower())
-        score=0
-        for c in normalized_codes:
-            if c and c in norm:
-                score=max(score,1000)
-        if score:
-            hits.append((score,item))
-    if not hits:
-        return None
-    hits.sort(key=lambda x:x[0],reverse=True)
-    selected=[x[1] for x in hits[:8]]
-    return {'chunks':selected,'warnings':[],'source':RAG_SOURCE_NAME}
-
-
-def _chat_exact_compendium_intent(question):
-    q=str(question or '').lower()
-    return bool(_chat_extract_indicator_codes(q)) and any(x in q for x in (
-        'compendium','define','definition','indicator details','indicator profile',
-        'indicator information','parameter','description','official'
-    ))
 
 def ask_analysis_chatbot(
     user_question,
@@ -9942,35 +9671,9 @@ def ask_analysis_chatbot(
     rag_intent=_chat_is_rag_or_me_knowledge(question)
     mixed_intent=_chat_mixed_rag_analysis_intent(question)
     current_intent=_chat_requires_current_data(question)
-    exact_compendium_intent=_chat_exact_compendium_intent(question)
-
-    # Explicit indicator-code + compendium/definition questions ALWAYS go to RAG.
-    if exact_compendium_intent:
-        rag_intent=True
-        mixed_intent=False
-        current_intent=False
-
-    # HARD ROUTING RULE:
-    # If the question matches a loaded DANIP indicator, current DANIP data
-    # always takes precedence over the RAG-only route. "Narrate/report" is
-    # still a DANIP analysis request, not an external-research request.
-    explicit_compendium_intent = _chat_explicit_compendium_intent(question)
-    compendium_question = _chat_compendium_question(question)
-
-    danip_current_intent = _chat_danip_current_analysis_intent(
-        question, current_df
-    )
-    # Explicit compendium questions ALWAYS stay in RAG, even when the same
-    # indicator also exists in the currently loaded DANIP dataset.
-    if danip_current_intent and not explicit_compendium_intent:
-        current_intent = True
-        rag_intent = False
-
-    if compendium_question and not danip_current_intent:
-        rag_intent = True
 
     if rag_intent and not mixed_intent and not (current_intent and not any(x in question.lower() for x in ("compendium","official definition","indicator definition","numerator","denominator","formula"))):
-        rag=_chat_compendium_direct_code_lookup(question) or retrieve_rag_context(question, indicators=[], top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K))
+        rag=retrieve_rag_context(question, indicators=[], top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K))
         result=_chat_rag_knowledge_answer(question,rag)
         result["rag_warnings"]=rag.get("warnings",[])
         return result
@@ -9978,7 +9681,7 @@ def ask_analysis_chatbot(
     # 2. Current-data request with no dataset loaded.
     if current_df is None or current_df.empty:
         if mixed_intent or rag_intent:
-            rag=_chat_compendium_direct_code_lookup(question) or retrieve_rag_context(question, indicators=[], top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K))
+            rag=retrieve_rag_context(question, indicators=[], top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K))
             result=_chat_rag_knowledge_answer(question,rag)
             if result:
                 note="\n\n**Current DHIS2 data:** Not loaded. The compendium/M&E part of the question was answered independently."
@@ -10018,41 +9721,11 @@ def ask_analysis_chatbot(
             top_k=(50 if report_intent else RAG_TOP_K),
         )
 
-    # External research is opt-in only. A normal DANIP report never triggers web search.
-    external_requested = bool(
-        _chat_external_research_requested(question)
-        and not danip_current_intent
-    )
-
+    external_requested=_chat_external_research_requested(question)
     if external_requested:
-        external_context=research_mne_external_context(
-            question=question,
-            indicators=indicators
-        )
+        external_context=research_mne_external_context(question=question,indicators=indicators)
     else:
-        external_context={
-            "status":"NOT_REQUESTED",
-            "sources":[],
-            "text":"External web research was not requested."
-        }
-
-    # For current DANIP narrative/report requests, generate the report locally
-    # first. This makes normal reporting independent of OpenAI credits/web search.
-    if danip_current_intent and report_intent:
-        local_report = _chat_local_narrative_report(
-            question=question,
-            df=current_df,
-            indicators=indicators,
-            chart_plan=chart_plan,
-            quality_issues=quality_issues,
-            quality_summary=quality_summary,
-        )
-        return {
-            "status": "SUCCESS",
-            "source": "LOCAL_DANIP_M_AND_E_REPORT",
-            "text": local_report,
-            "sources": [],
-        }
+        external_context={"status":"NOT_REQUESTED","sources":[],"text":"External web research was not requested."}
 
     local_answer=_chat_local_mne_answer(question=question,df=current_df,indicators=indicators,chart_plan=chart_plan,quality_issues=quality_issues)
     evidence=build_analysis_chat_evidence(df=current_df,source_url=current_source,chart_plan=chart_plan,quality_issues=quality_issues,quality_matrix=quality_matrix,quality_summary=quality_summary,question=question)
@@ -10092,6 +9765,12 @@ RULES:
 6. Distinguish observation from possible explanation; do not claim causality from descriptive data.
 7. If asked for a report, generate the report directly from the evidence.
 8. Do not require a DHIS2 link for general M&E or indicator-definition questions.
+9. When the question is an indicator/compendium question AND current DANIP/DHIS2 evidence is available, preserve the existing compendium answer and its standard Parameter / Description format exactly. Then append one additional section only:
+
+## DANIP Interpretation
+
+Use the current DANIP/DHIS2 evidence to explain the observed result from an M&E perspective. Include only: observed value/result, trend or variation when available, programme/M&E meaning, data-quality caveats, and practical follow-up. Do not rewrite or replace the compendium fields. Do not invent official metadata, targets, denominators, formulas, causes or explanations.
+10. If the user asks only for the compendium definition/details and does not ask for interpretation, return the standard compendium format without adding DANIP interpretation.
 
 REQUEST TYPE:
 {"DETAILED NARRATIVE REPORT" if report_intent else "NORMAL CHAT QUESTION"}
@@ -10113,6 +9792,11 @@ CURRENT DHIS2 / DETERMINISTIC EVIDENCE:
 
 EXTERNAL EVIDENCE:
 {safe_json_dumps(external_context)}
+
+For a mixed indicator + current-DANIP question, the final answer must be:
+1. The existing standard ISG Indicator Compendium answer in its normal Parameter / Description table format.
+2. Immediately after it, exactly one additional section titled **DANIP Interpretation** based on the current DANIP/DHIS2 evidence.
+Do not change the compendium table structure.
 
 If this is a REPORT REQUEST (for example, the user asks to generate, write,
 prepare, create or produce a narrative report), DO NOT give a short answer.
