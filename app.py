@@ -9553,30 +9553,250 @@ def _chat_parameter_table_answer(question, rag):
     return _chat_parameter_table_fallback(context)
 
 
-def _chat_parameter_table_fallback(context):
-    """Conservative fallback for Parameter/Description formatting."""
-    text = re.sub(r'\[RAG\s+\d+\s*\|[^\]]+\]\s*', '', str(context or ''))
+def _chat_parameter_table_from_context(question, context):
+    """Extract one indicator in the original ISG Parameter/Description format.
+
+    The RAG export may flatten an entire Word table into one very long line.
+    Therefore fields cannot be detected only at line starts.  This parser:
+      1. isolates the requested indicator between Parameter Description
+         boundaries;
+      2. finds each original parameter label anywhere in that record;
+      3. stops each value exactly at the next parameter label;
+      4. returns the original two-column breakdown.
+    """
+    context = str(context or "").strip()
+    if not context:
+        return ""
+
     labels = [
-        'Intervention','Indicator name','PMF expected results statement','Indicator code',
-        'Rolls into','Akin indicators','Definition','Purpose/ objective','Relevance',
-        'Measurement Unit','Data Source','Data Collection Frequency','Baseline','Target',
-        'Calculation Method','Interpretation','Use/Application','Data quality considerations',
-        'Reporting and Dissemination','References','Version','Date of update'
+        "Intervention",
+        "Indicator name",
+        "PMF expected results statement",
+        "Indicator code",
+        "Rolls into",
+        "Akin indicators",
+        "Interventions",
+        "Definition",
+        "Recommended course public sector",
+        "Recommended course private sector",
+        "Purpose/ objective",
+        "Purpose/objective",
+        "Relevance",
+        "Measurement Unit",
+        "Data Source",
+        "Supply chain method",
+        "Data Collection Frequency",
+        "Baseline",
+        "Target",
+        "Routine data/HMIS",
+        "Calculation Method",
+        "Interpretation",
+        "Use/Application",
+        "Data quality considerations",
+        "Reporting and Dissemination",
+        "References",
+        "Version",
+        "Date of update",
     ]
-    # This fallback only uses explicit label/value patterns; it never invents values.
-    rows=[]
-    for label in labels:
-        m=re.search(rf'(?im)^\s*{re.escape(label)}\s*[:\-]?\s*(.+?)(?=\n\s*(?:' + '|'.join(re.escape(x) for x in labels if x != label) + r')\s*[:\-]?\s*|\Z)', text, re.S)
-        if m:
-            value=re.sub(r'\s+',' ',m.group(1)).strip(' |')
-            if value:
-                rows.append((label,value))
-    if not rows:
-        return ''
-    out=['| Parameter | Description |','|---|---|']
-    for k,v in rows:
-        out.append(f'| {k} | {v.replace(chr(10), " ").replace("|", "\\|")} |')
-    return '\n'.join(out)
+
+    clean = re.sub(r"\[RAG\s+\d+\s*\|[^\]]+\]\s*", "", context)
+    clean = re.sub(r"\s+", " ", clean).strip()
+
+    def norm_code(value):
+        return re.sub(r"[^0-9a-z]", "", str(value or "").lower())
+
+    # Accept 1300(iii).06, 1300(iii) 06, 1300 (iii) 06.
+    code_matches = re.findall(
+        r"\b\d{3,4}\s*\(\s*[ivx]+\s*\)\s*\.?\s*\d{1,3}\b"
+        r"|\b\d{3,4}[a-z]?\s*\.\s*\d{1,3}\b",
+        str(question or ""),
+        flags=re.I,
+    )
+    requested_codes = [
+        norm_code(x) for x in code_matches
+        if norm_code(x) not in {"2025", "2030"}
+    ]
+
+    # ---- 1. Isolate the exact indicator record ---------------------------
+    boundary_re = re.compile(r"(?i)\bParameter\s+Description\b")
+    boundaries = list(boundary_re.finditer(clean))
+
+    selected = clean
+
+    if requested_codes and boundaries:
+        candidates = []
+
+        for i, b in enumerate(boundaries):
+            bs = b.start()
+            be = boundaries[i + 1].start() if i + 1 < len(boundaries) else len(clean)
+            block = clean[bs:be]
+
+            # Strongest signal is the requested code near "Indicator name".
+            score = 0
+            compact = re.sub(r"\s+", " ", block)
+            compact_norm = norm_code(compact)
+
+            for code in requested_codes:
+                if code in compact_norm:
+                    score += 10
+
+                # Remove punctuation/spaces only for the code portion, while
+                # retaining the readable source text around "Indicator name".
+                if re.search(
+                    r"(?is)\bIndicator\s+name\b.{0,180}?"
+                    + re.escape(code[:4]),
+                    compact,
+                ):
+                    score += 100
+
+            if score:
+                candidates.append((score, block))
+
+        if candidates:
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            selected = candidates[0][1]
+
+    # If no boundary matched, locate the requested indicator name directly.
+    if requested_codes and not boundaries:
+        for code in requested_codes:
+            m = re.search(
+                r"(?is)\bIndicator\s+name\b.{0,180}?"
+                + re.escape(code[:4]),
+                clean,
+            )
+            if m:
+                selected = clean
+                break
+
+    # ---- 2. Parse labels anywhere in the flattened record ---------------
+    selected = re.sub(r"(?i)\bParameter\s+Description\b", " ", selected, count=1)
+    selected = re.sub(r"\s+", " ", selected).strip()
+
+    # Longest first so "Recommended course public sector" wins before
+    # "Recommended course" and "Purpose/ objective" is handled explicitly.
+    label_alts = sorted(
+        labels,
+        key=lambda x: len(x),
+        reverse=True,
+    )
+    label_pattern = "|".join(re.escape(x) for x in label_alts)
+
+    # A label is recognized only as a standalone phrase. A colon is optional
+    # because the Word/Google export frequently removes table-cell boundaries.
+    token_re = re.compile(
+        r"(?i)(?<![A-Za-z0-9])(" + label_pattern + r")"
+        r"(?=(?:\s*[:\-]?\s+)|\s*$)"
+    )
+
+    matches = list(token_re.finditer(selected))
+    if not matches:
+        return ""
+
+    fields = []
+    for i, m in enumerate(matches):
+        label = m.group(1)
+        canonical = next(
+            (x for x in labels if x.lower() == label.lower()),
+            label,
+        )
+
+        value_start = m.end()
+        # Remove optional colon/dash and whitespace after the label.
+        tail = selected[value_start:]
+        tail = re.sub(r"^\s*[:\-]\s*", "", tail)
+
+        # Compute the real start in the original selected string after the
+        # optional separator.
+        consumed = len(selected[value_start:]) - len(tail)
+        real_value_start = value_start + consumed
+
+        value_end = matches[i + 1].start() if i + 1 < len(matches) else len(selected)
+        value = selected[real_value_start:value_end].strip(" :;-")
+
+        if value:
+            fields.append((canonical, value))
+
+    # Keep the first occurrence of each field. This is important when the
+    # flattened source contains a neighbouring/duplicated label.
+    data = {}
+    for label, value in fields:
+        if label not in data:
+            data[label] = re.sub(r"\s+", " ", value).strip()
+
+    if "Purpose/objective" in data and "Purpose/ objective" not in data:
+        data["Purpose/ objective"] = data.pop("Purpose/objective")
+
+    # Verify the isolated record is actually the requested indicator.
+    if requested_codes:
+        identity = norm_code(
+            " ".join([
+                data.get("Indicator name", ""),
+                data.get("Indicator code", ""),
+            ])
+        )
+        if not any(code in identity for code in requested_codes):
+            return ""
+
+    ordered = [
+        label for label in labels
+        if label in data and data[label]
+    ]
+    if not ordered:
+        return ""
+
+    out = [
+        "| Parameter | Description |",
+        "|---|---|",
+    ]
+    for label in ordered:
+        value = data[label].replace("|", r"\|")
+        out.append(f"| {label} | {value} |")
+
+    return "\n".join(out)
+
+def _chat_parameter_table_answer(question, rag):
+    """Original ISG compendium breakdown: one parameter per row."""
+    context = _rag_context_text(rag)
+    if not context:
+        return ""
+    return _chat_parameter_table_from_context(question, context)
+
+
+def _chat_add_danip_interpretation(result, question, current_df, chart_plan=None, quality_issues=None):
+    """Add ONLY the DANIP interpretation below the original compendium table."""
+    if not result or not isinstance(current_df, pd.DataFrame) or current_df.empty:
+        return result
+    if not _chat_is_indicator_detail_question(question):
+        return result
+
+    indicators = _chat_indicator_candidates(question, current_df, chart_plan=chart_plan, limit=3)
+    if not indicators and isinstance(chart_plan, dict):
+        indicators = [c for c in (chart_plan.get("y_columns") or []) if c in current_df.columns][:3]
+    if not indicators:
+        return result
+
+    try:
+        interpretation = _chat_local_mne_answer(
+            question=question,
+            df=current_df,
+            indicators=indicators,
+            chart_plan=chart_plan,
+            quality_issues=quality_issues,
+        )
+    except Exception:
+        interpretation = ""
+
+    if not interpretation:
+        return result
+
+    # Keep the compendium exactly as returned; append only a separate DANIP section.
+    result["text"] = (
+        result.get("text", "").rstrip()
+        + "\n\n---\n\n## DANIP Interpretation\n\n"
+        + str(interpretation).strip()
+    )
+    result["danip_interpretation"] = True
+    return result
 
 
 def _chat_rag_knowledge_answer(question, rag):
@@ -9675,6 +9895,8 @@ def ask_analysis_chatbot(
     if rag_intent and not mixed_intent and not (current_intent and not any(x in question.lower() for x in ("compendium","official definition","indicator definition","numerator","denominator","formula"))):
         rag=retrieve_rag_context(question, indicators=[], top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K))
         result=_chat_rag_knowledge_answer(question,rag)
+        if isinstance(current_df, pd.DataFrame) and not current_df.empty:
+            result=_chat_add_danip_interpretation(result, question, current_df, chart_plan=chart_plan, quality_issues=quality_issues)
         result["rag_warnings"]=rag.get("warnings",[])
         return result
 
@@ -16114,4 +16336,3 @@ elif workspace == "📅 My Reports & Monitoring":
 # ============================================================
 # END — DANIP AI + SEPARATE DANIP M&E MANAGEMENT HUB
 # ============================================================app
-
