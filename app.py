@@ -17,10 +17,6 @@ import sqlite3
 from datetime import datetime
 from io import BytesIO, StringIO
 from urllib.parse import urlparse, urlunparse, urlencode, parse_qs, unquote
-from pathlib import Path
-from xml.etree import ElementTree as ET
-import zipfile
-from urllib.parse import quote
 
 import numpy as np
 import pandas as pd
@@ -6961,377 +6957,6 @@ Never reverse this priority.
 
 
 # ============================================================
-# LOCAL RAG KNOWLEDGE ENGINE — INDICATOR COMPENDIUM / M&E
-# ============================================================
-# RAG is intentionally separate from the external web-research engine.
-#
-# Primary knowledge source:
-#     BASE_DIR/rag_knowledge/
-#
-# Supported files:
-#     .txt .md .csv .tsv .xlsx .xls .docx .pdf
-#
-# Google Docs:
-#     Put one or more Google Docs URLs in:
-#         rag_knowledge/rag_sources.txt
-#     The application converts each Google Doc URL to the public export
-#     endpoint and indexes the returned document text.
-#
-# IMPORTANT:
-#     The folder is indexed as knowledge. The chatbot does NOT need to open
-#     the original Google Doc for every question. Retrieval happens against
-#     the indexed knowledge and the retrieved chunks are supplied to the LLM.
-#
-# This implementation uses OpenAI embeddings when an API key is available,
-# with a deterministic lexical fallback so the RAG layer remains usable when
-# embeddings are unavailable.
-# ============================================================
-
-RAG_KNOWLEDGE_FOLDER = os.getenv(
-    "RAG_KNOWLEDGE_FOLDER",
-    os.path.join(BASE_DIR, "rag_knowledge"),
-).strip()
-RAG_TOP_K = int(os.getenv("RAG_TOP_K", "6"))
-RAG_CHUNK_SIZE = int(os.getenv("RAG_CHUNK_SIZE", "1400"))
-RAG_CHUNK_OVERLAP = int(os.getenv("RAG_CHUNK_OVERLAP", "220"))
-RAG_EMBEDDING_MODEL = os.getenv(
-    "RAG_EMBEDDING_MODEL",
-    "text-embedding-3-small",
-).strip()
-RAG_MAX_CONTEXT_CHARS = int(os.getenv("RAG_MAX_CONTEXT_CHARS", "12000"))
-
-RAG_SUPPORTED_EXTENSIONS = {
-    ".txt", ".md", ".csv", ".tsv", ".xlsx", ".xls", ".docx", ".pdf"
-}
-
-
-def _rag_safe_text(value):
-    if value is None:
-        return ""
-    return str(value).replace("\x00", " ").strip()
-
-
-def _rag_google_doc_id(url):
-    match = re.search(r"/document/d/([a-zA-Z0-9_-]+)", str(url or ""))
-    return match.group(1) if match else ""
-
-
-def _rag_google_doc_text(url):
-    """Download one Google Doc as text through the Docs export endpoint."""
-    doc_id = _rag_google_doc_id(url)
-    if not doc_id:
-        raise ValueError("Could not identify a Google Docs document ID.")
-
-    export_url = f"https://docs.google.com/document/d/{doc_id}/export?format=txt"
-    response = requests.get(
-        export_url,
-        timeout=45,
-        headers={"User-Agent": "NEXUS-DANIP-RAG/1.0"},
-    )
-    response.raise_for_status()
-    text = response.text
-    if not text.strip():
-        raise ValueError("The exported Google Doc contained no readable text.")
-    return text
-
-
-def _rag_extract_docx(path):
-    """Extract paragraph/table text from a .docx without requiring python-docx."""
-    with zipfile.ZipFile(path, "r") as z:
-        xml = z.read("word/document.xml")
-    root = ET.fromstring(xml)
-    ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
-    paragraphs = []
-    for paragraph in root.findall(".//w:p", ns):
-        parts = []
-        for node in paragraph.findall(".//w:t", ns):
-            if node.text:
-                parts.append(node.text)
-        text = "".join(parts).strip()
-        if text:
-            paragraphs.append(text)
-    return "\n".join(paragraphs)
-
-
-def _rag_extract_pdf(path):
-    try:
-        from pypdf import PdfReader
-    except Exception:
-        try:
-            from PyPDF2 import PdfReader
-        except Exception:
-            return ""
-    reader = PdfReader(path)
-    pages = []
-    for page in reader.pages:
-        try:
-            pages.append(page.extract_text() or "")
-        except Exception:
-            pages.append("")
-    return "\n".join(pages)
-
-
-def _rag_extract_file(path):
-    ext = Path(path).suffix.lower()
-    if ext in {".txt", ".md", ".csv", ".tsv"}:
-        return Path(path).read_text(encoding="utf-8", errors="ignore")
-    if ext == ".docx":
-        return _rag_extract_docx(path)
-    if ext == ".pdf":
-        return _rag_extract_pdf(path)
-    if ext in {".xlsx", ".xls"}:
-        sheets = pd.read_excel(path, sheet_name=None)
-        blocks = []
-        for sheet, frame in sheets.items():
-            blocks.append(f"SHEET: {sheet}\n{frame.fillna('').to_csv(index=False)}")
-        return "\n\n".join(blocks)
-    return ""
-
-
-def _rag_chunk_text(text, chunk_size=RAG_CHUNK_SIZE, overlap=RAG_CHUNK_OVERLAP):
-    text = re.sub(r"\s+", " ", _rag_safe_text(text))
-    if not text:
-        return []
-    chunk_size = max(300, int(chunk_size))
-    overlap = max(0, min(int(overlap), chunk_size // 2))
-    chunks = []
-    start = 0
-    while start < len(text):
-        end = min(len(text), start + chunk_size)
-        chunk = text[start:end].strip()
-        if chunk:
-            chunks.append(chunk)
-        if end >= len(text):
-            break
-        start = end - overlap
-    return chunks
-
-
-def _rag_tokenize(text):
-    return set(
-        token.lower()
-        for token in re.findall(r"[A-Za-z0-9][A-Za-z0-9_:/.%+-]{1,}", str(text or ""))
-    )
-
-
-def _rag_lexical_score(query, text):
-    q = _rag_tokenize(query)
-    d = _rag_tokenize(text)
-    if not q or not d:
-        return 0.0
-    overlap = len(q & d)
-    phrase_bonus = 0.0
-    q_norm = " ".join(str(query).lower().split())
-    d_norm = " ".join(str(text).lower().split())
-    if q_norm and q_norm in d_norm:
-        phrase_bonus = 0.35
-    return min(1.0, overlap / max(1, len(q)) + phrase_bonus)
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def _rag_load_knowledge():
-    """Load and chunk every knowledge source in the configured folder."""
-    folder = Path(RAG_KNOWLEDGE_FOLDER)
-    folder.mkdir(parents=True, exist_ok=True)
-
-    records = []
-    errors = []
-    urls = []
-    manifest = folder / "rag_sources.txt"
-    if manifest.exists():
-        for line in manifest.read_text(encoding="utf-8", errors="ignore").splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and line.startswith("http"):
-                urls.append(line)
-
-    # Index local documents.
-    for path in sorted(folder.rglob("*")):
-        if not path.is_file() or path.name == "rag_sources.txt":
-            continue
-        if path.suffix.lower() not in RAG_SUPPORTED_EXTENSIONS:
-            continue
-        try:
-            text = _rag_extract_file(str(path))
-            for idx, chunk in enumerate(_rag_chunk_text(text)):
-                records.append({
-                    "id": f"{path.name}:{idx}",
-                    "source": path.name,
-                    "source_path": str(path),
-                    "text": chunk,
-                    "source_type": "local_file",
-                })
-        except Exception as exc:
-            errors.append(f"{path.name}: {exc}")
-
-    # Index configured Google Docs listed in rag_sources.txt.
-    for url in urls:
-        try:
-            text = _rag_google_doc_text(url)
-            doc_id = _rag_google_doc_id(url)
-            source_name = f"Google Doc {doc_id}" if doc_id else url
-            for idx, chunk in enumerate(_rag_chunk_text(text)):
-                records.append({
-                    "id": f"google:{doc_id}:{idx}",
-                    "source": source_name,
-                    "source_path": url,
-                    "text": chunk,
-                    "source_type": "google_doc",
-                })
-        except Exception as exc:
-            errors.append(f"Google Doc {url}: {exc}")
-
-    return {
-        "records": records,
-        "errors": errors,
-        "folder": str(folder),
-        "google_doc_count": len(urls),
-    }
-
-
-def _rag_embed_texts(texts):
-    if client is None or not texts:
-        return None
-    try:
-        response = client.embeddings.create(
-            model=RAG_EMBEDDING_MODEL,
-            input=texts,
-        )
-        return [item.embedding for item in response.data]
-    except Exception:
-        return None
-
-
-def _rag_cosine(a, b):
-    try:
-        va = np.asarray(a, dtype=float)
-        vb = np.asarray(b, dtype=float)
-        denom = np.linalg.norm(va) * np.linalg.norm(vb)
-        if denom == 0:
-            return 0.0
-        return float(np.dot(va, vb) / denom)
-    except Exception:
-        return 0.0
-
-
-def retrieve_rag_context(question, indicators=None, top_k=RAG_TOP_K):
-    """Retrieve indicator-compendium knowledge for the current M&E question."""
-    knowledge = _rag_load_knowledge()
-    records = knowledge.get("records", [])
-    if not records:
-        return {
-            "status": "NO_KNOWLEDGE",
-            "records": [],
-            "sources": [],
-            "errors": knowledge.get("errors", []),
-            "folder": knowledge.get("folder"),
-        }
-
-    indicators = indicators or []
-    query = "\n".join([
-        str(question or ""),
-        "Indicators: " + ", ".join(str(x) for x in indicators[:5]),
-        "indicator definition numerator denominator formula target calculation interpretation result area",
-    ])
-
-    # First use lexical retrieval for reliable local matching.
-    scored = []
-    for rec in records:
-        score = _rag_lexical_score(query, rec.get("text", ""))
-        # Strong bonus for exact indicator/result text appearing in the chunk.
-        text_lower = rec.get("text", "").lower()
-        for indicator in indicators[:5]:
-            ind = str(indicator).strip().lower()
-            if ind and ind in text_lower:
-                score += 0.75
-        scored.append((min(score, 2.0), rec))
-
-    scored.sort(key=lambda x: x[0], reverse=True)
-    lexical_candidates = [x for x in scored[:max(top_k * 4, 12)] if x[0] > 0]
-
-    # If an embedding model is available, rerank the strongest lexical candidates.
-    candidate_records = [rec for _, rec in lexical_candidates]
-    query_embedding = _rag_embed_texts([query])
-    if query_embedding and candidate_records:
-        doc_embeddings = _rag_embed_texts([r["text"] for r in candidate_records])
-        if doc_embeddings:
-            rescored = []
-            for rec, emb in zip(candidate_records, doc_embeddings):
-                score = _rag_cosine(query_embedding[0], emb)
-                rescored.append((score, rec))
-            rescored.sort(key=lambda x: x[0], reverse=True)
-            selected = rescored[:top_k]
-        else:
-            selected = lexical_candidates[:top_k]
-    else:
-        selected = lexical_candidates[:top_k]
-
-    selected_records = []
-    seen_text = set()
-    for score, rec in selected:
-        text = rec.get("text", "").strip()
-        if not text or text in seen_text:
-            continue
-        seen_text.add(text)
-        item = dict(rec)
-        item["score"] = round(float(score), 4)
-        selected_records.append(item)
-
-    # Keep prompt size controlled while preserving complete chunks.
-    context_chars = 0
-    final_records = []
-    for rec in selected_records:
-        size = len(rec["text"])
-        if final_records and context_chars + size > RAG_MAX_CONTEXT_CHARS:
-            break
-        final_records.append(rec)
-        context_chars += size
-
-    return {
-        "status": "SUCCESS" if final_records else "NO_MATCH",
-        "records": final_records,
-        "sources": list(dict.fromkeys(r["source"] for r in final_records)),
-        "errors": knowledge.get("errors", []),
-        "folder": knowledge.get("folder"),
-        "google_doc_count": knowledge.get("google_doc_count", 0),
-    }
-
-
-def _rag_context_text(rag_result):
-    records = (rag_result or {}).get("records") or []
-    if not records:
-        return "NO VERIFIED RAG MATCH WAS RETRIEVED FROM THE CONFIGURED KNOWLEDGE BASE."
-    blocks = []
-    for i, rec in enumerate(records, 1):
-        blocks.append(
-            f"[RAG SOURCE {i}] {rec.get('source')}\n"
-            f"{rec.get('text', '')}"
-        )
-    return "\n\n".join(blocks)
-
-
-def render_rag_status():
-    """Small sidebar/status diagnostic for the configured RAG knowledge folder."""
-    knowledge = _rag_load_knowledge()
-    count = len(knowledge.get("records") or [])
-    errors = knowledge.get("errors") or []
-    with st.sidebar:
-        st.markdown("### 📚 RAG Knowledge")
-        if count:
-            st.success(f"Indexed {count:,} knowledge chunks")
-        else:
-            st.warning("No RAG knowledge chunks indexed")
-        st.caption(f"Folder: {knowledge.get('folder')}")
-        if knowledge.get("google_doc_count"):
-            st.caption(f"Google Docs: {knowledge['google_doc_count']}")
-        if errors:
-            with st.expander(f"RAG source warnings ({len(errors)})", expanded=False):
-                for error in errors[:10]:
-                    st.write(f"• {error}")
-
-
-render_rag_status()
-
-# ============================================================
 # EXTERNAL INDICATOR CONTEXT / NARRATIVE ENGINE
 # ============================================================
 
@@ -9423,107 +9048,346 @@ key contextual point, relevance to M&E interpretation, and source URL when avail
 
 
 
+# ============================================================
+# ISG INDICATOR COMPENDIUM — DIRECT GOOGLE DOC RAG
+# ============================================================
+# RAG is organizational knowledge only. Current DHIS2/API values remain the
+# numerical source of truth for analysis.
+RAG_SOURCE_NAME = "ISG Indicator Compendium"
+RAG_SOURCE_URL = os.getenv(
+    "ISG_INDICATOR_COMPENDIUM_URL",
+    "https://docs.google.com/document/d/159IpWlCdgzCp1GOckjeux93_IrkFx7pf/edit",
+).strip()
+RAG_TOP_K = int(os.getenv("RAG_TOP_K", "6"))
+RAG_MIN_SCORE = float(os.getenv("RAG_MIN_SCORE", "1.0"))
+
+
+def _rag_google_doc_id(url):
+    """Extract a Google Docs document ID from edit/share/export URLs."""
+    match = re.search(r"/document/d/([a-zA-Z0-9_-]+)", str(url or ""))
+    return match.group(1) if match else ""
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _rag_fetch_google_doc(url):
+    """Fetch the direct Google Docs file as plain text.
+
+    The document must be accessible to the deployed Streamlit application
+    (for example, 'Anyone with the link can view').
+    """
+    doc_id = _rag_google_doc_id(url)
+    if not doc_id:
+        return {"status": "ERROR", "text": "Invalid Google Docs URL.", "url": url}
+
+    export_url = f"https://docs.google.com/document/d/{doc_id}/export?format=txt"
+    try:
+        response = requests.get(
+            export_url,
+            timeout=30,
+            headers={"User-Agent": "DANIP-NI-RAG/1.0"},
+        )
+        response.raise_for_status()
+        text = response.text.strip()
+        if not text:
+            return {
+                "status": "ERROR",
+                "text": "The Google Doc was reachable but returned no text.",
+                "url": export_url,
+            }
+        return {
+            "status": "SUCCESS",
+            "text": text,
+            "url": export_url,
+            "document_id": doc_id,
+        }
+    except Exception as exc:
+        return {
+            "status": "ERROR",
+            "text": (
+                "Could not retrieve the ISG Indicator Compendium directly from Google Docs. "
+                "Confirm that the document is shared with view access for the deployed app. "
+                f"Details: {str(exc)[:600]}"
+            ),
+            "url": export_url,
+            "document_id": doc_id,
+        }
+
+
+def _rag_normalize(text):
+    text = str(text or "").replace("\r", "\n")
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    return text.strip()
+
+
+def _rag_chunks(text, chunk_chars=2200, overlap=350):
+    """Create overlapping text chunks while preserving source terminology."""
+    text = _rag_normalize(text)
+    if not text:
+        return []
+
+    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+    chunks, current = [], ""
+    for paragraph in paragraphs:
+        candidate = f"{current}\n\n{paragraph}".strip() if current else paragraph
+        if len(candidate) <= chunk_chars:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+        # Keep an overlap from the previous chunk to preserve table/definition context.
+        tail = current[-overlap:] if current else ""
+        current = f"{tail}\n\n{paragraph}".strip()
+        if len(current) > chunk_chars:
+            start = 0
+            while start < len(current):
+                end = min(start + chunk_chars, len(current))
+                piece = current[start:end].strip()
+                if piece:
+                    chunks.append(piece)
+                if end >= len(current):
+                    current = ""
+                    break
+                start = max(end - overlap, start + 1)
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _rag_query_terms(question):
+    q = str(question or "").lower()
+    # Preserve useful exact tokens such as result codes, indicator codes and acronyms.
+    tokens = re.findall(r"[a-z0-9_-]{2,}", q)
+    stop = {
+        "what", "which", "where", "when", "does", "this", "that", "from",
+        "with", "have", "has", "are", "the", "and", "for", "how", "can",
+        "about", "according", "please", "tell", "give", "show", "list", "into",
+        "indicator", "indicators", "result", "results", "definition", "official",
+    }
+    return [t for t in tokens if t not in stop]
+
+
+def _rag_score(question, chunk):
+    q = str(question or "").lower()
+    c = str(chunk or "").lower()
+    terms = _rag_query_terms(q)
+    if not terms:
+        return 0.0
+    score = 0.0
+    for term in terms:
+        count = c.count(term)
+        if count:
+            # Exact token presence matters more than repeated generic words.
+            score += 2.0 + min(count, 4) * 0.5
+    # Strong boost for exact multi-word phrases from the question.
+    q_phrases = [p.strip() for p in re.split(r"[?.,:;]", q) if len(p.strip()) >= 8]
+    for phrase in q_phrases:
+        if phrase in c:
+            score += 8.0
+    return score
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def _rag_build_index(source_url):
+    fetched = _rag_fetch_google_doc(source_url)
+    if fetched.get("status") != "SUCCESS":
+        return {
+            "status": "ERROR",
+            "source_name": RAG_SOURCE_NAME,
+            "source_url": source_url,
+            "error": fetched.get("text", "Unable to retrieve source."),
+            "chunks": [],
+        }
+
+    chunks = _rag_chunks(fetched.get("text", ""))
+    indexed = [
+        {"source": RAG_SOURCE_NAME, "url": source_url, "chunk": chunk, "index": i + 1}
+        for i, chunk in enumerate(chunks)
+    ]
+    return {
+        "status": "SUCCESS",
+        "source_name": RAG_SOURCE_NAME,
+        "source_url": source_url,
+        "document_id": fetched.get("document_id", ""),
+        "chunks": indexed,
+    }
+
+
+def retrieve_rag_context(question, top_k=None):
+    """Retrieve relevant ISG Indicator Compendium chunks for a question."""
+    index = _rag_build_index(RAG_SOURCE_URL)
+    if index.get("status") != "SUCCESS":
+        return index
+
+    scored = []
+    for item in index.get("chunks", []):
+        score = _rag_score(question, item.get("chunk", ""))
+        if score >= RAG_MIN_SCORE:
+            row = dict(item)
+            row["score"] = score
+            scored.append(row)
+    scored.sort(key=lambda x: x["score"], reverse=True)
+
+    return {
+        **index,
+        "matches": scored[: int(top_k or RAG_TOP_K)],
+    }
+
+
+def _rag_context_text(result):
+    matches = result.get("matches") or []
+    if not matches:
+        return "NO RELEVANT RAG MATCH WAS RETRIEVED."
+    blocks = []
+    for i, item in enumerate(matches, 1):
+        blocks.append(
+            f"[RAG MATCH {i} | {item.get('source')} | chunk {item.get('index')} | score {item.get('score', 0):.1f}]\n"
+            f"{item.get('chunk', '')}"
+        )
+    return "\n\n".join(blocks)
+
+
 def _chat_rag_knowledge_intent(question):
-    """Detect questions that should be answered from RAG knowledge only."""
+    """True when the user is asking for compendium/knowledge, not current data."""
     q = str(question or "").strip().lower()
     if not q:
         return False
-    explicit = (
-        "according to the compendium", "from the compendium", "in the compendium",
-        "indicator compendium", "from rag", "from the rag", "rag knowledge",
-        "rag context", "knowledge base", "knowledgebase", "official definition",
-        "official indicator definition", "official numerator", "official denominator",
-        "official formula", "official target", "indicator definition", "indicator definitions",
+
+    # Current-data words take priority so questions such as
+    # 'what is the current VAS value?' remain DHIS2 analysis questions.
+    current_terms = (
+        "current", "today", "latest", "reported", "value", "values", "data",
+        "dashboard", "dhis2", "period", "trend", "compare", "comparison",
+        "performance", "country", "countries", "organisation", "organization",
+        "report", "analy", "change", "increase", "decrease",
+    )
+    knowledge_terms = (
+        "according to the compendium", "from the compendium", "indicator compendium",
+        "from rag", "from the rag", "rag knowledge", "knowledge base", "knowledgebase",
+        "official definition", "official indicator definition", "official numerator",
+        "official denominator", "official formula", "indicator definition", "indicator definitions",
         "numerator and denominator", "numerator/denominator", "calculation formula",
-        "what is this indicator", "what does this indicator mean",
+        "how is it calculated", "how is this calculated", "what does this indicator mean",
+        "what is the definition", "definition of", "meaning of", "formula for",
     )
-    if any(term in q for term in explicit):
+    if any(term in q for term in knowledge_terms) and not any(term in q for term in current_terms):
         return True
-    knowledge_verbs = (
-        "define ", "definition of ", "explain ", "what is ", "what are ",
-        "describe ", "meaning of ", "how is it calculated", "how is this calculated",
+    # Generic 'what is X' is RAG-only only when it is clearly a knowledge question.
+    return (
+        (q.startswith("what is ") or q.startswith("what are ") or q.startswith("define ") or q.startswith("explain "))
+        and not any(term in q for term in current_terms)
+        and any(t in q for t in ("indicator", "result", "measure", "vas", "mnhn", "wifa", "usi"))
     )
-    source_terms = ("indicator", "result", "measure", "vas", "mnhn", "wifa", "usi")
-    return any(v in q for v in knowledge_verbs) and any(t in q for t in source_terms)
 
 
 def _chat_mixed_rag_analysis_intent(question):
-    """Detect questions that combine RAG knowledge with current-data analysis."""
     q = str(question or "").lower()
     knowledge_terms = (
-        "according to the compendium", "from the compendium", "from rag",
-        "rag knowledge", "official definition", "indicator definition",
-        "numerator", "denominator", "formula", "target", "guidance",
+        "according to the compendium", "from the compendium", "from rag", "rag knowledge",
+        "official definition", "indicator definition", "numerator", "denominator",
+        "formula", "target", "guidance",
     )
     analysis_terms = (
-        "analy", "compare", "trend", "performance", "current", "reported",
-        "dhis2", "dashboard", "data", "value", "coverage", "country",
-        "organisation", "organization", "period", "report",
+        "analy", "compare", "trend", "performance", "current", "reported", "dhis2",
+        "dashboard", "data", "value", "coverage", "country", "organisation",
+        "organization", "period", "report",
     )
     return any(k in q for k in knowledge_terms) and any(a in q for a in analysis_terms)
 
 
 def _chat_rag_knowledge_answer(question, rag_result):
-    """Answer a RAG-only question without using current DHIS2/API evidence."""
-    rag_context = _rag_context_text(rag_result)
-    sources = (rag_result or {}).get("sources") or []
+    """Answer RAG-only requests without requiring a DHIS2 dataframe."""
+    context = _rag_context_text(rag_result)
+    if rag_result.get("status") != "SUCCESS":
+        return {
+            "status": "RAG_UNAVAILABLE",
+            "source": "ISG_INDICATOR_COMPENDIUM",
+            "text": (
+                f"### 📚 {RAG_SOURCE_NAME}\n\n"
+                f"I could not retrieve the configured compendium.\n\n"
+                f"{rag_result.get('error', 'The RAG source is unavailable right now.')}"
+            ),
+        }
+
+    if context == "NO RELEVANT RAG MATCH WAS RETRIEVED.":
+        return {
+            "status": "RAG_NO_MATCH",
+            "source": "ISG_INDICATOR_COMPENDIUM",
+            "text": (
+                f"### 📚 {RAG_SOURCE_NAME}\n\n"
+                "I couldn't find the requested information in the configured ISG Indicator Compendium. "
+                "I will not invent an official definition, formula, numerator, denominator, target, "
+                "or indicator relationship that was not retrieved from the source."
+            ),
+        }
 
     if client is None:
-        if (rag_result or {}).get("status") != "SUCCESS":
-            return {
-                "status": "NO_MATCH", "source": "RAG_KNOWLEDGE",
-                "text": "### 📚 RAG knowledge\n\nNo verified matching entry was retrieved from the configured knowledge base.",
-                "sources": sources,
-            }
         return {
-            "status": "SUCCESS", "source": "RAG_KNOWLEDGE",
-            "text": "### 📚 RAG knowledge\n\n" + rag_context + "\n\n**Source:** " + ", ".join(sources),
-            "sources": sources,
+            "status": "SUCCESS",
+            "source": "ISG_INDICATOR_COMPENDIUM",
+            "text": (
+                f"### 📚 {RAG_SOURCE_NAME}\n\n"
+                "The relevant source content was retrieved, but the AI interpretation layer is not configured.\n\n"
+                f"{context}"
+            ),
         }
 
     prompt = f"""
 You are the DANIP-NI RAG Knowledge Assistant.
 
-The user is asking for information FROM THE CONFIGURED RAG KNOWLEDGE BASE.
-This is a KNOWLEDGE-RETRIEVAL request, not a request to analyse the currently
-loaded DHIS2/API dataset.
+The user is asking for information FROM THE CONFIGURED ISG Indicator Compendium.
+This is a knowledge-retrieval request, not a request to analyse the currently loaded DHIS2/API dataset.
 
 USER QUESTION:
 {question}
 
 RETRIEVED RAG KNOWLEDGE:
-{rag_context}
+{context}
 
 RULES:
-1. Answer from the retrieved RAG knowledge above.
-2. Preserve the terminology and meaning used by the source documents.
-3. Do not invent definitions, numerator, denominator, formulas, targets,
-   indicator codes, result areas or guidance.
+1. Answer only from the retrieved RAG knowledge above.
+2. Preserve the terminology and meaning used by the source.
+3. Do not invent definitions, numerator, denominator, formulas, targets, indicator codes,
+   result areas, indicator relationships or guidance.
 4. Do not use current DHIS2/API values for this answer.
 5. Do not use general model knowledge to fill a missing official definition.
-6. If the retrieved knowledge does not support the requested point, explicitly
-   say that it was not found in the retrieved knowledge base.
-7. If the source describes a result area rather than a measurable indicator,
-   explain that distinction only when supported by the retrieved source.
-8. Give a concise direct answer first, followed by relevant details.
-9. Name the source document(s) used.
-10. Do not perform web research unless the user explicitly asks for external
-    research or verification.
+6. If the retrieved knowledge does not support the requested point, say so explicitly.
+7. Distinguish a result area/objective from a measurable indicator when the source supports that distinction.
+8. Give the direct answer first, then the relevant supporting details.
+9. Name the source as: {RAG_SOURCE_NAME}.
+10. Do not perform web research unless the user explicitly asks for external verification.
 """
     try:
         response = client.responses.create(model=OPENAI_MODEL, input=prompt)
-        answer = (response.output_text or "").strip() or "The RAG knowledge base did not return a usable answer."
-        return {
-            "status": "SUCCESS" if (rag_result or {}).get("status") == "SUCCESS" else "NO_MATCH",
-            "source": "RAG_KNOWLEDGE", "text": answer, "sources": sources,
-            "rag_context": rag_result,
-        }
-    except Exception as exc:
-        return {
-            "status": "RAG_ERROR", "source": "RAG_KNOWLEDGE",
-            "text": "### 📚 RAG knowledge\n\n" + rag_context + "\n\n**RAG answer generation error:** " + str(exc)[-1200:],
-            "sources": sources,
-        }
+        answer = (response.output_text or "").strip()
+        if answer:
+            return {
+                "status": "SUCCESS",
+                "source": "ISG_INDICATOR_COMPENDIUM",
+                "model": OPENAI_MODEL,
+                "text": answer,
+            }
+    except Exception:
+        pass
+
+    # Safe fallback: expose only retrieved source content.
+    return {
+        "status": "SUCCESS",
+        "source": "ISG_INDICATOR_COMPENDIUM",
+        "text": f"### 📚 {RAG_SOURCE_NAME}\n\n{context}",
+    }
+
+
+def render_rag_status():
+    """Small status panel for the direct compendium connection."""
+    index = _rag_build_index(RAG_SOURCE_URL)
+    if index.get("status") == "SUCCESS":
+        st.caption(
+            f"📚 RAG source: **{RAG_SOURCE_NAME}** · "
+            f"{len(index.get('chunks', []))} indexed chunks · direct Google Docs file"
+        )
+    else:
+        st.caption(f"📚 RAG source: **{RAG_SOURCE_NAME}** · ⚠️ {index.get('error', 'Unavailable')}")
 
 
 def ask_analysis_chatbot(
@@ -9548,30 +9412,26 @@ def ask_analysis_chatbot(
 
     ChatGPT is therefore the interpretation layer, not the calculation engine.
     """
-    if not isinstance(df, pd.DataFrame) or df.empty:
-        return {
-            "status": "ERROR",
-            "source": "LOCAL",
-            "text": "No dataset is currently loaded. Please enter a data URL first.",
-        }
-
     question = str(user_question or "").strip()
     if not question:
         return None
 
     # ---------------------------------------------------------
-    # RAG-ONLY KNOWLEDGE MODE
+    # REQUEST ROUTING — RAG ONLY / DHIS2 / MIXED
     # ---------------------------------------------------------
-    # This branch runs before the dataframe check. Users can ask for an
-    # official definition, numerator, denominator, formula, target, result-area
-    # description or M&E guidance even when no DHIS2/API dataset is loaded.
-    # Mixed questions continue to the normal analysis path below.
-    # ---------------------------------------------------------
+    # RAG-only questions do not require a loaded DHIS2 dataset.
     if _chat_rag_knowledge_intent(question) and not _chat_mixed_rag_analysis_intent(question):
-        rag_result = retrieve_rag_context(
-            question=question, indicators=[], top_k=RAG_TOP_K
-        )
+        rag_result = retrieve_rag_context(question=question, top_k=RAG_TOP_K)
         return _chat_rag_knowledge_answer(question, rag_result)
+
+    # Mixed questions use RAG for official indicator knowledge and DHIS2 for
+    # current numerical evidence. Pure DHIS2 questions use the dataset only.
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return {
+            "status": "ERROR",
+            "source": "LOCAL",
+            "text": "No dataset is currently loaded. Please enter a data URL first. For compendium/definition questions, ask for the ISG Indicator Compendium information directly.",
+        }
 
     # ---------------------------------------------------------
     # PERFORMANCE TARGET-GAP MODE
@@ -9608,6 +9468,15 @@ def ask_analysis_chatbot(
             else []
         )
 
+    # RAG is added only for mixed requests where the user asks for official
+    # indicator knowledge together with current data analysis.
+    if _chat_mixed_rag_analysis_intent(question):
+        rag_result = retrieve_rag_context(question=question, top_k=RAG_TOP_K)
+        rag_context = _rag_context_text(rag_result)
+    else:
+        rag_result = {"status": "NOT_REQUESTED", "matches": []}
+        rag_context = "RAG was not requested for this analysis question."
+
     # IMPORTANT: the loaded API/DHIS2 dataset is the default source of truth.
     # Do NOT perform web research for ordinary indicator questions or report requests.
     # External research is activated only when the user explicitly asks for UN/WHO,
@@ -9643,19 +9512,6 @@ def ask_analysis_chatbot(
         quality_summary=quality_summary,
         question=question,
     )
-
-    # ---------------------------------------------------------
-    # LOCAL RAG KNOWLEDGE RETRIEVAL
-    # ---------------------------------------------------------
-    # The indicator compendium / M&E guidance is retrieved from the configured
-    # knowledge folder. It is not treated as an external web-search request.
-    # DHIS2 remains the numerical source of truth.
-    rag_result = retrieve_rag_context(
-        question=question,
-        indicators=indicators,
-        top_k=RAG_TOP_K,
-    )
-    rag_context = _rag_context_text(rag_result)
 
     # ---------------------------------------------------------
     # EXTERNAL RESEARCH MODE
@@ -9754,17 +9610,22 @@ NON-NEGOTIABLE RULES:
     a target or benchmark is supplied. Instead say whether the observed pattern
     warrants routine monitoring or investigation.
 17. Keep the response concise but substantive.
-18. This is a DATA-ANALYSIS request. Use CURRENT loaded DHIS2/API evidence for numerical findings.
-19. Use the RAG KNOWLEDGE below only for official indicator definitions, result-area descriptions, numerator, denominator, formulas, targets and M&E guidance when retrieved.
-20. If a relevant RAG entry exists, prefer it over label-based interpretation and state the RAG source document.
-21. Never invent an official definition, numerator, denominator, formula or target.
-22. If RAG retrieval has no verified match, explicitly say that the official compendium entry was not retrieved and fall back to a clearly labelled label-based M&E interpretation.
-23. Do NOT attempt to replace RAG knowledge with external web research unless the user explicitly asks for external/UN/WHO/report/guideline/study research.
-24. Clearly separate RAG/compendium knowledge from current DHIS2 observations.
-25. Never present RAG definitions as current DHIS2 values.
-26. For a report request, write the report from the supplied current API/DHIS2 indicators, periods, organisation units, calculated evidence and quality findings, while using RAG knowledge to define and interpret those indicators.
-27. If the user asks for a report, generate the report directly.
-28. Do not add an external-evidence section when external research was not requested.
+18. For ordinary indicator analysis and report requests, use ONLY the current loaded API/DHIS2 evidence. Do not request or invent outside evidence.
+19. Only use external evidence when the user explicitly requested external/UN/WHO/report/guideline/study research.
+20. Clearly separate dashboard findings from external evidence when external evidence was explicitly requested.
+21. Never present external context as if it were a DANIP/DHIS2 value.
+22. For a report request, write the report from the supplied current API/DHIS2 indicators, periods, organisation units, calculated evidence and quality findings.
+23. If the user asks for a report, do not respond with instructions on how to make one; generate the report directly.
+24. Do not add an external-evidence section when external research was not requested.
+25. When RAG context is supplied, use it only for official indicator definitions, result-area descriptions, numerator, denominator, formulas, targets and M&E guidance.
+26. Never use RAG text to replace or recalculate current DHIS2 values.
+27. If RAG context does not support a requested official definition or formula, say so explicitly.
+
+REQUEST ROUTING:
+{"MIXED MODE — RAG supplies official indicator knowledge; DHIS2 supplies current numerical evidence." if _chat_mixed_rag_analysis_intent(question) else "DHIS2 ANALYSIS MODE — current loaded API/DHIS2 evidence is the source of truth."}
+
+RAG KNOWLEDGE ({RAG_SOURCE_NAME}):
+{rag_context}
 
 CURRENT SOURCE:
 {source_url}
@@ -9777,17 +9638,6 @@ RECENT CHAT:
 
 M&E INDICATOR CONTEXT AND DETERMINISTIC EVIDENCE:
 {safe_json_dumps(evidence)}
-
-REQUEST ROUTING:
-MIXED MODE — RAG supplies indicator knowledge; DHIS2/API supplies current numerical evidence.
-
-RAG KNOWLEDGE / INDICATOR COMPENDIUM RETRIEVAL:
-{rag_context}
-
-RAG RETRIEVAL STATUS:
-{rag_result.get("status", "UNKNOWN")}
-RAG SOURCES:
-{safe_json_dumps(rag_result.get("sources", []))}
 
 AUTHORITATIVE EXTERNAL EVIDENCE (CONTEXT ONLY — NEVER MODIFY DASHBOARD VALUES):
 {safe_json_dumps(external_context)}
@@ -9932,14 +9782,6 @@ def render_analysis_chatbot(
 
     st.markdown(
         f'<span class="danip-chat-source">🔗 Current source: {html.escape(chat_source)}</span>',
-        unsafe_allow_html=True,
-    )
-
-    # Show the configured RAG knowledge source without exposing credentials.
-    rag_status = _rag_load_knowledge()
-    rag_chunk_count = len(rag_status.get("records") or [])
-    st.markdown(
-        f'<span class="danip-chat-source">📚 RAG: {rag_chunk_count:,} knowledge chunks indexed</span>',
         unsafe_allow_html=True,
     )
 
@@ -16223,4 +16065,3 @@ elif workspace == "📅 My Reports & Monitoring":
 # ============================================================
 # END — DANIP AI + SEPARATE DANIP M&E MANAGEMENT HUB
 # ============================================================
-
