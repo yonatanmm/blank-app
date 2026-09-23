@@ -9409,152 +9409,7 @@ def _chat_extract_compendium_indicator_rows(rag):
     return rows
 
 
-def _chat_requested_concise(question):
-    """Return True when the user explicitly requests a short/summary response."""
-    q = str(question or "").strip().lower()
-    if not q:
-        return False
-    phrases = (
-        "make it short", "keep it short", "short answer", "short version",
-        "brief answer", "briefly", "in brief", "be brief", "concise",
-        "keep it concise", "summarize", "summarise", "summary",
-        "give me a summary", "short summary", "summarize this", "summarise this",
-        "tl;dr", "tldr", "just the key points", "key points only",
-        "main points only", "only the important points", "simplify this",
-        "make this simpler", "shorten this", "less detail", "without details",
-    )
-    return any(p in q for p in phrases)
-
-
-def _chat_concise_fallback(text):
-    """Deterministic shortening used when an LLM is unavailable or overlong."""
-    text = str(text or '').strip()
-    if not text:
-        return text
-
-    # Preserve Markdown tables, but keep only the header plus the first six rows.
-    lines = text.splitlines()
-    table_idx = [i for i, line in enumerate(lines) if '|' in line and line.strip().startswith('|')]
-    if len(table_idx) >= 2:
-        first = table_idx[0]
-        kept = lines[:first]
-        table_lines = lines[first:]
-        count = 0
-        for line in table_lines:
-            if line.strip().startswith('|'):
-                # Header + separator + up to four data rows.
-                if count <= 5:
-                    kept.append(line)
-                count += 1
-            elif count <= 5:
-                kept.append(line)
-        if count > 6:
-            kept.append('| … | Additional source-supported details omitted for brevity. |')
-        return '\n'.join(kept).strip()
-
-    # Bullets: retain the first five substantive bullets.
-    bullet_lines = [line for line in lines if line.strip().startswith(('-', '*', '•'))]
-    if len(bullet_lines) > 5:
-        non_bullets = [line for line in lines if not line.strip().startswith(('-', '*', '•'))]
-        return '\n'.join(non_bullets[:2] + bullet_lines[:5]).strip()
-
-    # Plain prose: keep the first three sentences.
-    sentences = re.split(r'(?<=[.!?])\s+', re.sub(r'\s+', ' ', text))
-    return ' '.join(sentences[:3]).strip()
-
-
-def _chat_global_concise(text, question=""):
-    """Global short-and-precise policy while preserving requested table structure."""
-    text = str(text or "").strip()
-    if not text:
-        return text
-
-    q = str(question or "").lower()
-    explicit_short = _chat_requested_concise(q)
-
-    # Never destroy the two-column Parameter/Description structure.
-    if "|" in text and "---" in text:
-        lines = text.splitlines()
-        table_start = next(
-            (i for i, line in enumerate(lines)
-             if line.strip().startswith("|") and "parameter" in line.lower()),
-            None,
-        )
-
-        if table_start is not None:
-            prefix = lines[:table_start]
-            table = lines[table_start:]
-
-            rows = []
-            for row in table[2:]:
-                if not row.strip().startswith("|"):
-                    continue
-                parts = row.strip().strip("|").split("|", 1)
-                if len(parts) != 2:
-                    continue
-                parameter = parts[0].strip()
-                value = parts[1].strip()
-
-                # Keep every dimension by default, but keep each answer concise.
-                # For an explicit short request, retain the most decision-useful
-                # dimensions while still using the same two-column format.
-                max_chars = 220 if not explicit_short else 140
-                if len(value) > max_chars:
-                    value = value[:max_chars].rsplit(" ", 1)[0] + "…"
-
-                rows.append(f"| {parameter} | {value} |")
-
-            if rows:
-                if explicit_short:
-                    priority = (
-                        "indicator name", "indicator code", "definition",
-                        "measurement unit", "data source", "calculation method"
-                    )
-                    selected = [
-                        r for r in rows
-                        if any(r.lower().startswith(f"| {p} |") for p in priority)
-                    ]
-                    rows = selected or rows[:6]
-
-                return "\n".join(
-                    prefix
-                    + ["| Parameter | Description |", "|---|---|"]
-                    + rows
-                ).strip()
-
-        # Preserve ordinary requested tables exactly; do not turn them into prose.
-        if any(line.strip().startswith("|") for line in lines):
-            return text
-
-    # Compact bullets and prose.
-    lines = [x.strip() for x in text.splitlines() if x.strip()]
-    bullets = [x for x in lines if x.startswith(("-", "*", "•"))]
-    if bullets:
-        non_bullets = [x for x in lines if not x.startswith(("-", "*", "•"))]
-        return "\n".join(non_bullets[:1] + bullets[:5]).strip()
-
-    plain = re.sub(r"\s+", " ", " ".join(lines)).strip()
-    sentences = re.split(r"(?<=[.!?])\s+", plain)
-    return " ".join(sentences[:3]).strip()
-
-
-def _chat_concise_instruction(question):
-    if not _chat_requested_concise(question):
-        return ""
-    return """
-CONCISION REQUIREMENT:
-The user explicitly asked for a short/brief/summary response. Follow that request.
-Return ONLY the essential information needed to answer the question.
-Do not repeat the question, source passages, background, caveats, or unrelated fields.
-For a parameter table, keep only the most relevant 4-6 parameters needed to answer the question.
-For a list, keep the requested items but use compact wording.
-For a general explanation, use at most 3 short paragraphs or 5 bullets.
-If the user asks for a summary of a longer answer, summarize the answer itself rather than reproducing it.
-"""
-
-
 def _chat_compendium_table(question, rag):
-
     """Render retrieved ISG compendium material as a readable Markdown table."""
     # Keep the exact source-defined Impact Result 1000 table.
     structured = _chat_result_area_table(question, rag)
@@ -9596,18 +9451,14 @@ def _chat_compendium_table(question, rag):
 
 
 def _chat_parameter_table_prompt(question, context):
-    """Prompt template for indicator-detail questions.
-
-    The ISG compendium is organized as Parameter / Description. Preserve that
-    organization in the chatbot instead of returning a prose summary.
-    """
+    """Return a compact two-column Parameter/Description answer matching the
+    ISG Indicator Compendium layout supplied by the user."""
     return f"""
-You are the authoritative ISG Indicator Compendium assistant.
-Answer ONLY from the retrieved compendium passages below.
+You are the ISG Indicator Compendium assistant.
+Use ONLY the retrieved compendium text below.
 
-The user is asking about an indicator/indicator definition. Present the answer
-using the same structure as the compendium:
-
+OUTPUT FORMAT IS MANDATORY:
+Return ONLY a Markdown table with exactly two columns:
 | Parameter | Description |
 |---|---|
 | Intervention | ... |
@@ -9633,270 +9484,105 @@ using the same structure as the compendium:
 | Version | ... |
 | Date of update | ... |
 
-Rules:
-- Include only parameters actually supported by the retrieved source.
-- If a parameter is not present in the retrieved source, omit it rather than
-  inventing a value.
-- Preserve the source terminology and wording as closely as possible.
-- Do not use DHIS2 data, web knowledge, or general model knowledge.
-- Do not turn the answer into a narrative when the source provides parameters.
-- The final answer MUST be a rendered Markdown table, not raw Markdown text inside HTML.
-- Do not include unrelated RAG chunks or other indicators.
-- If the question asks for multiple indicators, create a separate
-  Parameter/Description table for each indicator, with a clear indicator
-  heading above each table.
-- If the question asks for a result-area indicator list rather than detailed
-  definitions, use the existing indicator-list table instead.
+RULES:
+- Left column MUST contain the parameter/dimension name.
+- Right column MUST contain the answer from the compendium.
+- Do NOT output [RAG 1], [RAG 2], source chunks, citations, or raw retrieval text.
+- Do NOT add a prose introduction or conclusion.
+- Include only parameters supported by the retrieved source.
+- Preserve the compendium terminology; do not invent or correct content.
+- Keep each Description concise while preserving the key source meaning.
+- If the user asks for a short/summary answer, include only the most relevant parameters.
+- If multiple indicators are requested, create a separate two-column table for each indicator and put the indicator name as a Markdown heading above each table.
+- If the user asks for an indicator list/result-area list rather than details, use the indicator-list table instead.
 
 Question:
 {question}
 
-Retrieved compendium passages:
+Retrieved compendium text:
 {context}
 """
 
 
 def _chat_is_indicator_detail_question(question):
-    q = str(question or '').strip().lower()
-    # A specific ISG indicator code or an exact indicator-name style request
-    # is itself a request for the indicator profile. Do not require words such
-    # as "definition" or "details".
-    code_patterns = (
-        r"\b\d{4}[a-z]?\.\d{2}\b",
-        r"\b\d{4}[a-z]?\.\d+\b",
-        r"\b\d{4}[a-z]?\(i\)\b",
-        r"\b\d{4}[a-z]?\b",
-    )
-    has_code = any(re.search(pattern, q, flags=re.I) for pattern in code_patterns)
+    q = str(question or '').lower()
     detail_terms = (
         'definition', 'define', 'details', 'detail', 'parameters',
         'indicator information', 'indicator profile', 'how is it calculated',
         'calculation method', 'numerator', 'denominator', 'purpose',
         'relevance', 'data source', 'measurement unit', 'target',
         'interpretation', 'use/application', 'data quality', 'indicator code',
-        'indicator name', 'tell me about', 'explain this indicator'
+        'explain this indicator', 'about this indicator', 'what is this indicator',
     )
-    return has_code or any(x in q for x in detail_terms)
-
-
-def _chat_specific_indicator_rag(question):
-    """Retrieve only chunks that actually contain the requested indicator code/name.
-
-    This prevents an indicator-detail answer from being polluted by unrelated
-    RAG chunks such as 1210 or 1300 overview sections.
-    """
-    chunks, warnings = _rag_load_knowledge()
-    q = str(question or '').strip().lower()
-    codes = re.findall(r"\b\d{4}[a-z]?(?:\.\d+)?(?:\([ivx]+\))?\b", q, flags=re.I)
-    codes = [c.lower() for c in codes if not c.isdigit() or c not in {'2025','2030'}]
-    scored = []
-    for c in chunks:
-        text = str(c.get('text',''))
-        tlow = text.lower()
-        score = 0
-        for code in codes:
-            if code and code in tlow:
-                score += 100
-        # Exact distinctive indicator-name phrases get a strong boost.
-        q_terms = _rag_terms(q)
-        overlap = len(q_terms & _rag_terms(text))
-        score += overlap
-        if score:
-            scored.append((score, c))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return {
-        'chunks': [c for _, c in scored[:20]],
-        'warnings': warnings,
-        'source_name': RAG_SOURCE_NAME,
-    }
-
-
-
-def _chat_parameter_table_from_context(question, context):
-    """Build the ISG Parameter/Description table directly from source text.
-
-    This keeps the compendium's two-column structure even when OpenAI is
-    unavailable and prevents retrieval chunks from being displayed verbatim.
-    """
-    context = str(context or "").strip()
-    if not context:
-        return ""
-
-    labels = [
-        "Intervention",
-        "Indicator name",
-        "PMF expected results statement",
-        "Indicator code",
-        "Rolls into",
-        "Akin indicators",
-        "Interventions",
-        "Definition",
-        "Recommended course public sector",
-        "Recommended course private sector",
-        "Purpose/ objective",
-        "Purpose/objective",
-        "Relevance",
-        "Measurement Unit",
-        "Data Source",
-        "Supply chain method",
-        "Data Collection Frequency",
-        "Baseline",
-        "Target",
-        "Routine data/HMIS",
-        "Calculation Method",
-        "Interpretation",
-        "Use/Application",
-        "Data quality considerations",
-        "Reporting and Dissemination",
-        "References",
-        "Version",
-        "Date of update",
-    ]
-
-    # Remove retrieval markers and normalize line endings.
-    clean = re.sub(r"\[RAG\s+\d+\s*\|[^\]]+\]\s*", "", context)
-    clean = clean.replace("\r\n", "\n").replace("\r", "\n")
-
-    # Keep only the first relevant indicator block when a specific code is
-    # requested. This avoids mixing multiple indicators.
-    requested_codes = re.findall(
-        r"\b\d{4}[a-z]?(?:\.\d+)?(?:\([ivx]+\))?\b",
-        str(question or ""),
-        flags=re.I,
+    # A pasted indicator name/code should also trigger detail mode.
+    indicator_code = re.search(r'\b\d{4}[a-z]?(?:\([ivx]+\))?(?:\.\d+)?\b', q, re.I)
+    indicator_terms = ('indicator', 'indicator name', 'code', 'result area', 'result')
+    return bool(indicator_code or any(x in q for x in detail_terms)) and (
+        any(x in q for x in indicator_terms) or bool(indicator_code)
     )
-    requested_codes = [
-        x.lower() for x in requested_codes
-        if x not in {"2025", "2030"}
-    ]
-
-    # Split source into lines while preserving source order.
-    lines = [re.sub(r"\s+", " ", x).strip() for x in clean.splitlines()]
-    lines = [x for x in lines if x]
-
-    # Some extracted documents flatten "Parameter Description" into one line.
-    # Remove that header only.
-    lines = [
-        x for x in lines
-        if x.lower() not in ("parameter description", "parameter", "description")
-    ]
-
-    # Find label occurrences. Labels may appear alone on a line or followed
-    # immediately by their value.
-    label_lookup = {re.sub(r"\s+", " ", x).strip().lower(): x for x in labels}
-    occurrences = []
-
-    for idx, line in enumerate(lines):
-        low = line.lower().strip()
-        matched = None
-        remainder = ""
-
-        # Exact label line.
-        if low in label_lookup:
-            matched = label_lookup[low]
-        else:
-            # Label followed by ":" or whitespace/value on the same line.
-            for norm, original in sorted(label_lookup.items(), key=lambda z: -len(z[0])):
-                if low.startswith(norm + ":"):
-                    matched = original
-                    remainder = line[len(norm) + 1:].strip()
-                    break
-                if low.startswith(norm + " ") and len(line) > len(norm) + 1:
-                    matched = original
-                    remainder = line[len(norm):].strip(" :")
-                    break
-
-        if matched:
-            occurrences.append((idx, matched, remainder))
-
-    if not occurrences:
-        return ""
-
-    # Merge duplicate occurrences while preserving the first useful value.
-    data = {}
-    for n, (start, label, same_line_value) in enumerate(occurrences):
-        end = occurrences[n + 1][0] if n + 1 < len(occurrences) else len(lines)
-        vals = []
-        if same_line_value:
-            vals.append(same_line_value)
-        vals.extend(lines[start + 1:end])
-
-        # Remove source markers/headers and blank boilerplate.
-        vals = [
-            v for v in vals
-            if v and v.lower() not in ("parameter description", "parameter", "description")
-        ]
-
-        value = " ".join(vals).strip()
-        value = re.sub(r"\s+", " ", value)
-
-        if label not in data or len(value) > len(data[label]):
-            data[label] = value
-
-    # Normalize aliases.
-    if "Purpose/objective" in data and "Purpose/ objective" not in data:
-        data["Purpose/ objective"] = data.pop("Purpose/objective")
-
-    # Do not include empty dimensions. Preserve the compendium's order.
-    ordered = []
-    for label in labels:
-        if label in data and data[label]:
-            if label not in ordered:
-                ordered.append(label)
-
-    if not ordered:
-        return ""
-
-    # If a requested code is present, ensure we are looking at the right block.
-    if requested_codes:
-        joined = " ".join(data.values()).lower()
-        if not any(code in joined for code in requested_codes):
-            return ""
-
-    out = [
-        "| Parameter | Description |",
-        "|---|---|",
-    ]
-    for label in ordered:
-        value = data[label].replace("|", r"\|")
-        out.append(f"| {label} | {value} |")
-
-    return "\n".join(out)
 
 
 def _chat_parameter_table_answer(question, rag):
-    """Return the compendium in its native two-column Parameter/Description format."""
+    """Format retrieved compendium evidence as the exact two-column layout.
+    The model is used only to map source fields into the table; the UI renders
+    the returned Markdown directly, so retrieval chunks never appear to users.
+    """
     context = _rag_context_text(rag)
     if not context:
-        return ""
-
-    # Deterministic source formatting is primary. This guarantees the table
-    # works without waiting for an API link or an OpenAI response.
-    deterministic = _chat_parameter_table_from_context(question, context)
-    if deterministic:
-        return deterministic
-
-    # LLM is only a formatter fallback; it must remain source-grounded.
+        return ''
     if client is None:
-        return ""
-
+        return _chat_parameter_table_fallback(context)
     prompt = _chat_parameter_table_prompt(question, context)
     try:
         response = client.responses.create(model=OPENAI_MODEL, input=prompt)
-        answer = (response.output_text or "").strip()
-        if answer and "|" in answer:
-            return answer
+        answer = (response.output_text or '').strip()
+        # Require an actual two-column Markdown table and strip accidental prose.
+        if '| Parameter | Description |' in answer and '|---|' in answer:
+            lines = answer.splitlines()
+            table_lines = []
+            started = False
+            for line in lines:
+                if line.strip().startswith('| Parameter | Description |'):
+                    started = True
+                if started and line.strip().startswith('|'):
+                    table_lines.append(line.strip())
+            if len(table_lines) >= 2:
+                return '\n'.join(table_lines)
     except Exception:
         pass
-    return ""
+    return _chat_parameter_table_fallback(context)
+
+
+def _chat_parameter_table_fallback(context):
+    """Conservative fallback for Parameter/Description formatting."""
+    text = re.sub(r'\[RAG\s+\d+\s*\|[^\]]+\]\s*', '', str(context or ''))
+    labels = [
+        'Intervention','Indicator name','PMF expected results statement','Indicator code',
+        'Rolls into','Akin indicators','Definition','Purpose/ objective','Relevance',
+        'Measurement Unit','Data Source','Data Collection Frequency','Baseline','Target',
+        'Calculation Method','Interpretation','Use/Application','Data quality considerations',
+        'Reporting and Dissemination','References','Version','Date of update'
+    ]
+    # This fallback only uses explicit label/value patterns; it never invents values.
+    rows=[]
+    for label in labels:
+        m=re.search(rf'(?im)^\s*{re.escape(label)}\s*[:\-]?\s*(.+?)(?=\n\s*(?:' + '|'.join(re.escape(x) for x in labels if x != label) + r')\s*[:\-]?\s*|\Z)', text, re.S)
+        if m:
+            value=re.sub(r'\s+',' ',m.group(1)).strip(' |')
+            if value:
+                rows.append((label,value))
+    if not rows:
+        return ''
+    out=['| Parameter | Description |','|---|---|']
+    for k,v in rows:
+        out.append(f'| {k} | {v.replace(chr(10), " ").replace("|", "\\|")} |')
+    return '\n'.join(out)
 
 
 def _chat_rag_knowledge_answer(question, rag):
-    # A specific indicator code/name must be answered from the indicator's own
-    # compendium passages, not from broad result-area chunks.
+    # Indicator-detail questions use the same Parameter / Description structure
+    # used by the ISG Indicator Compendium.
     if _chat_is_indicator_detail_question(question):
-        specific_rag = _chat_specific_indicator_rag(question)
-        if specific_rag.get('chunks'):
-            rag = specific_rag
         parameter_table = _chat_parameter_table_answer(question, rag)
         if parameter_table:
             return {
@@ -9904,19 +9590,6 @@ def _chat_rag_knowledge_answer(question, rag):
                 "source": "ISG_INDICATOR_COMPENDIUM",
                 "text": parameter_table,
             }
-
-    # Indicator-detail questions always use the Parameter/Description format.
-    # This must happen before generic list/table formatting.
-    if _chat_is_indicator_detail_question(question):
-        specific_rag = _chat_specific_indicator_rag(question)
-        if specific_rag.get("chunks"):
-            parameter_table = _chat_parameter_table_answer(question, specific_rag)
-            if parameter_table:
-                return {
-                    "status": "RAG_PARAMETER_TABLE",
-                    "source": "ISG_INDICATOR_COMPENDIUM",
-                    "text": parameter_table,
-                }
 
     # For list/show/table requests, use deterministic source-grounded tables.
     # This prevents the LLM from turning the compendium back into prose.
@@ -9945,19 +9618,9 @@ def _chat_rag_knowledge_answer(question, rag):
             "text":f"I could not find supporting content in the **{RAG_SOURCE_NAME}** knowledge base for this question. I will not invent an official definition or formula."
         }
     if client is None:
-        # Never expose raw retrieval chunks to the user.
-        first_lines = []
-        for line in context.splitlines():
-            line = re.sub(r"\[RAG\s+\d+\s*\|[^\]]+\]\s*", "", line).strip()
-            if line:
-                first_lines.append(line)
-        compact = " ".join(first_lines)
-        compact = re.sub(r"\s+", " ", compact).strip()
-        sentences = re.split(r"(?<=[.!?])\s+", compact)
-        compact = " ".join(sentences[:3])
         return {
             "status":"RAG_RETRIEVED","source":"ISG_INDICATOR_COMPENDIUM",
-            "text":f"**Answer:** {compact}\n\n*Source: {RAG_SOURCE_NAME}.*"
+            "text":f"### Indicator / M&E knowledge\n\nBased on the **{RAG_SOURCE_NAME}**:\n\n{context}"
         }
     prompt=f"""
 You are the authoritative ISG Indicator Compendium assistant.
@@ -9966,7 +9629,6 @@ Do not use DHIS2 values, general model knowledge, web knowledge, or invented def
 Preserve official terminology. If the passages do not support a requested detail, say it was not found.
 If the question asks to list, show, summarize, compare, or present multiple compendium items, ALWAYS use a Markdown table with clear column headers.
 If the question asks for an indicator definition/details/profile, ALWAYS use the compendium's Parameter / Description structure, with one parameter per row. If multiple indicators are requested, use a separate Parameter / Description table for each indicator.
-{_chat_concise_instruction(question)}
 Question: {question}
 Retrieved compendium passages:
 {context}
@@ -10047,10 +9709,17 @@ def ask_analysis_chatbot(
     if not indicators and isinstance(chart_plan,dict):
         indicators=[c for c in (chart_plan.get("y_columns") or []) if c in current_df.columns][:3]
 
-    # 4. Mixed RAG + DHIS2: compendium defines the indicator; DHIS2 supplies current numbers.
+    # 4. ISG Indicator Compendium + DHIS2 evidence.
+    # Report requests ALWAYS retrieve the compendium as enrichment.
+    # The compendium must never be a gate that prevents a report from being generated.
     rag_context={"chunks":[],"warnings":[]}
-    if mixed_intent:
-        rag_context=retrieve_rag_context(question,indicators=indicators,top_k=RAG_TOP_K)
+    report_intent=_chat_report_intent(question)
+    if mixed_intent or report_intent:
+        rag_context=retrieve_rag_context(
+            question,
+            indicators=indicators,
+            top_k=(50 if report_intent else RAG_TOP_K),
+        )
 
     external_requested=_chat_external_research_requested(question)
     if external_requested:
@@ -10097,6 +9766,9 @@ RULES:
 7. If asked for a report, generate the report directly from the evidence.
 8. Do not require a DHIS2 link for general M&E or indicator-definition questions.
 
+REQUEST TYPE:
+{"DETAILED NARRATIVE REPORT" if report_intent else "NORMAL CHAT QUESTION"}
+
 USER QUESTION:
 {question}
 
@@ -10115,15 +9787,65 @@ CURRENT DHIS2 / DETERMINISTIC EVIDENCE:
 EXTERNAL EVIDENCE:
 {safe_json_dumps(external_context)}
 
-GLOBAL RESPONSE STYLE:
-- Every response must be short, precise and directly answer the question.
-- Prefer 1-3 short paragraphs or up to 5 bullets.
-- Do not repeat retrieved passages.
-- Do not add background unless necessary.
-- If a table is requested, keep the requested items but use concise wording.
-- For indicator details, show only the key parameters unless the user explicitly asks for full details.
+If this is a REPORT REQUEST (for example, the user asks to generate, write,
+prepare, create or produce a narrative report), DO NOT give a short answer.
+Generate a detailed professional M&E narrative report using the selected/current
+indicators and the deterministic DHIS2 evidence. The ISG Indicator Compendium
+is supporting authoritative context when retrieved; it is not a prerequisite.
+If an indicator is not found in the compendium, continue the report from the
+DHIS2 evidence and explicitly note that compendium metadata was unavailable for
+that indicator. Never stop or refuse the report because RAG returned no match.
 
-Respond concisely using sections where useful:
+For a REPORT REQUEST use exactly this structure:
+## 1. Report Scope
+State the indicators, reporting period/dimension and dataset covered.
+
+## 2. Executive Summary
+Provide a substantial management-level summary of the overall findings.
+
+## 3. Indicator-by-Indicator Analysis
+Cover EVERY selected indicator. For each indicator include the observed
+values/statistics, geographic or organisational variation, period variation
+when available, notable high/low values, and the relevant compendium definition
+or interpretation when retrieved. Do not discuss only the first indicator.
+
+## 4. Comparative Analysis
+Compare the selected indicators directly. Identify differences, patterns,
+consistent strengths/weaknesses, exceptions and meaningful changes. Use only
+calculations supported by the deterministic evidence.
+
+## 5. Detailed M&E Narrative
+Explain what the findings mean for programme monitoring in clear professional
+language. Distinguish observed patterns from possible explanations and do not
+claim causality without evidence.
+
+## 6. Indicator Compendium Context
+For each indicator where compendium evidence was retrieved, explain the relevant
+official definition, purpose, measurement unit, calculation/interpretation or
+result-framework context. If not retrieved, state "Not found in the ISG Indicator
+Compendium retrieval for this report" and continue. Do not invent missing metadata.
+
+## 7. Data Quality Assessment
+Explain completeness, missingness, consistency, plausibility, outliers, zeros,
+timeliness or other supplied quality findings and how they affect interpretation.
+
+## 8. Programme Management Implications
+Translate the evidence into practical implications for programme/M&E managers.
+
+## 9. Areas Requiring Attention
+Identify specific indicators, countries/organisations or periods requiring
+follow-up, based on the evidence.
+
+## 10. Recommendations
+Provide practical evidence-based actions linked to the findings.
+
+## 11. Conclusion
+Provide a substantive closing synthesis.
+
+## 12. Confidence and Limitations
+State confidence and explain important data or compendium limitations.
+
+For a NORMAL NON-REPORT QUESTION, remain concise and use sections where useful:
 **Indicator / Direct answer**
 **M&E interpretation**
 **Current evidence**
@@ -10189,10 +9911,11 @@ def render_analysis_chatbot(
 
     for message in st.session_state["analysis_chat_messages"]:
         with st.chat_message("user" if message.get("role")=="user" else "assistant"):
-            if message.get("role")=="assistant":
-                st.markdown(message.get("content", ""))
-            else:
-                st.markdown(message.get("content", ""))
+            # Render assistant content as native Streamlit Markdown.  This is
+            # important because the ISG compendium responses intentionally use
+            # Markdown tables (Parameter | Description). Wrapping the answer in
+            # an HTML div would display the table syntax as plain text.
+            st.markdown(message.get("content", ""))
 
     question=st.chat_input("Ask: What is VAS coverage? What is Impact Result 1000? What is the numerator?",key="analysis_chat_input")
     if not question:
@@ -10210,11 +9933,7 @@ def render_analysis_chatbot(
             except Exception as exc:
                 result={"status":"ERROR","source":"CHAT","text":f"The chatbot encountered an error: {str(exc)[-1200:]}"}
         answer=(result or {}).get("text","")
-        # Global policy: every chatbot response is short and precise.
-        answer=_chat_global_concise(answer, question)
-        # Render the answer as native Streamlit Markdown so Markdown tables
-        # produced by the compendium formatter are actually displayed as tables.
-        st.markdown(answer)
+        st.markdown(f'<div class="danip-chat-answer">{answer}</div>',unsafe_allow_html=True)
         if (result or {}).get("source")=="ISG_INDICATOR_COMPENDIUM":
             st.caption("📚 Source: ISG Indicator Compendium (RAG)")
         elif (result or {}).get("source") in ("LOCAL_M_AND_E","OPENAI_M_AND_E"):
