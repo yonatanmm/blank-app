@@ -1,4 +1,5 @@
 
+
 import os
 import base64
 import hashlib
@@ -9743,33 +9744,58 @@ def ask_analysis_chatbot(
     history=st.session_state.get("analysis_chat_messages",[])
     recent_history=[{"role":x.get("role"),"content":x.get("content")} for x in history[-6:] if isinstance(x,dict)]
     rag_text=_rag_context_text(rag_context)
-    rag_block=rag_text if rag_text else (
-        "No ISG Indicator Compendium passage was retrieved for this question. "
-        "The assistant may still interpret the supplied DHIS2/current evidence using its own "
-        "general M&E, public-health, data-analysis and programme-monitoring expertise. "
-        "Do not present that interpretation as an official ISG Compendium definition."
-    )
+    rag_block=rag_text if rag_text else "No compendium passage was retrieved for this question."
+
+    # CRITICAL DANIP-FIRST RULE: the deterministic local analysis is supplied
+    # directly to the narrative model so it interprets DANIP results rather
+    # than drifting into a generic indicator explanation.
+    danip_local_block = local_answer or "No deterministic local M&E narrative was generated."
+    explicit_external = _chat_external_research_requested(question)
 
     prompt=f"""
 You are the DANIP-NI M&E Conversational Assistant.
 You are a senior Monitoring, Evaluation and Learning advisor.
 
+==================== HIGHEST PRIORITY: DANIP CURRENT ANALYSIS ====================
+When the user asks about a DANIP indicator, dashboard result, chart, current value,
+trend, country, organisation, period, comparison, performance or analysis, the answer
+MUST be grounded first in the CURRENT DANIP/DHIS2 EVIDENCE below.
+
+DO NOT replace the DANIP result with a generic explanation of the indicator.
+DO NOT answer from an external website or generic internet knowledge when DANIP evidence is available.
+
+Your job is:
+DATA -> OBSERVATION -> M&E INTERPRETATION -> PROGRAMME IMPLICATION.
+Use the exact observed numbers, periods, organisation names and indicator names from DANIP.
+
+Example: if asked about “Ethiopia NOURISH: # PW who received MMS at ANC-1 in supported
+program area”, first identify and discuss the DANIP result for that indicator, then
+interpret the observed result using M&E expertise. Do not switch to a general ANC/MMS
+article as the answer.
+
 SOURCE HIERARCHY:
-- ISG Indicator Compendium = authoritative organizational indicator definitions, result statements, formulas, numerator/denominator and official M&E guidance when retrieved.
-- DHIS2/API dataset = authoritative source for current numerical observations.
-- Python deterministic evidence = source of truth for calculations.
-- External web evidence = only when explicitly requested.
+1. CURRENT DANIP/DHIS2 DATA + deterministic Python evidence = source of truth for observed results.
+2. ISG Indicator Compendium = authoritative organizational context when retrieved.
+3. General M&E expertise = interpretation when the compendium does not contain the indicator.
+4. External web evidence = ONLY when the user explicitly requests external/UN/WHO/research evidence.
 
 RULES:
-1. Never invent or change a number.
-2. Never invent an official indicator definition, numerator, denominator, formula, target or result mapping.
-3. If the compendium contains the indicator, use it as the authoritative source for official organizational definitions and metadata.
-4. If the indicator is NOT found in the compendium, DO NOT stop, refuse, or say that the result cannot be interpreted. Use your own M&E, public-health, data-analysis and programme-monitoring expertise to interpret the indicator and the observed result. Clearly label that interpretation as professional/general M&E interpretation rather than an official ISG Compendium definition.
-5. For current values, use the DHIS2 evidence below as the numerical source of truth. Never invent, change, recalculate, or replace supplied numbers unless the evidence itself provides the calculation.
-6. For mixed questions, use the compendium when available for indicator meaning, then combine it with DHIS2 evidence. If unavailable, proceed using the indicator name, supplied evidence and your M&E expertise.
-7. Distinguish observed facts from interpretation and possible explanations; do not claim causality from descriptive data.
-8. If asked for a report, generate the report directly from the evidence and continue even when RAG has no match.
-9. Do not require a DHIS2 link for general M&E or indicator-definition questions.
+1. Never invent, change, cap or replace a DANIP number.
+2. Always state the DANIP/current result when it is available and relevant.
+3. Interpret the observed DANIP result using M&E reasoning: level, trend, variation,
+   programme meaning, data-quality considerations and possible operational explanations.
+4. If the indicator is not in the compendium, DO NOT stop and DO NOT say only
+   “indicator not found”. Use the exact DANIP indicator name and current DANIP evidence
+   plus general M&E expertise. Clearly label this as general M&E interpretation, not
+   official compendium metadata.
+5. Never invent an official definition, numerator, denominator, formula, target or mapping.
+6. Distinguish observed facts from possible explanations; never claim causality unless
+   the supplied evidence establishes it.
+7. Current/trend/comparison/performance questions MUST be answered from DANIP evidence first.
+8. External research is forbidden for ordinary DANIP analysis. It is allowed only when
+   explicitly requested, and must be clearly separated from the DANIP result.
+9. The compendium is supporting context, not a gate for analysing DANIP data.
+10. If DANIP evidence is incomplete, explain exactly what can and cannot be concluded.
 
 REQUEST TYPE:
 {"DETAILED NARRATIVE REPORT" if report_intent else "NORMAL CHAT QUESTION"}
@@ -9786,13 +9812,14 @@ ISG INDICATOR COMPENDIUM RAG:
 CURRENT DHIS2 SOURCE:
 {current_source or 'Current DHIS2 source not explicitly named'}
 
-CURRENT DHIS2 / DETERMINISTIC EVIDENCE:
+CURRENT DANIP / DHIS2 / DETERMINISTIC EVIDENCE:
 {safe_json_dumps(evidence)}
 
-EXTERNAL EVIDENCE:
-{safe_json_dumps(external_context)}
+DETERMINISTIC DANIP M&E ANALYSIS (USE THIS TO GROUND THE NARRATIVE):
+{danip_local_block}
 
-If the requested indicator is not present in the ISG Indicator Compendium, continue with the analysis using the exact indicator name and current DHIS2 evidence supplied below. Apply standard M&E reasoning such as level/coverage interpretation, numerator-denominator logic when explicitly available, trend interpretation, variation across organisations or periods, data-quality implications, plausible operational explanations, and programme-management implications. Clearly distinguish these expert interpretations from official compendium metadata. Never invent an official definition, target, formula, numerator or denominator.
+EXTERNAL EVIDENCE:
+{safe_json_dumps(external_context) if explicit_external else "NOT REQUESTED — DO NOT USE EXTERNAL EVIDENCE."}
 
 If this is a REPORT REQUEST (for example, the user asks to generate, write,
 prepare, create or produce a narrative report), DO NOT give a short answer.
@@ -9902,8 +9929,6 @@ IMPORTANT TABLE RULES:
 - Preserve calculated values from deterministic evidence.
 - Do not invent values when evidence is unavailable; write "Not available in supplied evidence".
 - The report must remain detailed, not shortened into 4-6 bullets.
-
-For a NORMAL NON-REPORT QUESTION, remain concise and use sections where useful. If the indicator is not found in the compendium, still provide the M&E interpretation from the DHIS2 evidence and your general M&E expertise; do not answer only that the indicator was not found. Clearly state when an interpretation is general M&E expertise rather than official compendium metadata.
 
 For a NORMAL NON-REPORT QUESTION, remain concise and use sections where useful:
 **Indicator / Direct answer**
