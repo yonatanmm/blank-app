@@ -8967,230 +8967,130 @@ If no credible source is found, say so explicitly.
         "error": error_text,
     }
 
-def _check_openai_api_connection():
-    """Lightweight diagnostic for the configured OpenAI credential.
+def research_mne_external_context(question, indicators=None, danip_evidence=None, rag_context=None):
+    """Automatically retrieve authoritative external M&E context for every analysis question.
 
-    This does not expose the API key. It distinguishes configuration/authentication
-    problems from web-search implementation problems.
+    Dashboard/DHIS2 values remain the numerical source of truth. External web evidence is
+    used only for indicator meaning, programme relevance, standards/guidance and context.
     """
-    if not OPENAI_API_KEY:
-        return {
-            "ok": False,
-            "status": "MISSING_KEY",
-            "message": "OPENAI_API_KEY is not configured.",
-        }
-
     if client is None:
         return {
-            "ok": False,
-            "status": "CLIENT_INIT_FAILED",
-            "message": "OpenAI client could not be initialized.",
-        }
-
-    try:
-        # A model-list request is deliberately used only as a connectivity/auth
-        # diagnostic. It does not consume a chat completion.
-        client.models.list()
-        return {
-            "ok": True,
-            "status": "API_OK",
-            "message": "OpenAI API connection is working.",
-        }
-    except Exception as exc:
-        msg = str(exc)
-        low = msg.lower()
-
-        if "401" in low or "invalid_api_key" in low or "incorrect api key" in low or "unauthorized" in low:
-            status = "INVALID_API_KEY"
-        elif "429" in low or "insufficient_quota" in low or "credit_balance_exhausted" in low or "rate limit" in low:
-            status = "QUOTA_OR_RATE_LIMIT"
-        else:
-            status = "API_ERROR"
-
-        return {
-            "ok": False,
-            "status": status,
-            "message": msg[-2000:],
-        }
-
-
-def research_mne_external_context(question, indicators=None, danip_evidence=None, rag_context=None):
-    """Run the THIRD layer: authoritative external evidence/comparison.
-
-    DANIP values remain the numerical source of truth. Internal KM is supplied as
-    the second layer so the external search can test definition-level comparability.
-    """
-    diagnostic = _check_openai_api_connection()
-
-    if not diagnostic["ok"]:
-        return {
-            "status": diagnostic["status"],
+            "status": "DISABLED",
             "sources": [],
-            "api_diagnostic": diagnostic,
-            "text": (
-                "External search was not completed.\n\n"
-                f"**OpenAI API status:** {diagnostic['status']}\n"
-                f"**Details:** {diagnostic['message']}"
-            ),
+            "text": "No external source could be queried because OPENAI_API_KEY is not configured.",
         }
 
     indicators = indicators or []
-    indicator_text = "\n".join(
-        f"- {str(x)}" for x in indicators[:8]
-    ) or "- No specific indicator confidently identified."
+    indicator_text = "\n".join(f"- {str(x)}" for x in indicators[:5]) or "- No specific indicator confidently identified."
 
+    # The external layer receives the actual DANIP evidence and internal KM context.
+    # This is critical for a true comparison: external search must know exactly what
+    # DANIP measured before it decides whether an outside source is comparable.
     danip_payload = danip_evidence or {}
     km_payload = rag_context or {}
 
     prompt = f"""
-You are the THIRD and final evidence layer in a strict three-level DANIP M&E hierarchy.
+You are the THIRD and final evidence layer in a strict three-level DANIP M&E search hierarchy.
 
-HIERARCHY:
-1. INTERNAL DANIP / DHIS2 — authoritative for current observed programme values.
-2. INTERNAL KM / ISG INDICATOR COMPENDIUM — authoritative for internal definitions and metadata.
-3. EXTERNAL — authoritative public sources such as UNICEF, WHO, UN, UNFPA and World Bank.
+SEARCH ORDER:
+1. INTERNAL DANIP / DHIS2 — source of truth for observed programme values.
+2. INTERNAL KM / ISG INDICATOR COMPENDIUM — source of truth for official internal definitions and metadata.
+3. EXTERNAL AUTHORITATIVE SOURCES — UNICEF, WHO, UN, World Bank and similar sources.
 
-The user has explicitly requested external evidence or comparison.
-You MUST perform web search. Do not answer from general model knowledge.
+The user explicitly requested external evidence or comparison. Use web search.
+Your job is NOT to produce a generic external summary. Your job is to determine whether
+a requested external source contains evidence that can actually be compared with the current DANIP result.
 
 USER QUESTION:
 {question}
 
-LEVEL 1 — DANIP CURRENT EVIDENCE:
-{safe_json_dumps(danip_payload)}
-
-DANIP INDICATORS:
+DANIP INDICATORS IDENTIFIED:
 {indicator_text}
 
-LEVEL 2 — INTERNAL KM:
+LEVEL 1 — CURRENT DANIP / DHIS2 EVIDENCE:
+{safe_json_dumps(danip_payload)}
+
+LEVEL 2 — INTERNAL KM / ISG COMPENDIUM:
 {_rag_context_text(km_payload) if km_payload else "No internal KM passage was retrieved."}
 
-EXTERNAL SEARCH INSTRUCTIONS:
-- Search the explicitly requested organisation first.
-- Then use the requested country/geography.
-- Then use the requested year/reporting period.
-- Prefer the official organisation's own website/data/report.
-- If "this year" is requested, resolve it to the current calendar year.
-- Search for the exact indicator and close variants, not just generic topic information.
+EXTERNAL SEARCH PRIORITY:
+1. Explicitly requested organisation/source (for example UNICEF Ethiopia).
+2. Requested country/geography.
+3. Requested year/reporting period (for example 2026 / this year).
+4. WHO / UNICEF / UN / UNFPA / World Bank authoritative sources.
 
-COMPARABILITY TEST:
-Before treating an external value as comparable, check:
-1. indicator concept
-2. population
-3. geography
-4. reporting period/year
-5. numerator/denominator
-6. measurement unit
-7. count versus coverage/rate definition
+COMPARABILITY TEST — REQUIRED:
+Before reporting an external number, compare all of these:
+- indicator concept/name
+- population
+- geography
+- reporting period/year
+- numerator and denominator, when applicable
+- measurement unit
+- coverage/count/rate definition
 
-CLASSIFICATION:
-- DIRECTLY COMPARABLE
-- RELATED BUT NOT DIRECTLY COMPARABLE
-- NO VERIFIED MATCH
+Classify the external evidence as:
+- DIRECTLY COMPARABLE: materially aligned on the above dimensions.
+- RELATED BUT NOT DIRECTLY COMPARABLE: relevant, but one or more dimensions differ.
+- NO VERIFIED MATCH: no suitable authoritative evidence found.
 
-CRITICAL RULES:
-- Never invent an external value.
-- Never estimate an external value.
-- Never use a target as an achieved result.
+IMPORTANT:
+- Never invent an external number.
+- Never estimate an external number from another indicator.
 - Never treat IFA-or-MMS as MMS-only.
-- Never treat a regional result as a national result.
-- Never modify, cap, replace or recalculate a DANIP value.
-- If there is no directly comparable external numerical result, output exactly:
-  NO DIRECTLY COMPARABLE EXTERNAL VALUE FOUND
-- If related evidence exists, show it separately and explain why it is not equivalent.
-- Give the official source title, organisation, publication date/year, geography, value/unit and URL when available.
+- Never treat a regional value as a national value.
+- Never treat a target as an achieved result.
+- Never change, cap, replace or recalculate the DANIP value.
+- If no directly comparable value exists, explicitly return: NO DIRECTLY COMPARABLE EXTERNAL VALUE FOUND.
+- If a related source exists, report its actual value and explain the mismatch.
+- Include organisation, report/title, publication date/year, geography, value/unit, match status, comparison note and source URL.
 
-RETURN FORMAT:
-## External comparison
-**Requested source:** ...
-**Requested geography:** ...
-**Requested period:** ...
-
-| Dimension | DANIP | External | Assessment |
-|---|---|---|---|
-| Indicator | ... | ... | ... |
-| Population | ... | ... | ... |
-| Geography | ... | ... | ... |
-| Period | ... | ... | ... |
-| Measurement | ... | ... | ... |
-| Value | ... | ... | ... |
-
-**Comparability:** DIRECTLY COMPARABLE / RELATED BUT NOT DIRECTLY COMPARABLE / NO VERIFIED MATCH
-
-**Evidence:** ...
-**Source:** ...
-
-If no directly comparable value exists, clearly state:
-NO DIRECTLY COMPARABLE EXTERNAL VALUE FOUND
-and then provide the closest related official evidence, clearly labelled RELATED.
+Return concise structured evidence suitable for insertion into a DANIP answer.
 """
 
-    attempts = [
-        ("web_search", {"type": "web_search", "search_context_size": "high"}),
-        ("web_search_preview", {"type": "web_search_preview", "search_context_size": "high"}),
-    ]
+    api_errors = []
 
-    errors = []
+    # Primary current Responses API web-search tool.
+    try:
+        response = client.responses.create(
+            model=OPENAI_MODEL,
+            tools=[{
+                "type": "web_search",
+                "search_context_size": "high",
+                "filters": {"allowed_domains": EXTERNAL_EVIDENCE_DOMAINS},
+            }],
+            input=prompt,
+        )
+        answer = (response.output_text or "").strip()
+        urls = _extract_response_urls(response)
+        if answer:
+            return {"status":"SUCCESS","sources":urls[:12],"text":answer,"engine":"web_search"}
+        api_errors.append("web_search returned no output text")
+    except Exception as exc:
+        api_errors.append("web_search: " + str(exc)[-1800:])
 
-    for name, tool_spec in attempts:
-        try:
-            response = client.responses.create(
-                model=OPENAI_MODEL,
-                tools=[tool_spec],
-                tool_choice="required",
-                input=prompt,
-            )
+    # SDK compatibility fallback.
+    try:
+        response = client.responses.create(
+            model=OPENAI_MODEL,
+            tools=[{"type": "web_search_preview"}],
+            input=prompt,
+        )
+        answer = (response.output_text or "").strip()
+        urls = _extract_response_urls(response)
+        if answer:
+            return {"status":"SUCCESS","sources":urls[:12],"text":answer,"engine":"web_search_preview"}
+        api_errors.append("web_search_preview returned no output text")
+    except Exception as exc:
+        api_errors.append("web_search_preview: " + str(exc)[-1800:])
 
-            answer = (getattr(response, "output_text", None) or "").strip()
-            urls = _extract_response_urls(response)
-
-            if answer:
-                return {
-                    "status": "SUCCESS",
-                    "source": "EXTERNAL_WEB_SEARCH",
-                    "search_method": name,
-                    "sources": urls[:15],
-                    "api_diagnostic": diagnostic,
-                    "text": answer,
-                }
-
-            errors.append(f"{name}: empty response")
-
-        except Exception as exc:
-            msg = str(exc)
-            errors.append(f"{name}: {msg}")
-
-            low = msg.lower()
-            # Authentication/quota problems cannot be repaired by switching
-            # between web-search tool names.
-            if (
-                "401" in low
-                or "invalid_api_key" in low
-                or "incorrect api key" in low
-                or "unauthorized" in low
-                or "insufficient_quota" in low
-                or "credit_balance_exhausted" in low
-                or "429" in low
-            ):
-                break
-
+    error_text = "\n\n".join(api_errors)[-5000:]
     return {
-        "status": "EXTERNAL_SEARCH_ERROR",
-        "source": "EXTERNAL_WEB_SEARCH",
-        "sources": [],
-        "api_diagnostic": diagnostic,
-        "text": (
-            "### 🌐 External comparison unavailable\n\n"
-            "The DANIP and Internal KM layers remain available. "
-            "The external web-search layer failed.\n\n"
-            "**Technical diagnostic:**\n"
-            "```text\n"
-            + "\n".join(errors)[-5000:]
-            + "\n```"
-        ),
-        "error": "\n".join(errors)[-5000:],
+        "status":"ERROR",
+        "sources":[],
+        "text":"External evidence search could not be completed.\n\n" + error_text,
+        "error":error_text,
     }
-
 
 
 # ============================================================
@@ -10002,12 +9902,15 @@ def ask_analysis_chatbot(
     current_df = df if isinstance(df,pd.DataFrame) and not df.empty else st.session_state.get("nexus_chat_df")
     current_source = str(source_url or st.session_state.get("nexus_chat_source_url", "") or "").strip()
 
-    # 1. Pure RAG / M&E knowledge — independent of API.
+    # 1. Intent routing. External requests MUST bypass the pure-RAG early return.
+    # Otherwise an indicator question containing UNICEF can be answered by KM
+    # before Level 3 external research is reached.
     rag_intent=_chat_is_rag_or_me_knowledge(question)
     mixed_intent=_chat_mixed_rag_analysis_intent(question)
     current_intent=_chat_requires_current_data(question)
+    explicit_external_request = _chat_external_research_requested(question)
 
-    if rag_intent and not mixed_intent and not (current_intent and not any(x in question.lower() for x in ("compendium","official definition","indicator definition","numerator","denominator","formula"))):
+    if rag_intent and not explicit_external_request and not mixed_intent and not (current_intent and not any(x in question.lower() for x in ("compendium","official definition","indicator definition","numerator","denominator","formula"))):
         rag=retrieve_rag_context(question, indicators=[], top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K))
         result=_chat_rag_knowledge_answer(question,rag)
         if isinstance(current_df, pd.DataFrame) and not current_df.empty:
@@ -10109,7 +10012,7 @@ def ask_analysis_chatbot(
         "sources":[],
         "text":"No external context retrieved."
     }
-    explicit_external_request = _chat_external_research_requested(question)
+    # Level 3 is mandatory whenever the user explicitly names an external source.
     if danip_analysis_question or explicit_external_request:
         try:
             external_context=research_mne_external_context(
@@ -10217,6 +10120,9 @@ CURRENT DHIS2 / DETERMINISTIC EVIDENCE:
 
 EXTERNAL RESEARCH CONTEXT (LEVEL 3):
 {safe_json_dumps(external_context)}
+EXTERNAL SEARCH STATUS: {external_context.get("status", "UNKNOWN")}
+EXTERNAL SEARCH ENGINE: {external_context.get("engine", "not available") or "not available"}
+EXTERNAL SOURCE URLS: {safe_json_dumps(external_context.get("sources", []))}
 {external_comparison_instruction}
 
 EXTERNAL COMPARISON OUTPUT RULE:
@@ -10232,7 +10138,8 @@ Use this format:
 Then explain the comparison in 1-3 sentences. If the external layer returned no directly comparable value, say exactly: **NO DIRECTLY COMPARABLE EXTERNAL VALUE FOUND.** Do not invent one.
 
 USER-FACING ANSWER REQUIREMENT:
-For DANIP analytical questions, present only the current DANIP/DHIS2 findings and their M&E interpretation. Internal KM and external research are supporting context and must not become a separate answer section.
+For ordinary DANIP analytical questions, present the current DANIP/DHIS2 findings and their M&E interpretation.
+When explicit_external_request is TRUE, the **External comparison** section is REQUIRED after the DANIP analysis, even if the external result is NO VERIFIED MATCH or the search failed. Never silently hide Level-3 status.
 
 If this is a REPORT REQUEST (for example, the user asks to generate, write,
 prepare, create or produce a narrative report), DO NOT give a short answer.
