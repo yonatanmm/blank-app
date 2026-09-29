@@ -9173,12 +9173,14 @@ def _rag_google_doc_text(url):
 
 
 def _rag_google_sheet_text(url, target_sheet=None):
-    """Read Google Sheet worksheets as RAG text.
+    """Read the Google workbook for RAG, preserving the PMF matrix structure.
 
-    The PMF indicator worksheet is explicitly identified as
-    ``Global_Rollup_Matrix``.  That tab is loaded first and labelled clearly
-    so retrieval can distinguish PMF content from other workbook tabs.
-    Other tabs are also loaded as supplementary internal knowledge.
+    ``Global_Rollup_Matrix`` has title/instruction rows above the real header.
+    We therefore detect the row containing ``Global PMF code`` instead of
+    letting pandas treat the first spreadsheet row as the header.  Each PMF
+    record is emitted as a named, self-contained row so retrieval can later
+    render the same matrix as a Markdown table rather than exposing raw RAG
+    chunks.
     """
     m = re.search(r"/spreadsheets/d/([A-Za-z0-9_-]+)", str(url or ""))
     if not m:
@@ -9196,9 +9198,6 @@ def _rag_google_sheet_text(url, target_sheet=None):
 
         workbook = pd.ExcelFile(BytesIO(r.content), engine="openpyxl")
         available = list(workbook.sheet_names)
-
-        # Match the requested PMF tab case-insensitively and tolerate
-        # accidental leading/trailing spaces in the worksheet name.
         target_match = next(
             (name for name in available if str(name).strip().lower() == target_sheet.lower()),
             None,
@@ -9212,27 +9211,94 @@ def _rag_google_sheet_text(url, target_sheet=None):
         parts = []
         for sheet_name in ordered_sheets:
             try:
-                frame = pd.read_excel(workbook, sheet_name=sheet_name, dtype=str)
+                raw = pd.read_excel(
+                    workbook, sheet_name=sheet_name, header=None, dtype=str
+                ).fillna("")
             except Exception:
                 continue
 
-            if frame.empty and len(frame.columns) == 0:
+            if raw.empty:
                 continue
 
-            frame = frame.fillna("")
-            rows = [
-                " | ".join(str(c).strip() for c in frame.columns)
-            ]
-            for _, row in frame.iterrows():
+            is_pmf = target_match is not None and sheet_name == target_match
+            if is_pmf:
+                # Locate the actual matrix header row. The screenshot/source has
+                # explanatory rows above this header, so header=0 is incorrect.
+                header_idx = None
+                for idx in range(min(len(raw), 30)):
+                    values = [str(v).strip().lower() for v in raw.iloc[idx].tolist()]
+                    if "global pmf code" in values and "indicator" in values:
+                        header_idx = idx
+                        break
+
+                if header_idx is not None:
+                    headers = [str(v).strip() for v in raw.iloc[header_idx].tolist()]
+                    # Fill any blank header cells with stable names.
+                    clean_headers = []
+                    for i, h in enumerate(headers):
+                        clean_headers.append(h if h and not h.lower().startswith("unnamed") else f"Column_{i+1}")
+
+                    data = raw.iloc[header_idx + 1:].copy()
+                    data.columns = clean_headers
+
+                    # Drop fully blank rows.
+                    data = data.loc[data.apply(lambda row: any(str(v).strip() for v in row), axis=1)]
+
+                    # Only retain the actual matrix columns visible in the PMF
+                    # sheet. Extra blank/unnamed columns are ignored.
+                    desired = [
+                        "Global PMF code", "Level", "Indicator", "GAC?", "TEAM",
+                        "Team Remarks", "Standard field exists in harmonised tool(s)",
+                        "MNHN", "BP", "AWHN", "VAS", "ZINC", "USI", "FF", "NG",
+                    ]
+                    col_lookup = {str(c).strip().lower(): c for c in data.columns}
+                    resolved = []
+                    for name in desired:
+                        key = name.lower()
+                        resolved.append(col_lookup.get(key))
+
+                    # Fallback to the first 15 columns when the source contains
+                    # minor header spelling/spacing differences.
+                    if resolved.count(None) > 2 and len(data.columns) >= 15:
+                        resolved = list(data.columns[:15])
+
+                    row_lines = []
+                    for _, row in data.iterrows():
+                        vals = []
+                        for col in resolved:
+                            vals.append(str(row[col]).strip() if col is not None else "")
+                        if not any(vals):
+                            continue
+                        code = vals[0]
+                        if not code or code.lower() in {"global pmf code", "nan"}:
+                            continue
+                        fields = []
+                        for name, value in zip(desired, vals):
+                            value = re.sub(r"\s+", " ", value).strip()
+                            fields.append(f"{name}: {value}")
+                        row_lines.append("PMF_ROW | " + " | ".join(fields))
+
+                    instruction = "Cell = R countries / countries reportable from current tools. Every applicable indicator has a standard field in the portfolio tool; gaps are current-tool gaps to close. Colour: green all countries R, amber some, red none, grey central/derived, blank not applicable."
+                    parts.append(
+                        f"SHEET: {sheet_name}\n"
+                        "SOURCE ROLE: PRIMARY PMF INDICATOR SOURCE\n"
+                        f"MATRIX INSTRUCTIONS: {instruction}\n"
+                        + "\n".join(row_lines)
+                    )
+                    continue
+
+            # Supplementary worksheets retain their normal row representation.
+            rows = [" | ".join(str(c).strip() for c in raw.iloc[0].tolist())]
+            for _, row in raw.iloc[1:].iterrows():
                 values = [str(v).strip() for v in row.tolist()]
                 if any(values):
                     rows.append(" | ".join(values))
-
             sheet_text = "\n".join(rows).strip()
             if sheet_text:
-                priority = "PRIMARY PMF INDICATOR SOURCE" if sheet_name == target_match else "SUPPLEMENTARY INTERNAL SHEET"
                 parts.append(
-                    f"SHEET: {sheet_name}\nSOURCE ROLE: {priority}\n{sheet_text}"
+                    f"SHEET: {sheet_name}\n"
+                    "SOURCE ROLE: SUPPLEMENTARY INTERNAL SHEET\n"
+                    + sheet_text
                 )
 
         return _rag_normalize("\n\n".join(parts))
@@ -9611,6 +9677,85 @@ def _chat_extract_compendium_indicator_rows(rag):
     return rows
 
 
+def _chat_pmf_rollup_table(question, rag):
+    """Render Global_Rollup_Matrix PMF rows as the actual matrix table.
+
+    Retrieval chunks are an internal implementation detail. Users should see
+    the PMF fields as columns matching the source worksheet, not ``[RAG 1]``
+    blocks or pipe-delimited raw extraction text.
+    """
+    chunks = (rag or {}).get("chunks", [])
+    records = []
+    seen = set()
+    for chunk in chunks:
+        source = str(chunk.get("source", ""))
+        text = str(chunk.get("text", ""))
+        if RAG_GOOGLE_SHEET_TAB.lower() not in (source + " " + text).lower():
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("PMF_ROW |"):
+                continue
+            fields = {}
+            for piece in line.split(" | ")[1:]:
+                if ":" not in piece:
+                    continue
+                key, value = piece.split(":", 1)
+                fields[key.strip()] = value.strip()
+            code = fields.get("Global PMF code", "").strip()
+            if not code:
+                continue
+            key = code.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            records.append(fields)
+
+    if not records:
+        return ""
+
+    q = str(question or "").lower()
+    # Specific PMF code requested: return only that indicator.
+    code_matches = re.findall(r"\b\d{3,4}(?:\s*\([ivx]+\))?(?:\s*\.\s*\d{1,3})?(?:\s*\d{1,2})?\b", q, re.I)
+    normalized_requested = {
+        re.sub(r"\s+", "", x).lower().rstrip(".") for x in code_matches
+    }
+    if normalized_requested:
+        filtered = []
+        for rec in records:
+            norm = re.sub(r"\s+", "", rec.get("Global PMF code", "")).lower().rstrip(".")
+            if any(req in norm or norm in req for req in normalized_requested):
+                filtered.append(rec)
+        if filtered:
+            records = filtered
+
+    columns = [
+        "Global PMF code", "Level", "Indicator", "GAC?", "TEAM", "Team Remarks",
+        "Standard field exists in harmonised tool(s)", "MNHN", "BP", "AWHN", "VAS",
+        "ZINC", "USI", "FF", "NG",
+    ]
+    lines = [
+        "### ISG2 Global PMF — Global Rollup Matrix",
+        "",
+        "| " + " | ".join(columns) + " |",
+        "|" + "|".join(["---"] * len(columns)) + "|",
+    ]
+    for rec in records:
+        values = []
+        for col in columns:
+            value = str(rec.get(col, "")).strip()
+            value = value.replace("|", "\\|").replace("\n", " ")
+            values.append(value)
+        lines.append("| " + " | ".join(values) + " |")
+
+    lines.extend([
+        "",
+        "**Source:** DANIP Internal Google Sheet — `Global_Rollup_Matrix`.",
+        "**Source role:** Primary PMF indicator source.",
+    ])
+    return "\n".join(lines)
+
+
 def _chat_compendium_table(question, rag):
     """Render retrieved ISG compendium material as a readable Markdown table."""
     # Keep the exact source-defined Impact Result 1000 table.
@@ -9909,6 +10054,18 @@ def _chat_add_danip_interpretation(result, question, current_df, chart_plan=None
 
 
 def _chat_rag_knowledge_answer(question, rag):
+    # PMF / roll-up / readiness questions use the actual Global_Rollup_Matrix
+    # column structure rather than exposing raw retrieval chunks.
+    qlow = str(question or "").lower()
+    if any(term in qlow for term in ("pmf", "rollup", "roll-up", "readiness", "global_rollup_matrix")):
+        pmf_table = _chat_pmf_rollup_table(question, rag)
+        if pmf_table:
+            return {
+                "status": "RAG_PMF_ROLLUP_TABLE",
+                "source": "DANIP_INTERNAL_GOOGLE_SHEET",
+                "text": pmf_table,
+            }
+
     # Indicator-detail questions use the same Parameter / Description structure
     # used by the ISG Indicator Compendium.
     if _chat_is_indicator_detail_question(question):
