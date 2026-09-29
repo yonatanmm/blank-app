@@ -9106,6 +9106,19 @@ RAG_GOOGLE_DOC_URL = (
     "https://docs.google.com/document/d/"
     "159IpWlCdgzCp1GOckjeux93_IrkFx7pf/edit"
 )
+
+# Additional internal RAG source: the shared Google Sheet provided for the
+# NEXUS M&E assistant. The sheet is treated as INTERNAL KNOWLEDGE, not as
+# current DHIS2 observations. The Google Sheet must be shared so the app's
+# runtime can read it without interactive Google authentication.
+RAG_GOOGLE_SHEET_NAME = "DANIP Internal Google Sheet"
+# The PMF indicator data are stored in this worksheet/tab.
+RAG_GOOGLE_SHEET_TAB = "Global_Rollup_Matrix"
+RAG_GOOGLE_SHEET_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "1al4woIxwnxaPJzf2gxTohLfGgc56mQDH/edit"
+)
+
 RAG_KNOWLEDGE_FOLDER = os.path.join(BASE_DIR, "rag_knowledge")
 RAG_SOURCES_FILE = os.path.join(RAG_KNOWLEDGE_FOLDER, "rag_sources.txt")
 RAG_TOP_K = 8
@@ -9159,6 +9172,74 @@ def _rag_google_doc_text(url):
     return ""
 
 
+def _rag_google_sheet_text(url, target_sheet=None):
+    """Read Google Sheet worksheets as RAG text.
+
+    The PMF indicator worksheet is explicitly identified as
+    ``Global_Rollup_Matrix``.  That tab is loaded first and labelled clearly
+    so retrieval can distinguish PMF content from other workbook tabs.
+    Other tabs are also loaded as supplementary internal knowledge.
+    """
+    m = re.search(r"/spreadsheets/d/([A-Za-z0-9_-]+)", str(url or ""))
+    if not m:
+        return ""
+
+    spreadsheet_id = m.group(1)
+    target_sheet = str(target_sheet or RAG_GOOGLE_SHEET_TAB).strip()
+    export_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export?format=xlsx"
+
+    try:
+        r = requests.get(export_url, timeout=60, allow_redirects=True)
+        r.raise_for_status()
+        if not r.content:
+            return ""
+
+        workbook = pd.ExcelFile(BytesIO(r.content), engine="openpyxl")
+        available = list(workbook.sheet_names)
+
+        # Match the requested PMF tab case-insensitively and tolerate
+        # accidental leading/trailing spaces in the worksheet name.
+        target_match = next(
+            (name for name in available if str(name).strip().lower() == target_sheet.lower()),
+            None,
+        )
+
+        ordered_sheets = []
+        if target_match:
+            ordered_sheets.append(target_match)
+        ordered_sheets.extend(name for name in available if name != target_match)
+
+        parts = []
+        for sheet_name in ordered_sheets:
+            try:
+                frame = pd.read_excel(workbook, sheet_name=sheet_name, dtype=str)
+            except Exception:
+                continue
+
+            if frame.empty and len(frame.columns) == 0:
+                continue
+
+            frame = frame.fillna("")
+            rows = [
+                " | ".join(str(c).strip() for c in frame.columns)
+            ]
+            for _, row in frame.iterrows():
+                values = [str(v).strip() for v in row.tolist()]
+                if any(values):
+                    rows.append(" | ".join(values))
+
+            sheet_text = "\n".join(rows).strip()
+            if sheet_text:
+                priority = "PRIMARY PMF INDICATOR SOURCE" if sheet_name == target_match else "SUPPLEMENTARY INTERNAL SHEET"
+                parts.append(
+                    f"SHEET: {sheet_name}\nSOURCE ROLE: {priority}\n{sheet_text}"
+                )
+
+        return _rag_normalize("\n\n".join(parts))
+    except Exception:
+        return ""
+
+
 def _rag_sources():
     """Return configured local files and direct Google Doc sources."""
     sources = []
@@ -9171,8 +9252,9 @@ def _rag_sources():
                 ".txt", ".md", ".csv", ".tsv", ".docx", ".pdf"
             )):
                 sources.append((name, path))
-    # Direct authoritative source requested by the user. This is NOT a folder scan.
+    # Direct authoritative/internal sources. These are NOT folder scans.
     sources.append((RAG_SOURCE_NAME, RAG_GOOGLE_DOC_URL))
+    sources.append((f"{RAG_GOOGLE_SHEET_NAME} — {RAG_GOOGLE_SHEET_TAB}", RAG_GOOGLE_SHEET_URL))
     if os.path.isfile(RAG_SOURCES_FILE):
         try:
             for line in Path(RAG_SOURCES_FILE).read_text(encoding="utf-8").splitlines():
@@ -9237,9 +9319,17 @@ def _rag_load_knowledge():
     for source, location in _rag_sources():
         text=""
         if str(location).startswith("http"):
-            text=_rag_google_doc_text(location)
-            if not text:
-                warnings.append(f"Could not retrieve {source} from the configured Google Doc URL.")
+            if "/spreadsheets/d/" in str(location):
+                text=_rag_google_sheet_text(location, RAG_GOOGLE_SHEET_TAB)
+                if not text:
+                    warnings.append(
+                        f"Could not retrieve {source} from the configured Google Sheet URL. "
+                        "Confirm the sheet is shared with access suitable for the app runtime."
+                    )
+            else:
+                text=_rag_google_doc_text(location)
+                if not text:
+                    warnings.append(f"Could not retrieve {source} from the configured Google Doc URL.")
         else:
             text=_rag_file_text(location)
             if not text:
@@ -9273,6 +9363,13 @@ def retrieve_rag_context(question, indicators=None, top_k=RAG_TOP_K):
             if len(phrase)>5 and phrase in tlow:
                 exact += 8
         score=overlap + exact
+        source_text = str(c.get("source", ""))
+        chunk_text = str(c.get("text", ""))
+        # PMF questions should preferentially retrieve the dedicated
+        # Global_Rollup_Matrix worksheet.
+        if "pmf" in qlow or "rollup" in qlow or "readiness" in qlow or "global_rollup_matrix" in qlow:
+            if RAG_GOOGLE_SHEET_TAB.lower() in chunk_text.lower() or RAG_GOOGLE_SHEET_TAB.lower() in source_text.lower():
+                score += 25
         if score>0:
             scored.append((score,c))
     scored.sort(key=lambda x:x[0], reverse=True)
@@ -10404,9 +10501,15 @@ def render_analysis_chatbot(
     """,unsafe_allow_html=True)
 
     if chat_source:
-        st.markdown(f'<span class="danip-chat-source">🔗 Current data source: {html.escape(chat_source)}</span>',unsafe_allow_html=True)
+        st.markdown(
+            f'<span class="danip-chat-source">🔗 Current data source: {html.escape(chat_source)} · 📚 Internal RAG: ISG Indicator Compendium + DANIP Internal Google Sheet</span>',
+            unsafe_allow_html=True,
+        )
     else:
-        st.markdown('<span class="danip-chat-source">📚 Knowledge source: ISG Indicator Compendium · No DHIS2 data loaded</span>',unsafe_allow_html=True)
+        st.markdown(
+            '<span class="danip-chat-source">📚 Internal RAG: ISG Indicator Compendium + DANIP Internal Google Sheet · No DHIS2 data loaded</span>',
+            unsafe_allow_html=True,
+        )
 
     for message in st.session_state["analysis_chat_messages"]:
         with st.chat_message("user" if message.get("role")=="user" else "assistant"):
