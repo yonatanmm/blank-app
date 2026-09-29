@@ -9678,73 +9678,216 @@ def _chat_extract_compendium_indicator_rows(rag):
 
 
 def _chat_pmf_rollup_table(question, rag):
-    """Render Global_Rollup_Matrix PMF rows as the actual matrix table.
+    """Render Global_Rollup_Matrix as a real Markdown matrix table.
 
-    Retrieval chunks are an internal implementation detail. Users should see
-    the PMF fields as columns matching the source worksheet, not ``[RAG 1]``
-    blocks or pipe-delimited raw extraction text.
+    The Google Sheet is stored/retrieved as PMF_ROW records, but retrieval
+    chunks can split those records.  Therefore this function supports both:
+      1) complete PMF_ROW records, and
+      2) flattened ``Global PMF code: ...`` records from a chunk.
+
+    Users never see [RAG n] blocks or the internal pipe-delimited extraction.
     """
     chunks = (rag or {}).get("chunks", [])
-    records = []
-    seen = set()
+    source_texts = []
+
     for chunk in chunks:
         source = str(chunk.get("source", ""))
-        text = str(chunk.get("text", ""))
-        if RAG_GOOGLE_SHEET_TAB.lower() not in (source + " " + text).lower():
-            continue
-        for line in text.splitlines():
+        chunk_text = str(chunk.get("text", ""))
+        if (
+            RAG_GOOGLE_SHEET_TAB.lower() in (source + " " + chunk_text).lower()
+            or "global pmf code:" in chunk_text.lower()
+        ):
+            cleaned = re.sub(
+                r"\[RAG\s+\d+\s*\|[^\]]+\]\s*", "", chunk_text, flags=re.I
+            )
+            source_texts.append(cleaned)
+
+    if not source_texts:
+        return ""
+
+    records = []
+    seen = set()
+
+    # ------------------------------------------------------------------
+    # 1. Parse explicit PMF_ROW records.
+    # ------------------------------------------------------------------
+    for text_block in source_texts:
+        for line in text_block.splitlines():
             line = line.strip()
             if not line.startswith("PMF_ROW |"):
                 continue
+
             fields = {}
             for piece in line.split(" | ")[1:]:
                 if ":" not in piece:
                     continue
                 key, value = piece.split(":", 1)
                 fields[key.strip()] = value.strip()
+
             code = fields.get("Global PMF code", "").strip()
             if not code:
                 continue
-            key = code.lower()
-            if key in seen:
+
+            key = re.sub(r"\s+", "", code).lower()
+            if key not in seen:
+                seen.add(key)
+                records.append(fields)
+
+    # ------------------------------------------------------------------
+    # 2. Fallback: parse flattened records even when PMF_ROW was split
+    #    across retrieval chunks.
+    # ------------------------------------------------------------------
+    field_names = [
+        "Global PMF code",
+        "Level",
+        "Indicator",
+        "GAC?",
+        "TEAM",
+        "Team Remarks",
+        "Standard field exists in harmonised tool(s)",
+        "MNHN",
+        "BP",
+        "AWHN",
+        "VAS",
+        "ZINC",
+        "USI",
+        "FF",
+        "NG",
+    ]
+
+    field_pattern = "|".join(re.escape(x) for x in field_names)
+
+    for text_block in source_texts:
+        matches = list(
+            re.finditer(
+                r"Global PMF code:\s*(?P<code>.*?)(?=\s*\|\s*Level:)",
+                text_block,
+                flags=re.I | re.S,
+            )
+        )
+
+        for idx, match in enumerate(matches):
+            end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text_block)
+            block = text_block[match.start():end].strip()
+
+            fields = {}
+            for field_match in re.finditer(
+                rf"(?P<key>{field_pattern}):\s*(?P<value>.*?)(?=\s*\|\s*(?:{field_pattern}):|$)",
+                block,
+                flags=re.I | re.S,
+            ):
+                key = field_match.group("key").strip()
+                value = re.sub(r"\s+", " ", field_match.group("value")).strip(" |")
+                canonical = next(
+                    (x for x in field_names if x.lower() == key.lower()), key
+                )
+                fields[canonical] = value
+
+            code = fields.get("Global PMF code", "").strip()
+            if not code:
                 continue
-            seen.add(key)
-            records.append(fields)
+
+            key = re.sub(r"\s+", "", code).lower()
+            if key not in seen:
+                seen.add(key)
+                records.append(fields)
 
     if not records:
         return ""
 
-    q = str(question or "").lower()
-    # Specific PMF code requested: return only that indicator.
-    code_matches = re.findall(r"\b\d{3,4}(?:\s*\([ivx]+\))?(?:\s*\.\s*\d{1,3})?(?:\s*\d{1,2})?\b", q, re.I)
+    # ------------------------------------------------------------------
+    # 3. Filter for a specific PMF code or indicator wording when the
+    #    question clearly asks for one indicator.
+    # ------------------------------------------------------------------
+    q = str(question or "").strip()
+    qlow = q.lower()
+
+    code_patterns = [
+        r"\b\d{3,4}\s*\([ivx]+\)\s*\d{0,3}\b",
+        r"\b\d{3,4}\s*\([ivx]+\)\b",
+        r"\b\d{3,4}\s*\.\s*\d{1,3}\b",
+        r"\bIMP-\d{2}\b",
+        r"\b\d{4}-\d{2}\b",
+    ]
+
+    requested_codes = []
+    for pattern in code_patterns:
+        requested_codes.extend(re.findall(pattern, q, flags=re.I))
+
     normalized_requested = {
-        re.sub(r"\s+", "", x).lower().rstrip(".") for x in code_matches
+        re.sub(r"\s+", "", x).lower().rstrip(".")
+        for x in requested_codes
     }
+
     if normalized_requested:
         filtered = []
         for rec in records:
-            norm = re.sub(r"\s+", "", rec.get("Global PMF code", "")).lower().rstrip(".")
-            if any(req in norm or norm in req for req in normalized_requested):
+            norm = re.sub(
+                r"\s+", "", str(rec.get("Global PMF code", ""))
+            ).lower().rstrip(".")
+            if any(req == norm or req in norm or norm in req for req in normalized_requested):
                 filtered.append(rec)
         if filtered:
             records = filtered
+    else:
+        # If the question contains a distinctive indicator phrase, return
+        # matching PMF rows instead of dumping the entire matrix.
+        stop_words = {
+            "what", "which", "show", "tell", "about", "from", "source",
+            "pmf", "indicator", "indicators", "global", "rollup", "roll-up",
+            "readiness", "the", "this", "that", "use", "using", "please",
+            "give", "me", "for", "and", "with", "is", "are", "of", "in",
+        }
+        q_words = {
+            w for w in re.findall(r"[a-z0-9]+", qlow)
+            if len(w) >= 4 and w not in stop_words
+        }
+
+        if q_words:
+            scored = []
+            for rec in records:
+                indicator = str(rec.get("Indicator", "")).lower()
+                words = set(re.findall(r"[a-z0-9]+", indicator))
+                overlap = len(q_words & words)
+                if overlap:
+                    scored.append((overlap, rec))
+
+            if scored:
+                max_score = max(score for score, _ in scored)
+                if max_score >= 2:
+                    records = [rec for score, rec in scored if score == max_score]
 
     columns = [
-        "Global PMF code", "Level", "Indicator", "GAC?", "TEAM", "Team Remarks",
-        "Standard field exists in harmonised tool(s)", "MNHN", "BP", "AWHN", "VAS",
-        "ZINC", "USI", "FF", "NG",
+        "Global PMF code",
+        "Level",
+        "Indicator",
+        "GAC?",
+        "TEAM",
+        "Team Remarks",
+        "Standard field exists in harmonised tool(s)",
+        "MNHN",
+        "BP",
+        "AWHN",
+        "VAS",
+        "ZINC",
+        "USI",
+        "FF",
+        "NG",
     ]
+
     lines = [
         "### ISG2 Global PMF — Global Rollup Matrix",
         "",
         "| " + " | ".join(columns) + " |",
         "|" + "|".join(["---"] * len(columns)) + "|",
     ]
+
     for rec in records:
         values = []
         for col in columns:
             value = str(rec.get(col, "")).strip()
-            value = value.replace("|", "\\|").replace("\n", " ")
+            value = re.sub(r"\s+", " ", value)
+            value = value.replace("|", r"\|").replace("\n", " ")
             values.append(value)
         lines.append("| " + " | ".join(values) + " |")
 
@@ -9753,8 +9896,8 @@ def _chat_pmf_rollup_table(question, rag):
         "**Source:** DANIP Internal Google Sheet — `Global_Rollup_Matrix`.",
         "**Source role:** Primary PMF indicator source.",
     ])
-    return "\n".join(lines)
 
+    return "\n".join(lines)
 
 def _chat_compendium_table(question, rag):
     """Render retrieved ISG compendium material as a readable Markdown table."""
