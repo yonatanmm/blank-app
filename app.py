@@ -9410,6 +9410,94 @@ def _rag_terms(text):
     return set(re.findall(r"[a-z0-9]{2,}", str(text or "").lower()))
 
 
+
+
+def _chat_requested_concepts(question):
+    """Extract high-value concepts that must be present in an Internal KM match.
+
+    This prevents semantic retrieval from accepting a merely related indicator,
+    such as ANC attendance, when the user explicitly asks about MMS.
+    """
+    q = _chat_normalize_text(question)
+    concepts = set()
+    concept_groups = {
+        "mms": ("mms", "multiple micronutrient", "multiple micronutrient supplementation", "micronutrient supplement"),
+        "wifa": ("wifa", "iron folic", "ifa", "iron-folic"),
+        "vas": ("vas", "vitamin a", "vitamin a supplementation"),
+        "zinc": ("zinc",),
+        "anc": ("anc", "antenatal", "antenatal care", "pregnancy care"),
+        "pregnant": ("pregnant", "pregnancy", "pregnant women", "pw "),
+        "newborn": ("newborn", "neonate", "neonatal"),
+        "children": ("children", "child", "under five", "u5"),
+        "fortified_food": ("fortified food", "fortified products", "fortification"),
+    }
+    for concept, phrases in concept_groups.items():
+        if any(p in q for p in phrases):
+            concepts.add(concept)
+    return concepts
+
+
+def _chat_compendium_concept_match(question, text):
+    """Validate that a retrieved Compendium passage actually represents the
+    requested indicator concept. A related pregnancy/MNHN indicator is not enough
+    for an MMS request.
+    """
+    concepts = _chat_requested_concepts(question)
+    t = _chat_normalize_text(text)
+    if not t:
+        return False
+    if not concepts:
+        return True
+
+    # Strong concepts are mandatory when explicitly requested.
+    if "mms" in concepts and not any(x in t for x in (
+        "mms", "multiple micronutrient", "multiple micronutrient supplementation"
+    )):
+        return False
+    if "wifa" in concepts and not any(x in t for x in ("wifa", "iron folic", "ifa")):
+        return False
+    if "vas" in concepts and not any(x in t for x in ("vas", "vitamin a")):
+        return False
+    if "zinc" in concepts and "zinc" not in t:
+        return False
+    if "fortified_food" in concepts and not any(x in t for x in ("fortified food", "fortified products", "fortification")):
+        return False
+
+    # Pregnancy is a contextual requirement when explicitly requested.
+    if "pregnant" in concepts and not any(x in t for x in ("pregnant", "pregnancy")):
+        return False
+
+    return True
+
+
+def _chat_filter_internal_km_matches(question, rag):
+    """Filter Internal KM retrieval to concept-valid passages only.
+
+    This is deliberately strict: when the question names MMS, a passage about
+    ANC attendance alone must not be accepted as the DANIP definition.
+    """
+    if not isinstance(rag, dict):
+        return rag
+    chunks = rag.get("chunks") or []
+    if not chunks:
+        return rag
+    concepts = _chat_requested_concepts(question)
+    if not concepts:
+        return rag
+
+    valid = [c for c in chunks if _chat_compendium_concept_match(question, c.get("text", ""))]
+    out = dict(rag)
+    out["chunks"] = valid
+    out["concepts"] = sorted(concepts)
+    if not valid:
+        warnings = list(out.get("warnings") or [])
+        warnings.append(
+            "No Internal KM passage passed the requested indicator-concept validation. "
+            "A semantically related indicator was intentionally rejected."
+        )
+        out["warnings"] = warnings
+    return out
+
 def retrieve_rag_context(question, indicators=None, top_k=RAG_TOP_K):
     chunks, warnings = _rag_load_knowledge()
     q_terms=_rag_terms(question)
@@ -9417,33 +9505,49 @@ def retrieve_rag_context(question, indicators=None, top_k=RAG_TOP_K):
     q_terms |= extra
     if not chunks:
         return {"chunks":[],"warnings":warnings,"source_name":RAG_SOURCE_NAME}
+
     scored=[]
+    qlow=str(question or "").lower()
+    concept_terms = _chat_requested_concepts(question)
     for c in chunks:
-        terms=_rag_terms(c["text"])
+        chunk_text = str(c.get("text", ""))
+        source_text = str(c.get("source", ""))
+        terms=_rag_terms(chunk_text)
         overlap=len(q_terms & terms)
         exact=0
-        qlow=str(question or "").lower()
-        tlow=c["text"].lower()
-        for phrase in re.findall(r"\b[a-z0-9][a-z0-9 #:%()\-/]{3,80}\b", qlow):
+        for phrase in re.findall(r"\b[a-z0-9][a-z0-9 #:%()\-/]{3,100}\b", qlow):
             phrase=phrase.strip()
-            if len(phrase)>5 and phrase in tlow:
+            if len(phrase)>5 and phrase in chunk_text.lower():
                 exact += 8
-        score=overlap + exact
-        source_text = str(c.get("source", ""))
-        chunk_text = str(c.get("text", ""))
-        # PMF questions should preferentially retrieve the dedicated
-        # Global_Rollup_Matrix worksheet.
+        score = overlap + exact
+
+        # PMF questions should preferentially retrieve the dedicated worksheet.
         if "pmf" in qlow or "rollup" in qlow or "readiness" in qlow or "global_rollup_matrix" in qlow:
             if RAG_GOOGLE_SHEET_TAB.lower() in chunk_text.lower() or RAG_GOOGLE_SHEET_TAB.lower() in source_text.lower():
                 score += 25
+
+        # Concept-aware ranking for Internal KM. Strongly reward the requested
+        # intervention/indicator concept and penalize a missing required concept.
+        if "mms" in concept_terms:
+            if "mms" in chunk_text.lower() or "multiple micronutrient" in chunk_text.lower():
+                score += 80
+            else:
+                score -= 100
+        if "pregnant" in concept_terms:
+            if "pregnant" in chunk_text.lower() or "pregnancy" in chunk_text.lower():
+                score += 25
+
         if score>0:
             scored.append((score,c))
-    scored.sort(key=lambda x:x[0], reverse=True)
-    return {
+
+    scored.sort(key=lambda x: (-x[0], str(x[1].get("source", ""))))
+    result = {
         "chunks":[c for _,c in scored[:top_k]],
         "warnings":warnings,
         "source_name":RAG_SOURCE_NAME,
+        "concepts":sorted(concept_terms),
     }
+    return result
 
 
 def _rag_context_text(result):
@@ -9545,8 +9649,20 @@ def _chat_internal_km_requested(question):
         "internal source",
         "internal rag",
         "compandium",
+        # PMF is part of the same Internal KM layer.
+        "pmf",
+        "global pmf",
+        "global_rollup_matrix",
+        "global rollup matrix",
+        "rollup matrix",
+        "roll-up matrix",
+        "pmf indicator",
+        "pmf indicators",
+        "pmf source",
+        "source from pmf",
+        "according to pmf",
     )
-    return any(p in q for p in phrases) or "compendium" in q or "compandium" in q
+    return any(p in q for p in phrases) or "compendium" in q or "compandium" in q or "global_rollup_matrix" in q or "global rollup matrix" in q
 
 
 def _chat_danip_current_analysis_intent(question, df):
@@ -10228,6 +10344,20 @@ def _chat_add_danip_interpretation(result, question, current_df, chart_plan=None
 
 
 def _chat_rag_knowledge_answer(question, rag):
+    # Never answer an explicitly concept-specific Internal KM request from a
+    # merely related passage. This prevents, for example, ANC attendance (1300c.03)
+    # from being presented as the DANIP counterpart to an MMS indicator.
+    if _chat_requested_concepts(question) and not (rag or {}).get("chunks"):
+        return {
+            "status": "INTERNAL_KM_NO_VALID_MATCH",
+            "source": "ISG_INDICATOR_COMPENDIUM",
+            "text": (
+                "| Result | Internal KM finding |\n|---|---|\n"
+                "| Match status | No validated Compendium indicator matched the requested concept. |\n"
+                "| Action | The semantically related indicator was rejected rather than presented as a match. |"
+            ),
+        }
+
     # PMF / roll-up / readiness questions use the actual Global_Rollup_Matrix
     # column structure rather than exposing raw retrieval chunks.
     qlow = str(question or "").lower()
@@ -10401,11 +10531,15 @@ def ask_analysis_chatbot(
     # external-research detector. This is the highest-priority user source request.
     if internal_km_requested:
         explicit_external_request = False
+        internal_indicators = _chat_indicator_candidates(
+            question, current_df, chart_plan=chart_plan, limit=5
+        ) if isinstance(current_df, pd.DataFrame) and not current_df.empty else []
         rag=retrieve_rag_context(
             question,
-            indicators=[],
+            indicators=internal_indicators,
             top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K),
         )
+        rag=_chat_filter_internal_km_matches(question, rag)
         result=_chat_rag_knowledge_answer(question,rag)
         if result:
             result["source"]="ISG_INDICATOR_COMPENDIUM"
