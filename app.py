@@ -10426,10 +10426,20 @@ def render_analysis_chatbot(
         key="analysis_chat_input",
     )
 
-    clear_chat_clicked = st.button(
+    def _clear_analysis_chat():
+        # IMPORTANT: clear ONLY chatbot state. Do not rerun from inside the
+        # chatbot. The button click itself triggers Streamlit's normal rerun,
+        # allowing the dashboard to continue and reuse its cached dataset.
+        st.session_state["analysis_chat_messages"] = []
+        st.session_state["analysis_chat_last_result"] = None
+        st.session_state["analysis_chat_external_status"] = None
+        st.session_state["analysis_chat_new_question_mode"] = True
+
+    st.button(
         "🧹 Clear Chat",
         key="analysis_chat_clear_icon",
         help="Clear only chatbot conversation. DHIS2/API data and dashboard analysis will remain unchanged.",
+        on_click=_clear_analysis_chat,
     )
 
     st.markdown("""
@@ -10440,18 +10450,18 @@ def render_analysis_chatbot(
         z-index: 1002 !important;
         bottom: 17px !important;
         left: calc(50% + 10px) !important;
-        width: 96px !important;
+        width: 38px !important;
         height: 38px !important;
         margin: 0 !important;
         padding: 0 !important;
       }
 
       div.st-key-analysis_chat_clear_icon button {
-        width: 96px !important;
+        width: 110px !important;
         height: 38px !important;
-        min-width: 96px !important;
+        min-width: 110px !important;
         min-height: 38px !important;
-        padding: 0 !important;
+        padding: 0 10px !important;
         border-radius: 9px !important;
         border: 1px solid #cbd5e1 !important;
         background: #ffffff !important;
@@ -10478,24 +10488,15 @@ def render_analysis_chatbot(
           bottom: 15px !important;
         }
         div.st-key-analysis_chat_clear_icon button {
-          width: 88px !important;
+          width: 96px !important;
           height: 34px !important;
-          min-width: 88px !important;
+          min-width: 96px !important;
           min-height: 34px !important;
           border-radius: 8px !important;
         }
       }
     </style>
     """, unsafe_allow_html=True)
-
-    if clear_chat_clicked:
-        st.session_state["analysis_chat_messages"] = []
-        st.session_state["analysis_chat_last_result"] = None
-        st.session_state["analysis_chat_external_status"] = None
-        st.session_state["analysis_chat_new_question_mode"] = True
-        # Do NOT clear nexus_chat_df, nexus_chat_source_url, dashboard data,
-        # loaded API results, or other application/session state.
-        st.rerun()
 
     if not question:
         return
