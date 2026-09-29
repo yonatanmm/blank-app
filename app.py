@@ -10427,9 +10427,9 @@ def render_analysis_chatbot(
     )
 
     clear_chat_clicked = st.button(
-        "🧹",
+        "🧹 Clear Chat",
         key="analysis_chat_clear_icon",
-        help="Clear only chatbot chat. DHIS2/API data and dashboard analysis will remain unchanged.",
+        help="Clear only chatbot conversation. DHIS2/API data and dashboard analysis will remain unchanged.",
     )
 
     st.markdown("""
@@ -10440,16 +10440,16 @@ def render_analysis_chatbot(
         z-index: 1002 !important;
         bottom: 17px !important;
         left: calc(50% + 10px) !important;
-        width: 38px !important;
+        width: 96px !important;
         height: 38px !important;
         margin: 0 !important;
         padding: 0 !important;
       }
 
       div.st-key-analysis_chat_clear_icon button {
-        width: 38px !important;
+        width: 96px !important;
         height: 38px !important;
-        min-width: 38px !important;
+        min-width: 96px !important;
         min-height: 38px !important;
         padding: 0 !important;
         border-radius: 9px !important;
@@ -10478,9 +10478,9 @@ def render_analysis_chatbot(
           bottom: 15px !important;
         }
         div.st-key-analysis_chat_clear_icon button {
-          width: 34px !important;
+          width: 88px !important;
           height: 34px !important;
-          min-width: 34px !important;
+          min-width: 88px !important;
           min-height: 34px !important;
           border-radius: 8px !important;
         }
