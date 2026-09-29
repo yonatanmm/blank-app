@@ -9532,14 +9532,21 @@ def _chat_internal_km_requested(question):
         "using compendium",
         "compendium source",
         "compendium reference",
+        "source from compendium",
+        "source from the compendium",
+        "according to the compendium",
+        "use the compendium",
         "internal km",
         "internal knowledge",
         "knowledge management",
         "official internal definition",
         "internal indicator definition",
         "internal reference",
+        "internal source",
+        "internal rag",
+        "compandium",
     )
-    return any(p in q for p in phrases)
+    return any(p in q for p in phrases) or "compendium" in q or "compandium" in q
 
 
 def _chat_danip_current_analysis_intent(question, df):
@@ -10387,6 +10394,26 @@ def ask_analysis_chatbot(
     current_intent=_chat_requires_current_data(question)
     explicit_external_request = _chat_external_research_requested(question)
     internal_km_requested = _chat_internal_km_requested(question)
+
+    # HARD SOURCE LOCK: when the user names the Indicator Compendium/internal KM,
+    # the requested source of context is internal. External RAG/web research is
+    # forbidden for this turn, even if another keyword accidentally matches the
+    # external-research detector. This is the highest-priority user source request.
+    if internal_km_requested:
+        explicit_external_request = False
+        rag=retrieve_rag_context(
+            question,
+            indicators=[],
+            top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K),
+        )
+        result=_chat_rag_knowledge_answer(question,rag)
+        if result:
+            result["source"]="ISG_INDICATOR_COMPENDIUM"
+            result["external_status"]="NOT_REQUESTED"
+            result["external_label"]=""
+            result["external_sources"]=[]
+            result["rag_warnings"]=rag.get("warnings",[])
+            return result
 
     if rag_intent and not explicit_external_request and not mixed_intent and not (current_intent and not any(x in question.lower() for x in ("compendium","official definition","indicator definition","numerator","denominator","formula"))):
         rag=retrieve_rag_context(question, indicators=[], top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K))
