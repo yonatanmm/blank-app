@@ -9513,6 +9513,35 @@ def _chat_result_area_table(question, rag=None):
     return "\n".join(lines)
 
 
+def _chat_internal_km_requested(question):
+    """Return True when the user explicitly asks for internal KM/compendium context.
+
+    When this is true, the ISG Indicator Compendium / internal KM is the required
+    context source. External web research must not be invoked unless the user also
+    explicitly asks for an external source or comparison.
+    """
+    q = str(question or "").lower().strip()
+    if not q:
+        return False
+    phrases = (
+        "indicator compendium",
+        "the compendium",
+        "from compendium",
+        "according to compendium",
+        "use compendium",
+        "using compendium",
+        "compendium source",
+        "compendium reference",
+        "internal km",
+        "internal knowledge",
+        "knowledge management",
+        "official internal definition",
+        "internal indicator definition",
+        "internal reference",
+    )
+    return any(p in q for p in phrases)
+
+
 def _chat_danip_current_analysis_intent(question, df):
     """Return True when the user question can be answered from the loaded DANIP dataset.
 
@@ -10357,6 +10386,7 @@ def ask_analysis_chatbot(
     mixed_intent=_chat_mixed_rag_analysis_intent(question)
     current_intent=_chat_requires_current_data(question)
     explicit_external_request = _chat_external_research_requested(question)
+    internal_km_requested = _chat_internal_km_requested(question)
 
     if rag_intent and not explicit_external_request and not mixed_intent and not (current_intent and not any(x in question.lower() for x in ("compendium","official definition","indicator definition","numerator","denominator","formula"))):
         rag=retrieve_rag_context(question, indicators=[], top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K))
@@ -10461,7 +10491,10 @@ def ask_analysis_chatbot(
         "text":"No external context retrieved."
     }
     # Level 3 is mandatory whenever the user explicitly names an external source.
-    if danip_analysis_question or explicit_external_request:
+    # IMPORTANT: an explicit internal-KM/compendium request is INTERNAL ONLY.
+    # Do not call external RAG/web research unless the user separately asks for
+    # an external comparison/source/report.
+    if explicit_external_request and not internal_km_requested:
         try:
             external_context=research_mne_external_context(
                 question=question,
@@ -10514,6 +10547,12 @@ the DANIP result, include a clearly labelled **External comparison** section.
     recent_history=[{"role":x.get("role"),"content":x.get("content")} for x in history[-6:] if isinstance(x,dict)]
     rag_text=_rag_context_text(rag_context)
     rag_block=rag_text if rag_text else "No compendium passage was retrieved for this question. Do not invent official definitions."
+    internal_km_instruction = (
+        "INTERNAL KM ONLY: The user explicitly requested the Indicator Compendium/internal KM. "
+        "Use the retrieved internal KM as the contextual reference. Ignore external research unless "
+        "the user explicitly asks for an external comparison/source."
+        if internal_km_requested else ""
+    )
 
     prompt=f"""
 You are the DANIP-NI M&E Conversational Assistant.
@@ -10525,6 +10564,9 @@ RESEARCH ARCHITECTURE — STRICT THREE-LEVEL SEARCH HIERARCHY:
 3. EXTERNAL AUTHORITATIVE SOURCES — THIRD: use UNICEF, WHO, UN and other authoritative sources for contextual validation or an explicitly requested comparison.
 
 The search order is DANIP -> Internal KM -> External. Never allow a lower-priority source to replace a higher-priority DANIP observation.
+
+INTERNAL KM SOURCE CONTROL:
+If the user asks for the Indicator Compendium, PMF, internal KM, internal knowledge, or an internal reference, use ONLY the retrieved internal KM/compendium content for the contextual explanation. Do not invoke, display, cite, summarize, or rely on external RAG/web research unless the user separately and explicitly requests an external source or comparison.
 
 CRITICAL OUTPUT RULE:
 The final answer for a DANIP analytical question must be presented as DANIP analytics.
@@ -10571,6 +10613,7 @@ EXTERNAL RESEARCH CONTEXT (LEVEL 3):
 EXTERNAL SEARCH STATUS: {external_context.get("status", "UNKNOWN")}
 EXTERNAL SEARCH ENGINE: {external_context.get("engine", "not available") or "not available"}
 EXTERNAL SOURCE URLS: {safe_json_dumps(external_context.get("sources", []))}
+{internal_km_instruction}
 {external_comparison_instruction}
 
 EXTERNAL COMPARISON OUTPUT RULE:
