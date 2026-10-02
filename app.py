@@ -3070,20 +3070,85 @@ def find_period_column(df):
     return None
 
 
+# ============================================================
+# DATA QUALITY — ORGANISATION NAME IS THE PRIMARY OU FIELD
+# ============================================================
+# These metadata fields are useful for exports/joins, but they are NOT
+# considered data-quality dimensions. Data quality analysis should focus on
+# the human-readable organisation name and the actual reporting data.
+DQ_IGNORED_ORG_METADATA_NAMES = {
+    "organisationunitcode",
+    "organizationunitcode",
+    "organisationunitdescription",
+    "organizationunitdescription",
+    "organisationunitdesc",
+    "organizationunitdesc",
+}
+
+
+def _normalise_column_name(value):
+    return re.sub(r"[^a-z0-9]+", "", str(value).strip().lower())
+
+
+def is_dq_ignored_org_metadata_column(column):
+    """Return True for OU code/description metadata excluded from DQ checks."""
+    return _normalise_column_name(column) in DQ_IGNORED_ORG_METADATA_NAMES
+
+
+def get_dq_analysis_dataframe(df):
+    """Return the dataframe used by the DQ engine.
+
+    organisationunitcode and organisationunitdescription remain available in
+    the source dataframe for other application features, but they are excluded
+    from data-quality calculations.
+    """
+    if not isinstance(df, pd.DataFrame):
+        return df
+
+    excluded = [
+        column for column in df.columns
+        if is_dq_ignored_org_metadata_column(column)
+    ]
+    return df.drop(columns=excluded, errors="ignore")
+
+
 def find_ou_column(df):
+    """Find the organisation field used by data-quality analysis.
+
+    Priority:
+      1. organisationname / organizationname
+      2. explicit OU name fields
+      3. other OU fields, excluding OU code/description metadata
+    """
+    # Human-readable organisation name is the preferred DQ OU identity.
+    preferred_names = {
+        "organisationname",
+        "organizationname",
+        "organisationunitname",
+        "organizationunitname",
+        "orgunitname",
+    }
+
+    for column in df.columns:
+        normalised = _normalise_column_name(column)
+        if normalised in preferred_names:
+            return column
+
+    # Fallback only when no organisation name field exists.
     for column in df.columns:
         name = str(column).strip().lower()
+        if is_dq_ignored_org_metadata_column(column):
+            continue
         if (
             name in {"ou", "orgunit", "organisation", "organization"}
-            or "organisation unit" in name
-            or "organization unit" in name
-            or "organisationunit" in name
-            or "organizationunit" in name
-            or "org unit" in name
-            or "orgunit" in name
-            or "facility" in name
+            or "organisation unit name" in name
+            or "organization unit name" in name
+            or "org unit name" in name
+            or "facility name" in name
+            or name == "facility"
         ):
             return column
+
     return None
 
 
@@ -3129,8 +3194,13 @@ def build_quality_matrix(df):
     """
     issues = []
     matrix = []
-    n = len(df)
-    numeric_df, numeric_columns = convert_numeric_columns(df)
+
+    # Keep the original dataframe untouched, but exclude
+    # organisationunitcode / organisationunitdescription from DQ analysis.
+    dq_df = get_dq_analysis_dataframe(df)
+
+    n = len(dq_df)
+    numeric_df, numeric_columns = convert_numeric_columns(dq_df)
 
     def add_matrix(domain, metric, value, status, detail, priority="LOW"):
         matrix.append({
@@ -3143,16 +3213,16 @@ def build_quality_matrix(df):
         })
 
     # ---------------- COMPLETENESS ----------------
-    missing_total = int(df.isna().sum().sum())
-    total_cells = max(n * max(len(df.columns), 1), 1)
+    missing_total = int(dq_df.isna().sum().sum())
+    total_cells = max(n * max(len(dq_df.columns), 1), 1)
     missing_pct = missing_total / total_cells * 100
     comp_status = "PASS" if missing_total == 0 else "REVIEW" if missing_pct < 20 else "FAIL"
     comp_priority = "LOW" if missing_total == 0 else _priority_from_pct(missing_pct)
     add_matrix("Completeness", "Missing cells", f"{missing_total:,}", comp_status,
                f"{missing_pct:.2f}% of all cells are missing.", comp_priority)
 
-    for column in df.columns:
-        count = int(df[column].isna().sum())
+    for column in dq_df.columns:
+        count = int(dq_df[column].isna().sum())
         if count:
             pct = count / n * 100 if n else 0
             priority = _priority_from_pct(pct)
@@ -3163,7 +3233,7 @@ def build_quality_matrix(df):
             ))
 
     # ---------------- UNIQUENESS ----------------
-    duplicate_rows = int(df.duplicated(keep=False).sum())
+    duplicate_rows = int(dq_df.duplicated(keep=False).sum())
     dup_pct = duplicate_rows / n * 100 if n else 0
     add_matrix("Uniqueness", "Duplicate rows", f"{duplicate_rows:,}",
                "PASS" if duplicate_rows == 0 else "FAIL",
@@ -3177,15 +3247,15 @@ def build_quality_matrix(df):
         ))
 
     # Natural-key duplicates: OU + period + indicator columns where available.
-    ou = find_ou_column(df)
-    period = find_period_column(df)
+    ou = find_ou_column(dq_df)
+    period = find_period_column(dq_df)
     indicator_cols = find_indicator_like_columns(df)
     key_cols = []
     if ou: key_cols.append(ou)
     if period: key_cols.append(period)
     if len(indicator_cols) == 1: key_cols.append(indicator_cols[0])
     if len(key_cols) >= 2:
-        keyed = df[key_cols].astype("string")
+        keyed = dq_df[key_cols].astype("string")
         natural_dup = int(keyed.duplicated(keep=False).sum())
         add_matrix("Uniqueness", "DHIS2 natural-key duplicates", f"{natural_dup:,}",
                    "PASS" if natural_dup == 0 else "REVIEW",
@@ -3313,7 +3383,7 @@ def build_quality_matrix(df):
     future_periods = 0
     period_gaps = 0
     if period:
-        p = df[period].astype("string")
+        p = dq_df[period].astype("string")
         parsed = pd.to_datetime(p, errors="coerce")
         if parsed.notna().sum() == 0:
             # DHIS2 YYYYMM/quarter codes are handled separately.
@@ -3347,8 +3417,8 @@ def build_quality_matrix(df):
 
     # ---------------- ORGANISATION UNIT ----------------
     if ou:
-        missing_ou = int(df[ou].isna().sum())
-        blank_ou = int((df[ou].astype("string").str.strip() == "").sum())
+        missing_ou = int(dq_df[ou].isna().sum())
+        blank_ou = int((dq_df[ou].astype("string").str.strip() == "").sum())
         ou_problem = missing_ou + blank_ou
         add_matrix("Integrity", "Organisation unit completeness", f"{ou_problem:,}",
                    "PASS" if ou_problem == 0 else "FAIL",
@@ -3372,8 +3442,8 @@ def build_quality_matrix(df):
     if numerator_cols and denominator_cols:
         pairs = min(len(numerator_cols), len(denominator_cols))
         for num_col, den_col in zip(numerator_cols[:pairs], denominator_cols[:pairs]):
-            num = pd.to_numeric(df[num_col], errors="coerce")
-            den = pd.to_numeric(df[den_col], errors="coerce")
+            num = pd.to_numeric(dq_df[num_col], errors="coerce")
+            den = pd.to_numeric(dq_df[den_col], errors="coerce")
             invalid_den = int((den <= 0).sum())
             num_gt_den = int(((num > den) & den.notna() & num.notna() & (den > 0)).sum())
             ratio_issues += num_gt_den
@@ -3418,14 +3488,14 @@ def build_quality_matrix(df):
     # Quality score: weighted issue prevalence, capped 0-100.
     weights = {"HIGH": 5, "MEDIUM": 2, "LOW": 0.5}
     penalty = sum(weights.get(i.get("Priority"), 0) for i in issues)
-    denominator = max(len(df.columns) * 2 + len(df) / 1000, 1)
+    denominator = max(len(dq_df.columns) * 2 + len(df) / 1000, 1)
     score = max(0.0, min(100.0, 100 - (penalty / denominator * 100)))
 
     summary = {
         "score": round(score, 1),
         "rating": "Excellent" if score >= 90 else "Good" if score >= 75 else "Needs review" if score >= 50 else "Poor",
         "rows": n,
-        "columns": len(df.columns),
+        "columns": len(dq_df.columns),
         "issues": len(issues),
         "matrix": matrix,
     }
@@ -3448,7 +3518,7 @@ def build_indicator_quality_matrix(df, indicator):
             "score": 0.0,
             "rating": "Unavailable",
             "rows": len(df),
-            "columns": len(df.columns),
+            "columns": len(dq_df.columns),
             "issues": 0,
             "indicator": indicator,
             "matrix": [],
@@ -3822,8 +3892,8 @@ def build_indicator_quality_matrix(df, indicator):
 
     if pair:
         num_col, den_col = pair
-        num = pd.to_numeric(df[num_col], errors="coerce")
-        den = pd.to_numeric(df[den_col], errors="coerce")
+        num = pd.to_numeric(dq_df[num_col], errors="coerce")
+        den = pd.to_numeric(dq_df[den_col], errors="coerce")
         invalid_den = int((den <= 0).sum())
         num_gt_den = int(
             ((num > den) & den.notna() & num.notna() & (den > 0)).sum()
@@ -4691,6 +4761,12 @@ def render_quality_dashboard(
             "All implemented DHIS2 quality checks passed for the returned dataset."
         )
 
+    st.info(
+        "Data quality analysis is based on organisation name and reporting data. "
+        "organisationunitcode and organisationunitdescription are excluded from "
+        "DQ scoring, completeness, validity, plausibility and issue detection."
+    )
+
     with st.expander("📚 Quality methodology", expanded=False):
         st.markdown("""
         **DHIS2 alignment** — The assessment follows the DHIS2 data-quality approach by
@@ -4709,7 +4785,9 @@ def render_quality_dashboard(
 
         **Timeliness** — future reporting periods and period parseability.
 
-        **Integrity** — organisation-unit availability for geographic attribution.
+        **Integrity** — organisation name availability for geographic attribution.
+        `organisationunitcode` and `organisationunitdescription` are metadata fields
+        and are intentionally excluded from data-quality scoring and issue detection.
 
         **Plausibility** — percentage/rate limits, zero concentration and statistical
         outlier screening.
