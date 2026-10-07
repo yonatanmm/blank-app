@@ -2809,30 +2809,73 @@ def get_csv_from_analytics_url(url):
     return None
 
 
-def read_xls_response(response):
+def _read_dhis2_excel_response(response, engine):
+    """Read a DHIS2 Analytics workbook and detect the real header row.
+
+    Some DHIS2 Analytics Excel exports contain a blank/formatting row before
+    the actual column-name row.  In that case pandas otherwise creates
+    ``Unnamed: 0``, ``Unnamed: 1`` ... columns and treats the real headers as
+    the first data record.  We detect that layout and use the second row as
+    the header while leaving normal one-row-header workbooks unchanged.
+    """
+    content = BytesIO(response.content)
+
     try:
-        return pd.read_excel(
-            BytesIO(response.content),
-            engine="xlrd",
+        # Read a small raw preview first so we can determine whether the first
+        # spreadsheet row is only a blank/formatting row.
+        preview = pd.read_excel(
+            content,
+            engine=engine,
+            header=None,
+            nrows=5,
         )
+
+        if preview.empty:
+            return pd.DataFrame()
+
+        first_row = preview.iloc[0]
+        first_values = [
+            str(value).strip()
+            for value in first_row.tolist()
+            if pd.notna(value) and str(value).strip()
+        ]
+
+        second_row_values = []
+        if len(preview.index) > 1:
+            second_row_values = [
+                str(value).strip()
+                for value in preview.iloc[1].tolist()
+                if pd.notna(value) and str(value).strip()
+            ]
+
+        # If the first row is blank (or contains fewer than two meaningful
+        # cells) and the second row contains the real field names, use row 2
+        # (Excel row 2 / pandas header=1) as the dataframe header.
+        use_second_row = (
+            len(first_values) <= 1
+            and len(second_row_values) >= 2
+        )
+
+        content.seek(0)
+        return pd.read_excel(
+            content,
+            engine=engine,
+            header=1 if use_second_row else 0,
+        )
+
     except Exception as e:
         raise Exception(
-            "DHIS2 returned Excel data, but Python could not read the XLS file.\n\n"
+            "DHIS2 returned Excel data, but Python could not read the Excel file.\n\n"
             f"{e}"
         )
+
+
+def read_xls_response(response):
+    return _read_dhis2_excel_response(response, "xlrd")
 
 
 def read_xlsx_response(response):
-    try:
-        return pd.read_excel(
-            BytesIO(response.content),
-            engine="openpyxl",
-        )
-    except Exception as e:
-        raise Exception(
-            "DHIS2 returned Excel data, but Python could not read the XLSX file.\n\n"
-            f"{e}"
-        )
+    return _read_dhis2_excel_response(response, "openpyxl")
 
 
 def read_csv_response(response):
