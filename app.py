@@ -3212,11 +3212,170 @@ def _extract_google_drive_file_id(url):
 
 
 def _project_registry_download_url(url):
-    """Convert a Google Drive sharing URL to a direct download URL."""
+    """Convert common Google Drive / Google Sheets links to export/download URLs."""
+    url = str(url or "").strip()
+    if not url:
+        return ""
+
+    # Google Sheets -> XLSX export. This keeps the registry dynamic while
+    # allowing the user to maintain it directly in Google Sheets.
+    sheet_match = re.search(r"/spreadsheets/d/([A-Za-z0-9_-]+)", url)
+    if sheet_match:
+        file_id = sheet_match.group(1)
+        return f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx"
+
     file_id = _extract_google_drive_file_id(url)
     if file_id:
-        return f"https://drive.google.com/uc?export=download&id={file_id}"
-    return str(url or "").strip()
+        # drive.usercontent is generally more reliable for programmatic
+        # downloads than the interactive Drive sharing page.
+        return f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t"
+
+    return url
+
+
+def _is_excel_bytes(content):
+    """Return True for common XLSX/XLS file signatures."""
+    if not content:
+        return False
+    return content[:4] in (b"PK\x03\x04", b"\xd0\xcf\x11\xe0")
+
+
+def _google_drive_confirmation_url(html_text, original_url):
+    """Extract a Google Drive confirmation/download URL from an HTML response."""
+    text = str(html_text or "")
+    if not text:
+        return ""
+
+    # Google Drive may return a form containing a confirmation token for
+    # files that require a confirmation step before the binary is served.
+    action_match = re.search(r'<form[^>]+action=["\']([^"\']+)["\']', text, flags=re.I)
+    if not action_match:
+        return ""
+
+    action = html.unescape(action_match.group(1)).replace("&amp;", "&")
+    hidden = {}
+    for name, value in re.findall(
+        r'<input[^>]+name=["\']([^"\']+)["\'][^>]+value=["\']([^"\']*)["\']',
+        text,
+        flags=re.I,
+    ):
+        hidden[name] = html.unescape(value)
+
+    if "confirm" not in hidden:
+        token_match = re.search(r'name=["\']confirm["\'][^>]+value=["\']([^"\']+)', text, flags=re.I)
+        if token_match:
+            hidden["confirm"] = html.unescape(token_match.group(1))
+
+    if not hidden.get("confirm") and not action:
+        return ""
+
+    if hidden:
+        separator = "&" if "?" in action else "?"
+        params = "&".join(
+            f"{requests.utils.quote(str(k), safe='')}={requests.utils.quote(str(v), safe='')}"
+            for k, v in hidden.items()
+            if str(k).strip()
+        )
+        return action + (separator + params if params else "")
+
+    return action or original_url
+
+
+def _download_project_registry_bytes(source_url):
+    """Download registry bytes from Excel, Google Drive, or Google Sheets."""
+    source_url = str(source_url or "").strip()
+    if not source_url:
+        raise ValueError("DANIP_PROJECT_REGISTRY_URL is not configured.")
+
+    download_url = _project_registry_download_url(source_url)
+    session = requests.Session()
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/154.0 Safari/537.36 NEXUS-DANIP/1.0"
+        ),
+        "Accept": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,"
+                  "application/vnd.ms-excel,text/csv,text/plain,text/html;q=0.8,*/*;q=0.5",
+    }
+
+    # First attempt: direct source/export URL.
+    response = session.get(
+        download_url,
+        timeout=45,
+        allow_redirects=True,
+        headers=headers,
+    )
+    response.raise_for_status()
+    content = response.content
+    content_type = str(response.headers.get("content-type", "")).lower()
+
+    if _is_excel_bytes(content):
+        return content
+
+    # Google Drive sometimes returns an HTML confirmation page instead of
+    # the workbook. Follow the form action + hidden confirmation parameters.
+    if "text/html" in content_type or content.lstrip().lower().startswith(b"<!doctype html") or b"Google Drive" in content[:5000]:
+        confirmation_url = _google_drive_confirmation_url(response.text, download_url)
+        if confirmation_url and confirmation_url != download_url:
+            confirmed = session.get(
+                confirmation_url,
+                timeout=45,
+                allow_redirects=True,
+                headers=headers,
+            )
+            confirmed.raise_for_status()
+            if _is_excel_bytes(confirmed.content):
+                return confirmed.content
+
+    # Fallback for Google Drive file IDs using the alternate download host.
+    file_id = _extract_google_drive_file_id(source_url)
+    if file_id:
+        fallback_urls = [
+            f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t",
+            f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t",
+        ]
+        for fallback_url in fallback_urls:
+            if fallback_url == download_url:
+                continue
+            try:
+                fallback = session.get(
+                    fallback_url,
+                    timeout=45,
+                    allow_redirects=True,
+                    headers=headers,
+                )
+                fallback.raise_for_status()
+                if _is_excel_bytes(fallback.content):
+                    return fallback.content
+                if "text/html" in str(fallback.headers.get("content-type", "")).lower():
+                    confirmation_url = _google_drive_confirmation_url(fallback.text, fallback_url)
+                    if confirmation_url and confirmation_url != fallback_url:
+                        confirmed = session.get(
+                            confirmation_url,
+                            timeout=45,
+                            allow_redirects=True,
+                            headers=headers,
+                        )
+                        confirmed.raise_for_status()
+                        if _is_excel_bytes(confirmed.content):
+                            return confirmed.content
+            except Exception:
+                continue
+
+    # Keep a useful diagnostic for non-Excel sources. Do not dump the HTML.
+    preview = re.sub(r"\s+", " ", response.text[:240]) if "text/html" in content_type else ""
+    if preview:
+        raise ValueError(
+            "The registry URL returned an HTML page instead of an Excel workbook. "
+            "For Google Drive, set the file to 'Anyone with the link' / Viewer access, "
+            "or use a Google Sheets link or direct .xlsx URL."
+        )
+
+    raise ValueError(
+        "The registry source did not return an Excel workbook (.xlsx/.xls). "
+        f"Received content type: {content_type or 'unknown'}."
+    )
 
 
 def _clean_registry_api_url(value):
@@ -3255,33 +3414,52 @@ def load_danip_project_registry():
     if not source_url:
         raise ValueError("DANIP_PROJECT_REGISTRY_URL is not configured.")
 
-    download_url = _project_registry_download_url(source_url)
-    response = requests.get(
-        download_url,
-        timeout=45,
-        allow_redirects=True,
-        headers={"User-Agent": "NEXUS-DANIP/1.0"},
-    )
-    response.raise_for_status()
-
-    content = response.content
-    content_type = str(response.headers.get("content-type", "")).lower()
-
-    # Google Drive may return an HTML confirmation page for large files.
-    if "text/html" in content_type and not content[:4] in (b"PK\x03\x04", b"\xd0\xcf\x11\xe0"):
-        raise ValueError(
-            "The DANIP Project Registry could not be downloaded as an Excel file. "
-            "Make sure the Google Drive file is shared with access to anyone who has the link."
-        )
+    content = _download_project_registry_bytes(source_url)
 
     # Read the first worksheet by default. The registry is a configuration
-    # table, not the reporting dataset itself.
+    # table, not the reporting dataset itself. Use an explicit engine for XLSX
+    # so the loader does not depend on pandas' automatic engine detection.
     try:
-        registry = pd.read_excel(BytesIO(content), sheet_name=0)
+        if content[:4] == b"PK\x03\x04":
+            # Modern .xlsx workbook. openpyxl is the supported reader.
+            registry = pd.read_excel(
+                BytesIO(content),
+                sheet_name=0,
+                engine="openpyxl",
+            )
+        elif content[:4] == b"\xd0\xcf\x11\xe0":
+            # Legacy .xls workbook. This requires xlrd 2.x.
+            try:
+                registry = pd.read_excel(
+                    BytesIO(content),
+                    sheet_name=0,
+                    engine="xlrd",
+                )
+            except ImportError as exc:
+                raise ValueError(
+                    "The DANIP Project Registry is a legacy .xls workbook, but "
+                    "the xlrd package is not installed. Convert the registry to "
+                    ".xlsx, or add xlrd>=2.0.1 to the application's dependencies."
+                ) from exc
+        else:
+            # Last-resort support for a registry published as CSV/text. This is
+            # useful when Google Drive/Sheets exports the table as CSV instead
+            # of an Excel workbook.
+            try:
+                registry = pd.read_csv(BytesIO(content))
+            except Exception as csv_exc:
+                raise ValueError(
+                    "The registry download is neither a readable .xlsx/.xls workbook "
+                    "nor a CSV table. Check the registry sharing/download URL."
+                ) from csv_exc
+    except ValueError:
+        raise
     except Exception as exc:
+        # Preserve the real reader error so the deployed app reports the actual
+        # workbook problem instead of hiding it behind a generic Excel message.
         raise ValueError(
-            "Unable to read the DANIP Project Registry as Excel. "
-            "Use .xlsx/.xls format and keep the first sheet as the registry table."
+            "Unable to read the DANIP Project Registry workbook. "
+            f"Reader error: {str(exc)[:500]}"
         ) from exc
 
     registry = normalize_dataframe(registry)
