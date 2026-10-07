@@ -3191,9 +3191,12 @@ def get_dhis2_automatic_analytics_data(period="2026"):
 # retrieves that project's API URL. The AI receives project/program
 # and country metadata through the normalized master dataset.
 
+# Google Sheets is the live NEXUS Project/Program Registry.
+# Keep this source dynamic: adding a new row to the Sheet makes the
+# project/API available after "Reload Projects" without changing Python code.
 DANIP_PROJECT_REGISTRY_URL = os.getenv(
     "DANIP_PROJECT_REGISTRY_URL",
-    "https://drive.google.com/file/d/1pFckrpY3oXnMPUvl7cSqEGK6UxK8bfOB/view?usp=sharing",
+    "https://docs.google.com/spreadsheets/d/1fttFFXUJOciGasfXsoESXVsFmUXarA2r/edit?usp=sharing",
 )
 
 
