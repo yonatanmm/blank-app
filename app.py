@@ -2763,16 +2763,48 @@ def change_extension(url, new_extension):
 
 
 def get_csv_from_analytics_url(url):
-    csv_url = change_extension(url, "csv")
+    """Request the original DHIS2 Analytics URL as CSV.
 
+    Do not rewrite /api/analytics into /api/analytics.csv. DHIS2
+    Analytics is a query endpoint; the response format is negotiated
+    through the request headers/query parameters.
+    """
     response = _dhis2_session().get(
-        csv_url,
-        headers={"Accept": "application/csv"},
+        url,
+        headers={
+            "Accept": "text/csv,application/csv;q=0.9,*/*;q=0.1",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        },
         timeout=180,
     )
 
-    if response.status_code == 200:
-        return pd.read_csv(StringIO(response.text))
+    if response.status_code == 401:
+        _handle_dhis2_response_error(response, url)
+
+    if response.status_code != 200:
+        return None
+
+    content_type = (response.headers.get("Content-Type") or "").lower()
+    text = response.text
+
+    # Only parse as CSV when DHIS2 actually returned a CSV-like response.
+    if "csv" in content_type or "text/plain" in content_type:
+        try:
+            return pd.read_csv(StringIO(text))
+        except Exception:
+            return None
+
+    # Some DHIS2 deployments do not send a useful Content-Type.
+    # Detect a CSV response conservatively from the first non-empty line.
+    first_line = next((line for line in text.splitlines() if line.strip()), "")
+    if "," in first_line or "\t" in first_line:
+        try:
+            candidate = pd.read_csv(StringIO(text))
+            if not candidate.empty:
+                return candidate
+        except Exception:
+            pass
 
     return None
 
@@ -2824,43 +2856,29 @@ def read_json_response(response):
 
 
 def get_analytics_data(url):
-    extension = get_extension(url)
+    """Load a DHIS2 Analytics endpoint using the authenticated user token."""
+    _require_dhis2_auth()
 
-    if extension in ["xls", "xlsx", "csv", ""]:
-        try:
-            csv_df = get_csv_from_analytics_url(url)
-            if csv_df is not None and not csv_df.empty:
-                return csv_df
-        except Exception:
-            pass
+    # First request the ORIGINAL endpoint as CSV. This avoids the old and
+    # incorrect /api/analytics.csv path transformation.
+    try:
+        csv_df = get_csv_from_analytics_url(url)
+        if isinstance(csv_df, pd.DataFrame) and not csv_df.empty:
+            return csv_df
+    except PermissionError:
+        raise
+    except requests.exceptions.RequestException:
+        pass
+    except Exception:
+        pass
 
-    if extension == "xlsx":
-        return read_xlsx_response(
-            dhis2_get(
-                url,
-                accept="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-        )
-
-    if extension == "xls":
-        return read_xls_response(
-            dhis2_get(
-                url,
-                accept="application/vnd.ms-excel",
-            )
-        )
-
-    if extension == "csv":
-        return read_csv_response(
-            dhis2_get(
-                url,
-                accept="application/csv",
-            )
-        )
-
-    return read_json_response(
-        dhis2_get(url, accept="application/json")
+    # Fall back to the original endpoint as JSON.
+    response = dhis2_get(
+        url,
+        accept="application/json",
+        timeout=180,
     )
+    return read_json_response(response)
 
 
 def _is_dhis2_url(url):
@@ -2932,6 +2950,12 @@ def get_direct_api_data(url):
     url = str(url or "").strip()
     if not url:
         raise ValueError("Please provide a DHIS2 API or Analytics URL.")
+
+    # Allow users to paste either a full DHIS2 URL or a relative API path.
+    if url.startswith("/api/"):
+        url = f"{DHIS2_URL}{url}"
+    elif url.startswith("api/"):
+        url = f"{DHIS2_URL}/{url}"
 
     # Every DHIS2 request made by the dashboard must have the user's OAuth session.
     _require_dhis2_auth()
@@ -16404,12 +16428,10 @@ def render_existing_danip_ai_app():
             )
             with st.spinner("📥 Retrieving the complete dataset..."):
                 try:
-                    request_url = refresh_data_url(source_url)
-                    raw_data = get_direct_api_data(request_url)
-                except Exception:
-                    try:
-                        raw_data = get_direct_api_data(source_url)
-                    except Exception as retry_error:
+                    # Keep the user's exact DHIS2 query intact. Do not append
+                    # arbitrary cache-busting query parameters to DHIS2 APIs.
+                    raw_data = get_direct_api_data(source_url)
+                except Exception as retry_error:
                         st.error("Unable to retrieve DHIS2 data.")
                         st.code(str(retry_error))
                         st.stop()
