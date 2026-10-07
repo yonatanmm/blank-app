@@ -3554,6 +3554,8 @@ def load_danip_project_registry():
             column_map[column] = "API URL"
         elif normalized in {"data source", "source"}:
             column_map[column] = "Data Source"
+        elif normalized in {"type", "api type", "report type", "activity type", "data type", "category", "programme type", "program type"}:
+            column_map[column] = "Type"
         elif normalized in {"active", "status", "enabled"}:
             column_map[column] = "Active"
 
@@ -3571,6 +3573,8 @@ def load_danip_project_registry():
         registry["Country"] = ""
     if "Data Source" not in registry.columns:
         registry["Data Source"] = "DANIP"
+    if "Type" not in registry.columns:
+        registry["Type"] = ""
     if "Active" not in registry.columns:
         registry["Active"] = "Yes"
 
@@ -3578,6 +3582,7 @@ def load_danip_project_registry():
     registry["Country"] = registry["Country"].fillna("").astype(str).str.strip()
     registry["API URL"] = registry["API URL"].map(_clean_registry_api_url)
     registry["Data Source"] = registry["Data Source"].fillna("DANIP").astype(str).str.strip()
+    registry["Type"] = registry["Type"].fillna("").astype(str).str.strip()
     registry["Active"] = registry["Active"].fillna("").astype(str).str.strip()
 
     registry = registry[
@@ -3609,6 +3614,7 @@ def pull_active_danip_projects():
         country = str(row.get("Country", "")).strip()
         api_url = str(row["API URL"]).strip()
         data_source = str(row.get("Data Source", "DANIP")).strip() or "DANIP"
+        data_type = str(row.get("Type", "")).strip()
 
         try:
             raw = get_direct_api_data(api_url)
@@ -3627,6 +3633,7 @@ def pull_active_danip_projects():
             frame["DANIP Project/Program"] = project
             frame["DANIP Country"] = country
             frame["DANIP Data Source"] = data_source
+            frame["DANIP Type"] = data_type
             frame["DANIP API URL"] = api_url
             frames.append(frame)
 
@@ -14504,9 +14511,8 @@ def render_existing_danip_ai_app():
         )
 
     st.caption(
-        "Select a Project/Program first. NEXUS then shows only the API URLs registered for "
-        "that project. Selecting an API automatically generates the country, data source, "
-        "and retrieval configuration."
+        "Select Project / Program → Country → Type → API. NEXUS filters each list from the "
+        "live registry, then retrieves only the API matching all four selections."
     )
 
     # ------------------------------------------------------------
@@ -14540,7 +14546,8 @@ def render_existing_danip_ai_app():
             st.warning("No active Project/Program records were found in the DANIP registry.")
         else:
             # --------------------------------------------------------
-            # PROGRAM DROPDOWN
+            # CASCADING REGISTRY FILTERS
+            # Project / Program -> Country -> Type -> API
             # --------------------------------------------------------
             project_options = sorted(
                 [
@@ -14551,57 +14558,145 @@ def render_existing_danip_ai_app():
                 key=lambda value: value.lower(),
             )
 
-            default_project = st.session_state.get("danip_selected_project", "")
-            if default_project not in project_options:
-                default_project = project_options[0] if project_options else ""
-
+            # Streamlit cascading selectboxes need independent widget keys.
+            # Using one permanent key for Country/Type/API can leave a previous
+            # selection in widget state after the parent selection changes.
+            # The keys below are derived from the current parent selection so
+            # every downstream dropdown is rebuilt cleanly when its parent changes.
             selected_project = st.selectbox(
-                "📁 Project / Program",
+                "📁 1. Project / Program",
                 project_options,
-                index=(project_options.index(default_project) if default_project else 0),
-                key="danip_selected_project",
-                help="Choose the DANIP project/program. The API list below is filtered automatically.",
+                index=0 if project_options else None,
+                key="danip_project_selector",
+                help="Choose the project/program first. Country, Type and API are then filtered from this selection.",
             )
+            st.session_state["danip_selected_project"] = selected_project
 
             # --------------------------------------------------------
-            # API DROPDOWN FILTERED BY PROGRAM
+            # COUNTRY FILTER
+            # A registry row may contain multiple countries such as
+            # 'Ethiopia,Rwanda'. Treat each country as an individual
+            # selectable value while retaining the original registry
+            # value in the loaded dataset metadata.
             # --------------------------------------------------------
             project_rows = active_now[
                 active_now["Project/Program Name"].astype(str).str.strip()
                 == str(selected_project).strip()
             ].copy()
 
-            project_rows = project_rows.reset_index(drop=False).rename(
+            country_values = []
+            for value in project_rows.get("Country", pd.Series(dtype=str)).fillna("").astype(str):
+                for country in re.split(r"[,;|]", value):
+                    country = country.strip()
+                    if country and country not in country_values:
+                        country_values.append(country)
+            country_values = sorted(country_values, key=lambda value: value.lower())
+            if not country_values:
+                country_values = ["All locations"]
+
+            country_widget_key = "danip_country_selector__" + re.sub(
+                r"[^A-Za-z0-9_-]+", "_", str(selected_project)
+            )
+            selected_country = st.selectbox(
+                "🌍 2. Country",
+                country_values,
+                index=0,
+                key=country_widget_key,
+                help="Choose the country. Only registry APIs covering this country are shown.",
+            )
+            st.session_state["danip_selected_country"] = selected_country
+
+            # Keep rows whose country field contains the selected country.
+            # 'All locations' means rows without a specific country.
+            if selected_country == "All locations":
+                country_rows = project_rows.copy()
+            else:
+                country_mask = project_rows["Country"].fillna("").astype(str).apply(
+                    lambda value: selected_country.lower() in {
+                        part.strip().lower() for part in re.split(r"[,;|]", value) if part.strip()
+                    }
+                )
+                country_rows = project_rows[country_mask].copy()
+
+            # --------------------------------------------------------
+            # TYPE FILTER
+            # --------------------------------------------------------
+            type_values = sorted(
+                [
+                    str(value).strip()
+                    for value in country_rows.get("Type", pd.Series(dtype=str)).dropna().unique()
+                    if str(value).strip()
+                ],
+                key=lambda value: value.lower(),
+            )
+            if not type_values:
+                type_values = ["All types"]
+
+            type_widget_key = "danip_type_selector__" + re.sub(
+                r"[^A-Za-z0-9_-]+", "_", f"{selected_project}__{selected_country}"
+            )
+            selected_type = st.selectbox(
+                "🗂️ 3. Type",
+                type_values,
+                index=0,
+                key=type_widget_key,
+                help="Choose the activity/report type. Only matching APIs are shown.",
+            )
+            st.session_state["danip_selected_type"] = selected_type
+
+            if selected_type == "All types":
+                filtered_rows = country_rows.copy()
+            else:
+                filtered_rows = country_rows[
+                    country_rows["Type"].fillna("").astype(str).str.strip()
+                    == str(selected_type).strip()
+                ].copy()
+
+            filtered_rows = filtered_rows.reset_index(drop=False).rename(
                 columns={"index": "_registry_index"}
             )
 
+            # --------------------------------------------------------
+            # API DROPDOWN FILTERED BY PROJECT + COUNTRY + TYPE
+            # --------------------------------------------------------
             api_options = []
             api_lookup = {}
-            for _, api_row in project_rows.iterrows():
+            for _, api_row in filtered_rows.iterrows():
                 api_value = str(api_row.get("API URL", "")).strip()
                 if not api_value:
                     continue
-                # A readable label is shown in the dropdown, while the actual
-                # API URL remains the underlying value used by NEXUS.
-                country_label = str(api_row.get("Country", "")).strip()
                 source_label = str(api_row.get("Data Source", "DANIP")).strip() or "DANIP"
-                label = f"API {len(api_options) + 1} — {country_label or 'All locations'} — {source_label}"
+                type_label = str(api_row.get("Type", "")).strip()
+                api_number = len(api_options) + 1
+                label_parts = [f"API {api_number}"]
+                if type_label:
+                    label_parts.append(type_label)
+                label_parts.append(source_label)
+                label = " — ".join(label_parts)
                 api_options.append(label)
                 api_lookup[label] = (api_value, api_row)
 
             if api_options:
+                api_widget_key = "danip_api_selector__" + re.sub(
+                    r"[^A-Za-z0-9_-]+", "_", f"{selected_project}__{selected_country}__{selected_type}"
+                )
                 selected_api_label = st.selectbox(
-                    "🔗 API within selected Project / Program",
+                    "🔗 4. API",
                     api_options,
-                    key="danip_selected_api_label",
-                    help="Only API URLs belonging to the selected project/program are shown.",
+                    index=0,
+                    key=api_widget_key,
+                    help="Only APIs matching the selected Project/Program, Country and Type are shown.",
                 )
                 selected_api, selected_registry_row = api_lookup[selected_api_label]
+
+                # Keep the currently selected API available to the rest of the
+                # application without using the same widget key across cascades.
+                st.session_state["danip_selected_api_label"] = selected_api_label
 
                 # ----------------------------------------------------
                 # AUTO-GENERATED API METADATA
                 # ----------------------------------------------------
-                meta_col1, meta_col2, meta_col3 = st.columns(3)
+                meta_col1, meta_col2, meta_col3, meta_col4 = st.columns(4)
                 with meta_col1:
                     st.metric(
                         "Project / Program",
@@ -14616,6 +14711,11 @@ def render_existing_danip_ai_app():
                     st.metric(
                         "Data Source",
                         str(selected_registry_row.get("Data Source", "DANIP")) or "DANIP",
+                    )
+                with meta_col4:
+                    st.metric(
+                        "Type",
+                        str(selected_registry_row.get("Type", "")) or "Not specified",
                     )
 
                 with st.expander("🔎 Selected API details", expanded=False):
@@ -14635,7 +14735,7 @@ def render_existing_danip_ai_app():
             # newly added project/API is visible to NEXUS.
             display_columns = [
                 column for column in [
-                    "Project/Program Name", "Country", "Data Source", "Active"
+                    "Project/Program Name", "Country", "Data Source", "Type", "Active"
                 ] if column in registry_now.columns
             ]
             if display_columns:
@@ -14700,6 +14800,9 @@ def render_existing_danip_ai_app():
                     auto_df["DANIP Data Source"] = str(
                         selected_registry_row.get("Data Source", "DANIP")
                     ).strip() or "DANIP"
+                    auto_df["DANIP Type"] = str(
+                        selected_registry_row.get("Type", "")
+                    ).strip()
                     auto_df["DANIP API URL"] = retrieval_url
                     auto_df = normalize_dataframe(auto_df)
 
