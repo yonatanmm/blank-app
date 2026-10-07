@@ -2863,12 +2863,120 @@ def get_analytics_data(url):
     )
 
 
+def _is_dhis2_url(url):
+    """Return True when the URL belongs to the configured DHIS2 server."""
+    try:
+        target = urlparse(str(url or ""))
+        configured = urlparse(str(DHIS2_URL or ""))
+        return bool(
+            target.scheme
+            and target.netloc
+            and configured.netloc
+            and target.netloc.lower() == configured.netloc.lower()
+        )
+    except Exception:
+        return False
+
+
+def _handle_dhis2_response_error(response, url):
+    if response.status_code == 401:
+        st.session_state["danip_authenticated"] = False
+        st.session_state["danip_access_token"] = ""
+        st.session_state["danip_refresh_token"] = ""
+        raise PermissionError(
+            "The authenticated DHIS2 session has expired or is no longer authorized. "
+            "Please sign in again through the NEXUS DANIP authentication gateway."
+        )
+
+    if response.status_code != 200:
+        raise Exception(
+            f"DHIS2 returned HTTP {response.status_code}\n\n"
+            f"URL:\n{response.url or url}\n\n"
+            f"Server response:\n{response.text[:5000]}"
+        )
+
+
+def get_visualization_data(uid):
+    """Retrieve the data behind a DHIS2 Data Visualizer saved visualization."""
+    token_session = _dhis2_session()
+
+    data_url = f"{DHIS2_URL}/api/visualizations/{uid}/data"
+
+    try:
+        response = token_session.get(
+            data_url,
+            headers={"Accept": "application/json"},
+            timeout=180,
+        )
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"Unable to connect to the DHIS2 visualization API:\n\n{e}")
+
+    _handle_dhis2_response_error(response, data_url)
+
+    return response.json()
+
+
 def get_direct_api_data(url):
+    """
+    Load DHIS2 data using ONLY the currently authenticated user's OAuth token.
+
+    Supported source types:
+      * DHIS2 Analytics API
+      * DHIS2 Data Visualizer links
+      * DHIS2 Visualization API
+      * DHIS2 Events / Tracker / DataValueSets / generic /api/*
+      * JSON / CSV / XLS / XLSX API responses
+
+    The function deliberately does not use DHIS2 username/password credentials.
+    """
+    url = str(url or "").strip()
+    if not url:
+        raise ValueError("Please provide a DHIS2 API or Analytics URL.")
+
+    # Every DHIS2 request made by the dashboard must have the user's OAuth session.
+    _require_dhis2_auth()
+
+    lower = url.lower()
     extension = get_extension(url)
 
-    if "/api/analytics" in url.lower():
+    # ------------------------------------------------------------
+    # DHIS2 Data Visualizer URL
+    # Example: /dhis-web-data-visualizer/#/<uid>
+    # ------------------------------------------------------------
+    if "dhis-web-data-visualizer" in lower:
+        uid = extract_visualization_uid(url)
+        if not uid:
+            raise ValueError(
+                "The DHIS2 Data Visualizer URL does not contain a valid visualization UID."
+            )
+
+        return get_visualization_data(uid)
+
+    # ------------------------------------------------------------
+    # DHIS2 Visualization API
+    # ------------------------------------------------------------
+    if "/api/visualizations/" in lower:
+        match = re.search(r"/api/visualizations/([A-Za-z0-9]{11})(?:/data)?", url)
+        if match and lower.rstrip("/").endswith("/data"):
+            return get_visualization_data(match.group(1))
+
+        # If the user supplied the metadata endpoint, first try its data endpoint.
+        if match:
+            try:
+                return get_visualization_data(match.group(1))
+            except Exception:
+                # Fall back to the metadata response below.
+                pass
+
+    # ------------------------------------------------------------
+    # DHIS2 Analytics API
+    # ------------------------------------------------------------
+    if "/api/analytics" in lower:
         return get_analytics_data(url)
 
+    # ------------------------------------------------------------
+    # File-based API responses
+    # ------------------------------------------------------------
     if extension == "xlsx":
         return read_xlsx_response(
             dhis2_get(
@@ -2890,8 +2998,18 @@ def get_direct_api_data(url):
             dhis2_get(url, accept="application/csv")
         )
 
-    return read_json_response(
-        dhis2_get(url, accept="application/json")
+    # ------------------------------------------------------------
+    # Generic DHIS2 JSON API
+    # ------------------------------------------------------------
+    if "/api/" in lower or _is_dhis2_url(url):
+        return read_json_response(
+            dhis2_get(url, accept="application/json")
+        )
+
+    raise ValueError(
+        "This URL is not a recognized DHIS2 API source. "
+        "Please provide a DHIS2 /api/... URL, Analytics URL, "
+        "Data Visualizer URL, CSV, XLS, XLSX or JSON API URL."
     )
 
 
