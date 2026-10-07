@@ -14031,7 +14031,10 @@ def render_existing_danip_ai_app():
                 st.session_state["loaded_df"] = auto_df.copy()
                 st.session_state["loaded_source_url"] = auto_url
                 st.session_state["last_analyzed_url"] = auto_url
-                st.session_state["data_url_input"] = auto_url
+                # Do not write to data_url_input here. That widget has already
+                # been instantiated with key="data_url_input" in this run, and
+                # Streamlit forbids modifying its session-state value afterward.
+                # The loaded source is tracked separately above.
                 st.session_state["data_loaded"] = True
                 st.session_state["auto_dhis2_indicator_count"] = len(auto_selected)
                 st.session_state["auto_dhis2_period"] = auto_period
