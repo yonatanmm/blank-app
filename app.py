@@ -2856,11 +2856,41 @@ def read_json_response(response):
 
 
 def get_analytics_data(url):
-    """Load a DHIS2 Analytics endpoint using the authenticated user token."""
+    """Load a DHIS2 Analytics endpoint using the authenticated user token.
+
+    Registry APIs can be published as /api/analytics.xls, /api/analytics.xlsx,
+    /api/analytics.csv, or as a normal extension-less Analytics endpoint.
+    File extensions are handled directly so an Excel response is never sent
+    to the JSON parser.
+    """
     _require_dhis2_auth()
 
-    # First request the ORIGINAL endpoint as CSV. This avoids the old and
-    # incorrect /api/analytics.csv path transformation.
+    extension = get_extension(url)
+
+    # The registry's Analytics XLS/XLSX/CSV URLs are data files. Read them
+    # according to their declared extension before attempting the generic
+    # Analytics CSV/JSON negotiation below.
+    if extension == "xls":
+        return read_xls_response(
+            dhis2_get(url, accept="application/vnd.ms-excel", timeout=180)
+        )
+
+    if extension == "xlsx":
+        return read_xlsx_response(
+            dhis2_get(
+                url,
+                accept="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                timeout=180,
+            )
+        )
+
+    if extension == "csv":
+        return read_csv_response(
+            dhis2_get(url, accept="text/csv,application/csv", timeout=180)
+        )
+
+    # First request the ORIGINAL extension-less Analytics endpoint as CSV.
+    # This avoids the old and incorrect /api/analytics.csv path transformation.
     try:
         csv_df = get_csv_from_analytics_url(url)
         if isinstance(csv_df, pd.DataFrame) and not csv_df.empty:
@@ -3651,14 +3681,12 @@ def get_direct_api_data(url):
                 pass
 
     # ------------------------------------------------------------
-    # DHIS2 Analytics API
-    # ------------------------------------------------------------
-    if "/api/analytics" in lower:
-        return get_analytics_data(url)
-
-    # ------------------------------------------------------------
     # File-based API responses
     # ------------------------------------------------------------
+    # IMPORTANT: DHIS2 Analytics URLs in the project registry may look like
+    # /api/analytics.xls?... . The path still contains /api/analytics, but
+    # the response is an Excel workbook, not JSON. Therefore extension-based
+    # handling MUST happen before the generic Analytics handler.
     if extension == "xlsx":
         return read_xlsx_response(
             dhis2_get(
@@ -3679,6 +3707,12 @@ def get_direct_api_data(url):
         return read_csv_response(
             dhis2_get(url, accept="application/csv")
         )
+
+    # ------------------------------------------------------------
+    # DHIS2 Analytics API (no explicit file extension)
+    # ------------------------------------------------------------
+    if "/api/analytics" in lower:
+        return get_analytics_data(url)
 
     # ------------------------------------------------------------
     # Generic DHIS2 JSON API
