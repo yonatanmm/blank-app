@@ -2965,16 +2965,34 @@ def _dhis2_indicator_metadata():
     ]
 
 
-def _select_danip_indicators(indicators):
-    """Select DANIP/M&E indicators from the authenticated user's readable indicators.
+def _dhis2_data_element_metadata():
+    """Return readable aggregate data elements available to the authenticated user.
 
-    The automatic connection is intentionally metadata-driven.  It does not use
-    a service account and does not hard-code indicator IDs.  If the DHIS2 instance
-    contains DANIP indicator names, those are selected.  If no names match, a
-    small readable fallback is used so the connection can still be tested.
+    DHIS2 Analytics can query data elements as well as indicators.  This is
+    important for DANIP because much of the reporting data is stored as
+    aggregate data elements inside datasets, while an indicator may exist in
+    metadata without having values for the requested period.
     """
-    # Use word/phrase matching rather than a simple substring such as ``ff``;
-    # this prevents unrelated words containing those letters from being selected.
+    data = _dhis2_metadata_get(
+        "/api/dataElements",
+        params={
+            "fields": "id,name,displayName,shortName,domainType",
+            "paging": "false",
+        },
+    )
+
+    elements = data.get("dataElements", []) if isinstance(data, dict) else []
+    return [
+        item
+        for item in elements
+        if isinstance(item, dict)
+        and str(item.get("id", "")).strip()
+        and str(item.get("domainType", "AGGREGATE") or "AGGREGATE").upper() == "AGGREGATE"
+    ]
+
+
+def _select_danip_indicators(indicators):
+    """Select DANIP/M&E indicators or data elements by meaningful names."""
     approved_patterns = [
         r"\bvas\b",
         r"vitamin\s*a",
@@ -2989,32 +3007,29 @@ def _select_danip_indicators(indicators):
     ]
 
     selected = []
-
     for item in indicators:
         text = " ".join(
             str(item.get(key, "") or "")
             for key in ("name", "displayName", "shortName")
         ).strip().lower()
 
-        if text and any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in approved_patterns):
+        if text and any(
+            re.search(pattern, text, flags=re.IGNORECASE)
+            for pattern in approved_patterns
+        ):
             selected.append(item)
 
     if selected:
         return selected
 
-    # No DANIP/M&E naming match.  Keep the fallback deliberately small because
-    # a query containing hundreds/thousands of dx members can exceed URL limits.
+    # Keep the fallback deliberately small.  The purpose of the fallback is
+    # connection testing when an installation uses non-standard indicator
+    # names; the normal DANIP path is name-matched above.
     return indicators[:25]
 
 
 def build_dhis2_automatic_analytics_url(period="2026", indicator_ids=None):
-    """Build a real authenticated DHIS2 Analytics URL.
-
-    The URL is generated from metadata available to the logged-in user.  No
-    username, password, service-account credential, or hard-coded indicator ID
-    is used.  The query follows the authenticated user's own organisation-unit
-    scope and requests the requested reporting period.
-    """
+    """Build a real authenticated DHIS2 Analytics URL."""
     if indicator_ids is None:
         indicators = _dhis2_indicator_metadata()
         selected = _select_danip_indicators(indicators)
@@ -3025,7 +3040,9 @@ def build_dhis2_automatic_analytics_url(period="2026", indicator_ids=None):
         ]
     else:
         selected = []
-        indicator_ids = [str(value).strip() for value in indicator_ids if str(value).strip()]
+        indicator_ids = [
+            str(value).strip() for value in indicator_ids if str(value).strip()
+        ]
 
     if not indicator_ids:
         raise ValueError(
@@ -3034,12 +3051,11 @@ def build_dhis2_automatic_analytics_url(period="2026", indicator_ids=None):
 
     period = str(period or "2026").strip() or "2026"
 
-    # One dimension parameter can contain multiple dimension members.  Using
-    # USER_ORGUNIT plus USER_ORGUNIT_CHILDREN makes the query useful for both
-    # national users and users working below the organisation-unit root.
     params = [
         ("dimension", f"dx:{';'.join(indicator_ids)}"),
         ("dimension", f"pe:{period}"),
+        # USER_ORGUNIT_CHILDREN is intentionally retained because it respects
+        # the authenticated user's DHIS2 organisation-unit scope.
         ("dimension", "ou:USER_ORGUNIT;USER_ORGUNIT_CHILDREN"),
         ("displayProperty", "NAME"),
         ("outputIdScheme", "NAME"),
@@ -3053,99 +3069,117 @@ def build_dhis2_automatic_analytics_url(period="2026", indicator_ids=None):
 
 
 def _merge_dhis2_analytics_frames(frames):
-    """Merge batched Analytics responses without losing their column structure."""
-    valid = [frame for frame in frames if isinstance(frame, pd.DataFrame) and not frame.empty]
+    """Merge Analytics responses without losing their column structure."""
+    valid = [
+        frame for frame in frames
+        if isinstance(frame, pd.DataFrame) and not frame.empty
+    ]
     if not valid:
         return pd.DataFrame()
 
     merged = pd.concat(valid, ignore_index=True, sort=False)
-
-    # Remove exact duplicate rows that can occur when a DHIS2 server returns
-    # overlapping metadata members in a batched query.
     try:
         merged = merged.drop_duplicates().reset_index(drop=True)
     except Exception:
         pass
-
     return merged
 
 
 def get_dhis2_automatic_analytics_data(period="2026"):
-    """Automatically discover and pull the authenticated user's DANIP analytics.
+    """Discover and pull DANIP data using the authenticated user's DHIS2 session.
 
-    The dashboard performs these steps automatically after OAuth login:
-      1. Verify the authenticated DHIS2 session.
-      2. Read indicator metadata available to that user.
-      3. Select DANIP/M&E indicators by name rather than hard-coded IDs.
-      4. Build Analytics queries for the requested period and user OU scope.
-      5. Batch large indicator lists to avoid URL-length/API limits.
-      6. Combine the returned datasets into one DataFrame for the AI dashboard.
-
-    A manual API URL remains available in the Advanced section of the UI.
+    The loader first checks indicators, then aggregate data elements.  This is
+    more reliable than assuming that every reporting value is represented by
+    an indicator.  Both are queried through the same authenticated Analytics
+    API and the resulting frames are merged for the NEXUS pipeline.
     """
     _require_dhis2_auth()
 
     indicators = _dhis2_indicator_metadata()
-    selected = _select_danip_indicators(indicators)
+    data_elements = _dhis2_data_element_metadata()
 
-    if not selected:
-        raise ValueError(
-            "DHIS2 authentication succeeded, but no readable indicators were returned for this user."
-        )
+    selected_indicators = _select_danip_indicators(indicators)
+    selected_data_elements = _select_danip_indicators(data_elements)
 
-    selected_ids = [
+    # If there are real DANIP name matches, do not inflate the query with the
+    # first 25 unrelated metadata members.  A fallback is used only when the
+    # server has no DANIP-style names at all.
+    indicator_ids = [
         str(item.get("id", "")).strip()
-        for item in selected
+        for item in selected_indicators
         if str(item.get("id", "")).strip()
     ]
-
-    # Keep each Analytics request reasonably small.  DHIS2 installations and
-    # reverse proxies often impose URL-length limits even when the API itself
-    # supports many dx members.
-    batch_size = 20
-    batches = [
-        selected_ids[index:index + batch_size]
-        for index in range(0, len(selected_ids), batch_size)
+    data_element_ids = [
+        str(item.get("id", "")).strip()
+        for item in selected_data_elements
+        if str(item.get("id", "")).strip()
     ]
 
     frames = []
     successful_urls = []
     errors = []
+    sources = []
 
-    for batch_ids in batches:
-        url, _ = build_dhis2_automatic_analytics_url(
-            period=period,
-            indicator_ids=batch_ids,
-        )
+    def pull_dimension_batches(ids, source_name):
+        if not ids:
+            return
 
-        try:
-            raw = get_analytics_data(url)
-            frame = normalize_dataframe(raw)
-            if not frame.empty:
-                frames.append(frame)
-                successful_urls.append(url)
-        except PermissionError:
-            raise
-        except Exception as exc:
-            errors.append(str(exc))
+        batch_size = 20
+        for index in range(0, len(ids), batch_size):
+            batch_ids = ids[index:index + batch_size]
+            url, _ = build_dhis2_automatic_analytics_url(
+                period=period,
+                indicator_ids=batch_ids,
+            )
+
+            try:
+                raw = get_analytics_data(url)
+                frame = normalize_dataframe(raw)
+                if not frame.empty:
+                    frames.append(frame)
+                    successful_urls.append(url)
+                    sources.append(source_name)
+            except PermissionError:
+                raise
+            except Exception as exc:
+                errors.append(f"{source_name}: {exc}")
+
+    # Indicators and data elements are both valid DHIS2 Analytics dx members.
+    # Querying both avoids the common case where indicators exist in metadata
+    # but the actual period data is stored under aggregate data elements.
+    pull_dimension_batches(indicator_ids, "Indicators")
+    pull_dimension_batches(data_element_ids, "Data elements")
 
     merged = _merge_dhis2_analytics_frames(frames)
 
     if merged.empty:
-        detail = ""
+        detail_lines = [
+            f"Period requested: {period}",
+            f"Readable indicators discovered: {len(indicators):,}",
+            f"Readable aggregate data elements discovered: {len(data_elements):,}",
+            f"Indicator members queried: {len(indicator_ids):,}",
+            f"Data-element members queried: {len(data_element_ids):,}",
+        ]
         if errors:
-            detail = "\n\n" + "\n\n".join(errors[:3])
+            detail_lines.append("\n".join(errors[:3]))
+        else:
+            detail_lines.append(
+                "DHIS2 returned successful Analytics responses, but no rows contained "
+                "values for the requested period and the authenticated user's organisation-unit scope."
+            )
+
         raise RuntimeError(
-            f"DHIS2 Analytics returned no data for period {period}."
-            f"{detail}"
+            "DHIS2 Analytics returned no data for period "
+            f"{period}.\n\n" + "\n".join(detail_lines)
         )
 
-    # Store a compact source description rather than a huge list of URLs.
     source_url = successful_urls[0] if len(successful_urls) == 1 else (
         f"{DHIS2_URL.rstrip('/')}/api/analytics (automatic; "
-        f"{len(successful_urls)} batched request(s); period={period})"
+        f"{len(successful_urls)} batched request(s); period={period}; "
+        f"sources={','.join(sorted(set(sources)))})"
     )
 
+    selected = selected_indicators + selected_data_elements
     return merged, source_url, selected
 
 def get_direct_api_data(url):
