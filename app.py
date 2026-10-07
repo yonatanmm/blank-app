@@ -150,7 +150,7 @@ DANIP_OAUTH_ME_URL = _dhis2_secret(
 # can be restored later by changing only this value.
 # ============================================================
 
-ENABLE_DHIS2_AUTHENTICATION = False
+ENABLE_DHIS2_AUTHENTICATION = True
 
 
 if "danip_authenticated" not in st.session_state:
@@ -549,20 +549,6 @@ if ENABLE_DHIS2_AUTHENTICATION:
 
         _render_dhis2_login()
         st.stop()
-
-
-# ============================================================
-# DEVELOPMENT MODE WHEN DHIS2 AUTHENTICATION IS DISABLED
-# ============================================================
-
-if not ENABLE_DHIS2_AUTHENTICATION:
-    st.session_state["danip_authenticated"] = True
-
-    if not st.session_state.get("danip_user"):
-        st.session_state["danip_user"] = {
-            "username": "Development mode",
-            "displayName": "Development mode",
-        }
 
 
 # ============================================================
@@ -2593,8 +2579,12 @@ DANIP_ACCESS_TOKEN = st.session_state.get(
     "",
 )
 
+if DANIP_ACCESS_TOKEN:
+    session.headers.update({
+        "Authorization": f"Bearer {DANIP_ACCESS_TOKEN}",
+    })
+
 session.headers.update({
-    "Authorization": f"Bearer {DANIP_ACCESS_TOKEN}",
     "User-Agent": "DANIP-DHIS2-AI/2.0",
 })
 
@@ -2662,15 +2652,45 @@ def safe_json_dumps(value):
 # DHIS2 REQUEST
 # ============================================================
 
+def _require_dhis2_auth():
+    """Require the per-user DHIS2 OAuth session supplied by the login gateway."""
+    authenticated = bool(st.session_state.get("danip_authenticated"))
+    token = str(st.session_state.get("danip_access_token", "") or "").strip()
+
+    if not authenticated or not token:
+        raise PermissionError(
+            "No authenticated DHIS2 user session is available. "
+            "Please sign in through the NEXUS DANIP authentication gateway."
+        )
+
+    return token
+
+
+def _dhis2_session():
+    """Return a session carrying the current authenticated user's token."""
+    token = _require_dhis2_auth()
+    session.headers["Authorization"] = f"Bearer {token}"
+    return session
+
+
 def dhis2_get(url, accept="application/json", timeout=180):
     try:
-        response = session.get(
+        response = _dhis2_session().get(
             url,
             headers={"Accept": accept},
             timeout=timeout,
         )
     except requests.exceptions.RequestException as e:
         raise Exception(f"Unable to connect to DHIS2:\n\n{e}")
+
+    if response.status_code == 401:
+        st.session_state["danip_authenticated"] = False
+        st.session_state["danip_access_token"] = ""
+        st.session_state["danip_refresh_token"] = ""
+        raise PermissionError(
+            "The DHIS2 user session has expired or is no longer authorized. "
+            "Please sign in again."
+        )
 
     if response.status_code != 200:
         raise Exception(
@@ -2745,7 +2765,7 @@ def change_extension(url, new_extension):
 def get_csv_from_analytics_url(url):
     csv_url = change_extension(url, "csv")
 
-    response = session.get(
+    response = _dhis2_session().get(
         csv_url,
         headers={"Accept": "application/csv"},
         timeout=180,
