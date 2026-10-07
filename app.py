@@ -3182,6 +3182,235 @@ def get_dhis2_automatic_analytics_data(period="2026"):
     selected = selected_indicators + selected_data_elements
     return merged, source_url, selected
 
+# ============================================================
+# DANIP PROJECT / PROGRAM REGISTRY
+# ============================================================
+# The registry is the controlled configuration layer for NEXUS.
+# Whenever a new active project/program is added to the workbook,
+# NEXUS reads the registry on the next DHIS2 pull and automatically
+# retrieves that project's API URL. The AI receives project/program
+# and country metadata through the normalized master dataset.
+
+DANIP_PROJECT_REGISTRY_URL = os.getenv(
+    "DANIP_PROJECT_REGISTRY_URL",
+    "https://drive.google.com/file/d/1pFckrpY3oXnMPUvl7cSqEGK6UxK8bfOB/view?usp=sharing",
+)
+
+
+def _extract_google_drive_file_id(url):
+    url = str(url or "").strip()
+    patterns = [
+        r"/file/d/([A-Za-z0-9_-]+)",
+        r"[?&]id=([A-Za-z0-9_-]+)",
+        r"/d/([A-Za-z0-9_-]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _project_registry_download_url(url):
+    """Convert a Google Drive sharing URL to a direct download URL."""
+    file_id = _extract_google_drive_file_id(url)
+    if file_id:
+        return f"https://drive.google.com/uc?export=download&id={file_id}"
+    return str(url or "").strip()
+
+
+def _clean_registry_api_url(value):
+    """Extract a usable URL from plain URL or Markdown-style URL text."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    markdown_match = re.search(r"\((https?://[^)]+)\)", text)
+    if markdown_match:
+        text = markdown_match.group(1)
+    else:
+        url_match = re.search(r"https?://\S+", text)
+        if url_match:
+            text = url_match.group(0)
+
+    text = text.replace("\\&", "&").strip()
+    return text
+
+
+def _registry_active(value):
+    return str(value or "").strip().lower() in {
+        "yes", "true", "1", "active", "y", "on"
+    }
+
+
+def load_danip_project_registry():
+    """Read the current DANIP project/program registry workbook.
+
+    The workbook is intentionally read at pull time so adding a new row
+    automatically makes the new project available to NEXUS without changing
+    Python code. The file must be shared so the deployed Streamlit app can
+    download it without interactive Google authentication.
+    """
+    source_url = str(DANIP_PROJECT_REGISTRY_URL or "").strip()
+    if not source_url:
+        raise ValueError("DANIP_PROJECT_REGISTRY_URL is not configured.")
+
+    download_url = _project_registry_download_url(source_url)
+    response = requests.get(
+        download_url,
+        timeout=45,
+        allow_redirects=True,
+        headers={"User-Agent": "NEXUS-DANIP/1.0"},
+    )
+    response.raise_for_status()
+
+    content = response.content
+    content_type = str(response.headers.get("content-type", "")).lower()
+
+    # Google Drive may return an HTML confirmation page for large files.
+    if "text/html" in content_type and not content[:4] in (b"PK\x03\x04", b"\xd0\xcf\x11\xe0"):
+        raise ValueError(
+            "The DANIP Project Registry could not be downloaded as an Excel file. "
+            "Make sure the Google Drive file is shared with access to anyone who has the link."
+        )
+
+    # Read the first worksheet by default. The registry is a configuration
+    # table, not the reporting dataset itself.
+    try:
+        registry = pd.read_excel(BytesIO(content), sheet_name=0)
+    except Exception as exc:
+        raise ValueError(
+            "Unable to read the DANIP Project Registry as Excel. "
+            "Use .xlsx/.xls format and keep the first sheet as the registry table."
+        ) from exc
+
+    registry = normalize_dataframe(registry)
+    if registry.empty:
+        raise ValueError("The DANIP Project Registry is empty.")
+
+    # Normalize expected column names while preserving the original table.
+    column_map = {}
+    for column in registry.columns:
+        normalized = re.sub(r"[^a-z0-9]+", " ", str(column).strip().lower()).strip()
+        if normalized in {"project program name", "project program", "program name", "project name", "programme name"}:
+            column_map[column] = "Project/Program Name"
+        elif normalized in {"country", "countries"}:
+            column_map[column] = "Country"
+        elif normalized in {"api url", "api", "api endpoint", "api link"}:
+            column_map[column] = "API URL"
+        elif normalized in {"data source", "source"}:
+            column_map[column] = "Data Source"
+        elif normalized in {"active", "status", "enabled"}:
+            column_map[column] = "Active"
+
+    registry = registry.rename(columns=column_map)
+
+    required = ["Project/Program Name", "API URL"]
+    missing = [column for column in required if column not in registry.columns]
+    if missing:
+        raise ValueError(
+            "DANIP Project Registry is missing required column(s): "
+            + ", ".join(missing)
+        )
+
+    if "Country" not in registry.columns:
+        registry["Country"] = ""
+    if "Data Source" not in registry.columns:
+        registry["Data Source"] = "DANIP"
+    if "Active" not in registry.columns:
+        registry["Active"] = "Yes"
+
+    registry["Project/Program Name"] = registry["Project/Program Name"].astype(str).str.strip()
+    registry["Country"] = registry["Country"].fillna("").astype(str).str.strip()
+    registry["API URL"] = registry["API URL"].map(_clean_registry_api_url)
+    registry["Data Source"] = registry["Data Source"].fillna("DANIP").astype(str).str.strip()
+    registry["Active"] = registry["Active"].fillna("").astype(str).str.strip()
+
+    registry = registry[
+        (registry["Project/Program Name"] != "")
+        & (registry["API URL"] != "")
+    ].copy()
+
+    if registry.empty:
+        raise ValueError("The DANIP Project Registry contains no usable project/API rows.")
+
+    registry["_active"] = registry["Active"].map(_registry_active)
+    return registry.reset_index(drop=True)
+
+
+def pull_active_danip_projects():
+    """Pull every active project in the registry and create one master dataset."""
+    registry = load_danip_project_registry()
+    active_registry = registry[registry["_active"]].copy()
+
+    if active_registry.empty:
+        raise ValueError("No active projects were found in the DANIP Project Registry.")
+
+    frames = []
+    project_results = []
+    errors = []
+
+    for _, row in active_registry.iterrows():
+        project = str(row["Project/Program Name"]).strip()
+        country = str(row.get("Country", "")).strip()
+        api_url = str(row["API URL"]).strip()
+        data_source = str(row.get("Data Source", "DANIP")).strip() or "DANIP"
+
+        try:
+            raw = get_direct_api_data(api_url)
+            frame = normalize_dataframe(raw)
+
+            if frame.empty:
+                project_results.append({
+                    "project": project,
+                    "country": country,
+                    "status": "No data",
+                    "rows": 0,
+                })
+                continue
+
+            frame = frame.copy()
+            frame["DANIP Project/Program"] = project
+            frame["DANIP Country"] = country
+            frame["DANIP Data Source"] = data_source
+            frame["DANIP API URL"] = api_url
+            frames.append(frame)
+
+            project_results.append({
+                "project": project,
+                "country": country,
+                "status": "Loaded",
+                "rows": int(len(frame)),
+            })
+        except Exception as exc:
+            errors.append(f"{project}: {exc}")
+            project_results.append({
+                "project": project,
+                "country": country,
+                "status": "Error",
+                "rows": 0,
+                "error": str(exc),
+            })
+
+    if not frames:
+        detail = " | ".join(errors[:5])
+        raise RuntimeError(
+            "No active DANIP project returned data. "
+            + (detail if detail else "Check the registry API URLs and DHIS2 access.")
+        )
+
+    # Union columns because different projects may have different reporting
+    # structures. This is intentional: NEXUS normalizes them into one master dataset.
+    master = pd.concat(frames, ignore_index=True, sort=False)
+    master = normalize_dataframe(master)
+    try:
+        master = master.drop_duplicates().reset_index(drop=True)
+    except Exception:
+        pass
+
+    return master, registry, project_results, errors
+
+
 def get_direct_api_data(url):
     """
     Load DHIS2 data using ONLY the currently authenticated user's OAuth token.
@@ -7090,6 +7319,22 @@ def ask_ai(
         requested_evidence=requested_evidence,
     )
 
+    # The Project/Program Registry is part of the AI context. This is built
+    # from the same registry used to retrieve the master dataset, so a newly
+    # added active project is automatically visible to the AI after the next
+    # registry refresh/pull. API URLs themselves are intentionally not sent
+    # to the model; project, country and source metadata are sufficient.
+    project_registry_context = []
+    registry_context_df = st.session_state.get("danip_project_registry")
+    if isinstance(registry_context_df, pd.DataFrame) and not registry_context_df.empty:
+        for _, registry_row in registry_context_df.iterrows():
+            project_registry_context.append({
+                "project_program": str(registry_row.get("Project/Program Name", "")).strip(),
+                "country": str(registry_row.get("Country", "")).strip(),
+                "data_source": str(registry_row.get("Data Source", "DANIP")).strip(),
+                "active": _registry_active(registry_row.get("Active", "")),
+            })
+
     prompt = f"""
 You are an expert DHIS2 data analyst, public-health
 monitoring and evaluation specialist, nutrition programme
@@ -7154,6 +7399,19 @@ All applicable rows have been processed locally.
 The first 25 rows are ONLY a schema preview.
 
 Never treat the top-row matrix as the complete dataset.
+
+============================================================
+DANIP PROJECT / PROGRAM REGISTRY
+============================================================
+
+The following registry is the authoritative configuration for the active
+DANIP projects/programmes represented in the current master dataset.
+Whenever a new active project is added to the registry, it must be treated
+as a new programme context automatically after the registry is refreshed.
+Use the project/program and country fields to distinguish reporting results.
+Do not invent projects that are not listed here.
+
+{safe_json_dumps(project_registry_context)}
 
 ============================================================
 EXTERNAL INDICATOR CONTEXT
@@ -13965,30 +14223,76 @@ def render_existing_danip_ai_app():
         unsafe_allow_html=True,
     )
 
-    auto_dhis2_col, period_col, refresh_col = st.columns([6, 1.5, 1.5])
+    auto_dhis2_col, registry_col, refresh_col = st.columns([6, 2, 1.5])
 
     with auto_dhis2_col:
         st.success(
-            "🔐 Authenticated DHIS2 session detected — automatic API retrieval is ready."
+            "🔐 Authenticated DHIS2 session detected — DANIP Project Registry retrieval is ready."
         )
 
-    with period_col:
-        auto_period = st.text_input(
-            "Period",
-            value="2026",
-            key="auto_dhis2_period",
-        ).strip() or "2026"
+    with registry_col:
+        registry_reload = st.button(
+            "📋 Reload Projects",
+            use_container_width=True,
+            key="danip_registry_reload_button",
+        )
 
     with refresh_col:
         pull_now = st.button(
-            "🔄 Pull DHIS2",
+            "🔄 Pull DANIP",
             type="primary",
             use_container_width=True,
             key="auto_dhis2_pull_button",
         )
 
-    # Optional manual endpoint.  It is deliberately secondary to the
-    # authenticated automatic DHIS2 Analytics connection.
+    st.caption(
+        "NEXUS reads the active Project/Program rows from the DANIP registry. "
+        "When a new project is added to the registry, its API is automatically included "
+        "on the next Pull DANIP operation."
+    )
+
+    # Read the registry on demand. A new row in the workbook therefore becomes
+    # visible without changing Python code or restarting the application.
+    if registry_reload or "danip_project_registry" not in st.session_state:
+        try:
+            registry_now = load_danip_project_registry()
+            st.session_state["danip_project_registry"] = registry_now
+            st.session_state["danip_project_registry_last_loaded"] = datetime.now().strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+        except Exception as exc:
+            st.session_state["danip_project_registry_error"] = str(exc)
+
+    registry_now = st.session_state.get("danip_project_registry")
+    registry_error = st.session_state.get("danip_project_registry_error", "")
+
+    if isinstance(registry_now, pd.DataFrame) and not registry_now.empty:
+        active_now = registry_now[registry_now.get("_active", False)].copy()
+        st.success(
+            f"📋 Project Registry loaded: {len(active_now):,} active project/program(s) "
+            f"out of {len(registry_now):,} configured."
+        )
+        display_columns = [
+            column for column in [
+                "Project/Program Name", "Country", "Data Source", "Active"
+            ] if column in registry_now.columns
+        ]
+        if display_columns:
+            st.dataframe(
+                registry_now[display_columns],
+                use_container_width=True,
+                hide_index=True,
+            )
+        if st.session_state.get("danip_project_registry_last_loaded"):
+            st.caption(
+                "Registry last read: "
+                + str(st.session_state["danip_project_registry_last_loaded"])
+            )
+    elif registry_error:
+        st.warning(f"Project Registry is not currently available: {registry_error}")
+
+    # Optional manual endpoint. It is deliberately secondary to the
+    # authenticated DANIP Project Registry workflow.
     with st.expander("Advanced: use a specific DHIS2 API URL", expanded=False):
         user_url = st.text_area(
             "DHIS2 API URL",
@@ -13997,8 +14301,8 @@ def render_existing_danip_ai_app():
             key="data_url_input",
         ).strip()
 
-    # Automatically pull once after authentication.  Subsequent reruns reuse
-    # the dataset in session_state unless the user explicitly clicks Pull DHIS2.
+    # Automatically pull once after authentication. Subsequent reruns reuse
+    # the loaded dataset until the user explicitly pulls again.
     should_auto_pull = (
         bool(DANIP_ACCESS_TOKEN)
         and not st.session_state.get("data_loaded", False)
@@ -14009,55 +14313,72 @@ def render_existing_danip_ai_app():
         st.session_state["auto_dhis2_attempted"] = True
         try:
             with st.spinner(
-                "📡 Connecting to DHIS2, discovering indicators, and retrieving analytics..."
+                "📡 Reading DANIP Project Registry and retrieving every active project..."
             ):
                 if user_url:
                     raw_data = get_direct_api_data(user_url)
+                    auto_df = normalize_dataframe(raw_data)
                     auto_url = user_url
-                    auto_selected = []
+                    project_results = [{
+                        "project": "Manual API",
+                        "country": "",
+                        "status": "Loaded",
+                        "rows": int(len(auto_df)),
+                    }]
+                    registry_loaded = st.session_state.get("danip_project_registry")
+                    registry_errors = []
                 else:
-                    raw_data, auto_url, auto_selected = get_dhis2_automatic_analytics_data(
-                        period=auto_period
+                    auto_df, registry_loaded, project_results, registry_errors = (
+                        pull_active_danip_projects()
+                    )
+                    auto_url = str(DANIP_PROJECT_REGISTRY_URL)
+                    st.session_state["danip_project_registry"] = registry_loaded
+                    st.session_state["danip_project_registry_last_loaded"] = datetime.now().strftime(
+                        "%Y-%m-%d %H:%M:%S"
                     )
 
-                auto_df = normalize_dataframe(raw_data)
+                auto_df = normalize_dataframe(auto_df)
 
             if auto_df.empty:
                 st.warning(
-                    "DHIS2 authentication succeeded, but the Analytics API returned no data "
-                    f"for period {auto_period}. Check the user's DHIS2 data/organisation-unit access."
+                    "The active DANIP Project Registry was read, but no project returned data. "
+                    "Check the project API URLs and the authenticated user's DHIS2 access."
                 )
             else:
                 st.session_state["loaded_df"] = auto_df.copy()
                 st.session_state["loaded_source_url"] = auto_url
                 st.session_state["last_analyzed_url"] = auto_url
-                # Do not write to data_url_input here. That widget has already
-                # been instantiated with key="data_url_input" in this run, and
-                # Streamlit forbids modifying its session-state value afterward.
-                # The loaded source is tracked separately above.
                 st.session_state["data_loaded"] = True
-                st.session_state["auto_dhis2_indicator_count"] = len(auto_selected)
-                st.session_state["auto_dhis2_period"] = auto_period
+                st.session_state["danip_project_results"] = project_results
+                st.session_state["danip_project_registry_errors"] = registry_errors
+                st.session_state["auto_dhis2_period"] = "Registry-defined"
                 st.session_state["auto_dhis2_last_success"] = datetime.now().strftime(
                     "%Y-%m-%d %H:%M:%S"
                 )
+                loaded_projects = [
+                    result for result in project_results
+                    if result.get("status") == "Loaded"
+                ]
                 st.success(
-                    f"✅ DHIS2 data loaded successfully: {len(auto_df):,} rows × "
-                    f"{len(auto_df.columns):,} columns."
+                    f"✅ DANIP master dataset loaded: {len(auto_df):,} rows × "
+                    f"{len(auto_df.columns):,} columns from {len(loaded_projects):,} active project(s)."
                 )
-                if auto_url:
-                    st.caption(f"DHIS2 Analytics source: {auto_url}")
+                if registry_errors:
+                    st.warning(
+                        "Some active projects could not be loaded: "
+                        + " | ".join(registry_errors[:5])
+                    )
                 st.rerun()
 
         except PermissionError as exc:
             st.error("🔐 DHIS2 authorization failed or expired.")
             st.code(str(exc))
         except Exception as exc:
-            st.error("❌ DHIS2 automatic API retrieval failed.")
+            st.error("❌ DANIP Project/API retrieval failed.")
             st.code(str(exc))
             st.info(
-                "Authentication is working. The message above is the actual DHIS2 API response "
-                "or query error, which helps identify the missing permission/query parameter."
+                "Authentication is working. The error above identifies the project registry, "
+                "API URL, file, or DHIS2 query that needs attention."
             )
 
     # Show the current loaded connection when available.
