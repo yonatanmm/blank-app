@@ -2934,6 +2934,220 @@ def get_visualization_data(uid):
     return response.json()
 
 
+def _dhis2_metadata_get(path, params=None, timeout=180):
+    """GET DHIS2 metadata using the authenticated user's OAuth token."""
+    url = path if str(path).startswith("http") else f"{DHIS2_URL.rstrip('/')}/{str(path).lstrip('/')}"
+    response = _dhis2_session().get(
+        url,
+        params=params or {},
+        headers={"Accept": "application/json"},
+        timeout=timeout,
+    )
+    _handle_dhis2_response_error(response, url)
+    return response.json()
+
+
+def _dhis2_indicator_metadata():
+    """Return readable indicators available to the authenticated DHIS2 user."""
+    data = _dhis2_metadata_get(
+        "/api/indicators",
+        params={
+            "fields": "id,name,displayName,shortName",
+            "paging": "false",
+        },
+    )
+
+    indicators = data.get("indicators", []) if isinstance(data, dict) else []
+    return [
+        item
+        for item in indicators
+        if isinstance(item, dict) and str(item.get("id", "")).strip()
+    ]
+
+
+def _select_danip_indicators(indicators):
+    """Select DANIP/M&E indicators from the authenticated user's readable indicators.
+
+    The automatic connection is intentionally metadata-driven.  It does not use
+    a service account and does not hard-code indicator IDs.  If the DHIS2 instance
+    contains DANIP indicator names, those are selected.  If no names match, a
+    small readable fallback is used so the connection can still be tested.
+    """
+    # Use word/phrase matching rather than a simple substring such as ``ff``;
+    # this prevents unrelated words containing those letters from being selected.
+    approved_patterns = [
+        r"\bvas\b",
+        r"vitamin\s*a",
+        r"universal\s*salt\s*iod",
+        r"\busi\b",
+        r"fortified\s*flour",
+        r"\bff\b",
+        r"wifa",
+        r"zinc",
+        r"mnhn",
+        r"icmnci",
+    ]
+
+    selected = []
+
+    for item in indicators:
+        text = " ".join(
+            str(item.get(key, "") or "")
+            for key in ("name", "displayName", "shortName")
+        ).strip().lower()
+
+        if text and any(re.search(pattern, text, flags=re.IGNORECASE) for pattern in approved_patterns):
+            selected.append(item)
+
+    if selected:
+        return selected
+
+    # No DANIP/M&E naming match.  Keep the fallback deliberately small because
+    # a query containing hundreds/thousands of dx members can exceed URL limits.
+    return indicators[:25]
+
+
+def build_dhis2_automatic_analytics_url(period="2026", indicator_ids=None):
+    """Build a real authenticated DHIS2 Analytics URL.
+
+    The URL is generated from metadata available to the logged-in user.  No
+    username, password, service-account credential, or hard-coded indicator ID
+    is used.  The query follows the authenticated user's own organisation-unit
+    scope and requests the requested reporting period.
+    """
+    if indicator_ids is None:
+        indicators = _dhis2_indicator_metadata()
+        selected = _select_danip_indicators(indicators)
+        indicator_ids = [
+            str(item.get("id", "")).strip()
+            for item in selected
+            if str(item.get("id", "")).strip()
+        ]
+    else:
+        selected = []
+        indicator_ids = [str(value).strip() for value in indicator_ids if str(value).strip()]
+
+    if not indicator_ids:
+        raise ValueError(
+            "The authenticated DHIS2 user can connect, but no readable indicators were returned."
+        )
+
+    period = str(period or "2026").strip() or "2026"
+
+    # One dimension parameter can contain multiple dimension members.  Using
+    # USER_ORGUNIT plus USER_ORGUNIT_CHILDREN makes the query useful for both
+    # national users and users working below the organisation-unit root.
+    params = [
+        ("dimension", f"dx:{';'.join(indicator_ids)}"),
+        ("dimension", f"pe:{period}"),
+        ("dimension", "ou:USER_ORGUNIT;USER_ORGUNIT_CHILDREN"),
+        ("displayProperty", "NAME"),
+        ("outputIdScheme", "NAME"),
+        ("tableLayout", "true"),
+        ("hideEmptyRows", "false"),
+        ("skipMeta", "false"),
+    ]
+
+    url = f"{DHIS2_URL.rstrip('/')}/api/analytics?{urlencode(params)}"
+    return url, selected
+
+
+def _merge_dhis2_analytics_frames(frames):
+    """Merge batched Analytics responses without losing their column structure."""
+    valid = [frame for frame in frames if isinstance(frame, pd.DataFrame) and not frame.empty]
+    if not valid:
+        return pd.DataFrame()
+
+    merged = pd.concat(valid, ignore_index=True, sort=False)
+
+    # Remove exact duplicate rows that can occur when a DHIS2 server returns
+    # overlapping metadata members in a batched query.
+    try:
+        merged = merged.drop_duplicates().reset_index(drop=True)
+    except Exception:
+        pass
+
+    return merged
+
+
+def get_dhis2_automatic_analytics_data(period="2026"):
+    """Automatically discover and pull the authenticated user's DANIP analytics.
+
+    The dashboard performs these steps automatically after OAuth login:
+      1. Verify the authenticated DHIS2 session.
+      2. Read indicator metadata available to that user.
+      3. Select DANIP/M&E indicators by name rather than hard-coded IDs.
+      4. Build Analytics queries for the requested period and user OU scope.
+      5. Batch large indicator lists to avoid URL-length/API limits.
+      6. Combine the returned datasets into one DataFrame for the AI dashboard.
+
+    A manual API URL remains available in the Advanced section of the UI.
+    """
+    _require_dhis2_auth()
+
+    indicators = _dhis2_indicator_metadata()
+    selected = _select_danip_indicators(indicators)
+
+    if not selected:
+        raise ValueError(
+            "DHIS2 authentication succeeded, but no readable indicators were returned for this user."
+        )
+
+    selected_ids = [
+        str(item.get("id", "")).strip()
+        for item in selected
+        if str(item.get("id", "")).strip()
+    ]
+
+    # Keep each Analytics request reasonably small.  DHIS2 installations and
+    # reverse proxies often impose URL-length limits even when the API itself
+    # supports many dx members.
+    batch_size = 20
+    batches = [
+        selected_ids[index:index + batch_size]
+        for index in range(0, len(selected_ids), batch_size)
+    ]
+
+    frames = []
+    successful_urls = []
+    errors = []
+
+    for batch_ids in batches:
+        url, _ = build_dhis2_automatic_analytics_url(
+            period=period,
+            indicator_ids=batch_ids,
+        )
+
+        try:
+            raw = get_analytics_data(url)
+            frame = normalize_dataframe(raw)
+            if not frame.empty:
+                frames.append(frame)
+                successful_urls.append(url)
+        except PermissionError:
+            raise
+        except Exception as exc:
+            errors.append(str(exc))
+
+    merged = _merge_dhis2_analytics_frames(frames)
+
+    if merged.empty:
+        detail = ""
+        if errors:
+            detail = "\n\n" + "\n\n".join(errors[:3])
+        raise RuntimeError(
+            f"DHIS2 Analytics returned no data for period {period}."
+            f"{detail}"
+        )
+
+    # Store a compact source description rather than a huge list of URLs.
+    source_url = successful_urls[0] if len(successful_urls) == 1 else (
+        f"{DHIS2_URL.rstrip('/')}/api/analytics (automatic; "
+        f"{len(successful_urls)} batched request(s); period={period})"
+    )
+
+    return merged, source_url, selected
+
 def get_direct_api_data(url):
     """
     Load DHIS2 data using ONLY the currently authenticated user's OAuth token.
@@ -13696,59 +13910,157 @@ def render_existing_danip_ai_app():
 
 
     # ============================================================
-    # USER INPUT
+    # DHIS2 AUTOMATIC CONNECTION
     # ============================================================
+    # The OAuth gateway has already authenticated the user.  The dashboard
+    # now uses that same per-user OAuth token to pull DHIS2 Analytics data.
+    # A manual API URL remains available only as an optional fallback.
 
     st.markdown(
         """
         <div class="section-card">
-            <div class="section-kicker">Step 1</div>
-            <div class="section-title">📡 Connect your data</div>
+            <div class="section-kicker">STEP 1</div>
+            <div class="section-title">📡 DHIS2 Data Connection</div>
             <div class="section-help">
-                Paste a DHIS2 Analytics, CSV, XLS, XLSX or JSON API URL.
-                Every row returned by the source is loaded and processed.
+                NEXUS automatically connects to the authenticated DHIS2 account,
+                discovers available indicators, and retrieves the selected reporting period.
+                No API URL is required.
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    user_url = st.text_area(
-        "Data URL",
-        placeholder="Paste your data/API URL here...",
-        height=90,
-        label_visibility="collapsed",
-        key="data_url_input",
+    auto_dhis2_col, period_col, refresh_col = st.columns([6, 1.5, 1.5])
+
+    with auto_dhis2_col:
+        st.success(
+            "🔐 Authenticated DHIS2 session detected — automatic API retrieval is ready."
+        )
+
+    with period_col:
+        auto_period = st.text_input(
+            "Period",
+            value="2026",
+            key="auto_dhis2_period",
+        ).strip() or "2026"
+
+    with refresh_col:
+        pull_now = st.button(
+            "🔄 Pull DHIS2",
+            type="primary",
+            use_container_width=True,
+            key="auto_dhis2_pull_button",
+        )
+
+    # Optional manual endpoint.  It is deliberately secondary to the
+    # authenticated automatic DHIS2 Analytics connection.
+    with st.expander("Advanced: use a specific DHIS2 API URL", expanded=False):
+        user_url = st.text_area(
+            "DHIS2 API URL",
+            placeholder="https://dhis2.nutritionintl.org/api/analytics?...",
+            height=80,
+            key="data_url_input",
+        ).strip()
+
+    # Automatically pull once after authentication.  Subsequent reruns reuse
+    # the dataset in session_state unless the user explicitly clicks Pull DHIS2.
+    should_auto_pull = (
+        bool(DANIP_ACCESS_TOKEN)
+        and not st.session_state.get("data_loaded", False)
+        and not st.session_state.get("auto_dhis2_attempted", False)
     )
+
+    if pull_now or should_auto_pull:
+        st.session_state["auto_dhis2_attempted"] = True
+        try:
+            with st.spinner(
+                "📡 Connecting to DHIS2, discovering indicators, and retrieving analytics..."
+            ):
+                if user_url:
+                    raw_data = get_direct_api_data(user_url)
+                    auto_url = user_url
+                    auto_selected = []
+                else:
+                    raw_data, auto_url, auto_selected = get_dhis2_automatic_analytics_data(
+                        period=auto_period
+                    )
+
+                auto_df = normalize_dataframe(raw_data)
+
+            if auto_df.empty:
+                st.warning(
+                    "DHIS2 authentication succeeded, but the Analytics API returned no data "
+                    f"for period {auto_period}. Check the user's DHIS2 data/organisation-unit access."
+                )
+            else:
+                st.session_state["loaded_df"] = auto_df.copy()
+                st.session_state["loaded_source_url"] = auto_url
+                st.session_state["last_analyzed_url"] = auto_url
+                st.session_state["data_url_input"] = auto_url
+                st.session_state["data_loaded"] = True
+                st.session_state["auto_dhis2_indicator_count"] = len(auto_selected)
+                st.session_state["auto_dhis2_period"] = auto_period
+                st.session_state["auto_dhis2_last_success"] = datetime.now().strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+                st.success(
+                    f"✅ DHIS2 data loaded successfully: {len(auto_df):,} rows × "
+                    f"{len(auto_df.columns):,} columns."
+                )
+                if auto_url:
+                    st.caption(f"DHIS2 Analytics source: {auto_url}")
+                st.rerun()
+
+        except PermissionError as exc:
+            st.error("🔐 DHIS2 authorization failed or expired.")
+            st.code(str(exc))
+        except Exception as exc:
+            st.error("❌ DHIS2 automatic API retrieval failed.")
+            st.code(str(exc))
+            st.info(
+                "Authentication is working. The message above is the actual DHIS2 API response "
+                "or query error, which helps identify the missing permission/query parameter."
+            )
+
+    # Show the current loaded connection when available.
+    if st.session_state.get("data_loaded", False):
+        loaded_source = st.session_state.get("loaded_source_url", "")
+        loaded_df_now = st.session_state.get("loaded_df")
+        if isinstance(loaded_df_now, pd.DataFrame):
+            st.info(
+                f"📊 Current DHIS2 dataset: **{len(loaded_df_now):,} rows × "
+                f"{len(loaded_df_now.columns):,} columns**"
+            )
 
     st.markdown(
         """
         <div class="section-card auto-analysis-card">
             <div class="section-kicker">AUTOMATIC ANALYSIS</div>
-            <div class="section-title">🤖 NEXUS AI will analyze the complete dataset automatically</div>
+            <div class="section-title">🤖 NEXUS AI will analyze the complete DHIS2 dataset automatically</div>
             <div class="section-help">
-                NEXUS AI automatically generates the baseline report and data-quality assessment.
-                You can optionally select indicators, dimensions, graph type, analysis type and
-                aggregation below to run a focused user-requested analysis.
+                Once DHIS2 data is retrieved, NEXUS AI automatically generates the baseline report,
+                data-quality assessment, dashboard, trends and M&amp;E intelligence.
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    # Automatic mode: entering a data URL is the only trigger required.
-    automatic_analysis = bool(user_url.strip())
+    # Automatic analysis now starts from the authenticated DHIS2 dataset.
+    automatic_analysis = bool(
+        user_url.strip()
+        or st.session_state.get("data_loaded", False)
+    )
 
-
-    if not user_url.strip():
+    if not user_url.strip() and not st.session_state.get("data_loaded", False):
         st.markdown(
             """
             <div class="empty-state">
                 <div style="font-size:2rem;">📡</div>
-                <strong>Ready to analyze your data</strong>
+                <strong>Connecting to DHIS2...</strong>
                 <div style="margin-top:.35rem;">
-                    Paste your data URL and NEXUS AI will automatically build the analysis,
-                    data-quality assessment, dashboard and intelligence report.
+                    NEXUS is using the authenticated DHIS2 session to retrieve data automatically.
                 </div>
             </div>
             """,
@@ -16370,13 +16682,14 @@ def render_existing_danip_ai_app():
 
     if automatic_analysis or st.session_state.get("data_loaded", False):
 
-        if not user_url.strip():
-            st.warning(
-                "Please paste a DHIS2 URL."
-            )
-            st.stop()
+        if not user_url.strip() and st.session_state.get("data_loaded", False):
+            source_url = st.session_state.get("loaded_source_url", "")
+        else:
+            source_url = user_url.strip()
 
-        source_url = user_url.strip()
+        if not source_url:
+            st.info("Click **📡 Pull DHIS2 2026 Data Automatically** or paste a specific DHIS2 API URL.")
+            st.stop()
 
         previous_url = st.session_state.get(
             "last_analyzed_url"
