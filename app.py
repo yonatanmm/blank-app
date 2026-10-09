@@ -13631,6 +13631,139 @@ def _me_hub_responsive_css():
     .common-sidebar-card{padding:9px 10px;border-radius:9px;background:rgba(255,255,255,.055);border:1px solid rgba(255,255,255,.08);font-size:.68rem;line-height:1.5;color:#dbe5f1!important;-webkit-text-fill-color:#dbe5f1!important}
     .common-sidebar-card b{color:#fff!important;-webkit-text-fill-color:#fff!important}
     .common-sidebar-live{background:rgba(34,197,94,.09);border-color:rgba(34,197,94,.20)}
+
+    /* ============================================================
+       NOURISH-INSPIRED LIGHT EXECUTIVE DASHBOARD OVERRIDE
+       CSS only: preserve all Python logic, data loading and routing.
+       ============================================================ */
+    :root{
+      --nourish-navy:#263f78;
+      --nourish-ink:#172b4d;
+      --nourish-muted:#8093b2;
+      --nourish-border:#dfe6f0;
+      --nourish-canvas:#f7f9fc;
+      --nourish-green:#16a34a;
+      --nourish-orange:#f59e0b;
+    }
+    html,body,[data-testid="stAppViewContainer"],[data-testid="stApp"]{
+      background:var(--nourish-canvas)!important;
+      color:var(--nourish-ink)!important;
+      font-family:Inter,"Segoe UI",Arial,sans-serif!important;
+    }
+    [data-testid="stHeader"]{background:rgba(255,255,255,.96)!important;border-bottom:1px solid var(--nourish-border)!important}
+    [data-testid="stMain"]{background:var(--nourish-canvas)!important}
+    .block-container{max-width:none!important;width:100%!important;padding-top:1rem!important;padding-bottom:2rem!important;padding-left:1.6rem!important;padding-right:1.6rem!important}
+
+    /* White fixed-feel left navigation, like the Nourish reference */
+    [data-testid="stSidebar"],
+    [data-testid="stSidebar"]>div:first-child{
+      background:#fff!important;background-color:#fff!important;
+      border-right:1px solid #dce3ed!important;
+      box-shadow:1px 0 5px rgba(31,50,80,.04)!important;
+    }
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
+    [data-testid="stSidebar"] label,[data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] span{color:#20304b!important;-webkit-text-fill-color:#20304b!important}
+    [data-testid="stSidebar"] .stCaption,[data-testid="stSidebar"] small{color:#8293ad!important;-webkit-text-fill-color:#8293ad!important}
+    .common-sidebar-brand{border-bottom:1px solid #e5eaf2!important;color:#263f78!important;-webkit-text-fill-color:#263f78!important;padding:6px 3px 16px!important}
+    .common-sidebar-mark{background:#263f78!important;border-radius:6px!important}
+    .common-sidebar-name{font-size:1rem!important;font-weight:850!important;letter-spacing:-.025em!important;color:#263f78!important;-webkit-text-fill-color:#263f78!important}
+    .common-sidebar-subtitle{font-size:.65rem!important;color:#8495af!important;-webkit-text-fill-color:#8495af!important}
+    .common-sidebar-section{color:#8998b0!important;-webkit-text-fill-color:#8998b0!important;letter-spacing:.08em!important}
+    .common-sidebar-card{background:#f7f9fc!important;border:1px solid #e0e7f1!important;color:#526582!important;-webkit-text-fill-color:#526582!important;border-radius:9px!important}
+    .common-sidebar-card b,.sidebar-card-title{color:#243b68!important;-webkit-text-fill-color:#243b68!important}
+    .common-sidebar-live{background:#f1fbf5!important;border-color:#d4f1df!important}
+    .sidebar-nav-card{background:#fff!important;border:0!important}
+    .sidebar-nav-item{border-radius:7px!important;color:#263750!important}
+    .sidebar-nav-item:hover{background:#f1f4fa!important}
+
+    /* Main heading and section rhythm */
+    h1,h2,h3,h4,[data-testid="stMarkdownContainer"] h1,
+    [data-testid="stMarkdownContainer"] h2,[data-testid="stMarkdownContainer"] h3{
+      color:var(--nourish-navy)!important;letter-spacing:-.02em!important;
+    }
+    [data-testid="stCaptionContainer"],.stCaption{color:var(--nourish-muted)!important}
+    hr{border-color:#e0e6ef!important}
+
+    /* KPI cards: white surface, thin divider, subtle radius */
+    div[data-testid="stMetric"]{
+      background:#fff!important;border:1px solid var(--nourish-border)!important;
+      border-radius:11px!important;box-shadow:0 1px 2px rgba(28,48,82,.025)!important;
+      padding:1rem 1.05rem!important;min-height:100px!important;
+    }
+    [data-testid="stMetricLabel"],[data-testid="stMetricLabel"] p{
+      color:#8b9bb5!important;-webkit-text-fill-color:#8b9bb5!important;
+      font-size:.69rem!important;font-weight:750!important;letter-spacing:.025em!important;
+    }
+    [data-testid="stMetricValue"],[data-testid="stMetricValue"] div{
+      color:#142846!important;-webkit-text-fill-color:#142846!important;font-weight:800!important;
+    }
+    [data-testid="stMetricDelta"]{font-size:.7rem!important}
+
+    /* Data tables and chart containers */
+    [data-testid="stDataFrame"],[data-testid="stTable"]{
+      background:#fff!important;border:1px solid var(--nourish-border)!important;
+      border-radius:9px!important;overflow:hidden!important;
+    }
+    [data-testid="stPlotlyChart"], [data-testid="stVegaLiteChart"],
+    [data-testid="stArrowVegaLiteChart"]{background:#fff!important;border-radius:10px!important}
+
+    /* Horizontal workspace selector: clean white navigation instead of dark block */
+    [data-testid="stRadio"]{
+      width:100%!important;background:#fff!important;border:1px solid #e0e6ef!important;
+      border-bottom:1px solid #dce4ef!important;border-radius:10px!important;
+      padding:4px!important;margin:0 0 16px!important;overflow-x:auto!important;
+      box-shadow:0 1px 3px rgba(28,48,82,.025)!important;
+    }
+    [data-testid="stRadio"]>label{display:none!important}
+    [data-testid="stRadio"]>div,[data-testid="stRadio"] [role="radiogroup"]{
+      width:100%!important;display:flex!important;flex-direction:row!important;
+      flex-wrap:nowrap!important;gap:4px!important;margin:0!important;padding:0!important;
+    }
+    [data-testid="stRadio"] [role="radio"]{
+      flex:1 1 50%!important;min-width:max-content!important;min-height:42px!important;
+      margin:0!important;padding:8px 15px!important;border:1px solid transparent!important;
+      border-radius:7px!important;background:#fff!important;color:#526582!important;
+      display:flex!important;align-items:center!important;justify-content:center!important;
+      font-size:.78rem!important;font-weight:750!important;white-space:nowrap!important;
+    }
+    [data-testid="stRadio"] [role="radio"] *{color:#526582!important;-webkit-text-fill-color:#526582!important}
+    [data-testid="stRadio"] [role="radio"]:hover{background:#f3f6fb!important}
+    [data-testid="stRadio"] [role="radio"][aria-checked="true"]{
+      background:#edf2ff!important;border-color:#d7e1ff!important;color:#263f78!important;
+    }
+    [data-testid="stRadio"] [role="radio"][aria-checked="true"] *{
+      color:#263f78!important;-webkit-text-fill-color:#263f78!important;
+    }
+    [data-testid="stRadio"] [role="radio"]>div:first-child{display:none!important}
+
+    /* Inputs and action buttons */
+    [data-baseweb="select"]>div,[data-baseweb="input"]>div,
+    [data-testid="stTextInput"] input,[data-testid="stTextArea"] textarea{
+      border-color:#d8e1ee!important;border-radius:7px!important;background:#fff!important;
+    }
+    [data-testid="stButton"]>button,[data-testid="stDownloadButton"]>button{
+      border-radius:7px!important;font-weight:700!important;transition:all .15s ease!important;
+    }
+    [data-testid="stButton"]>button[kind="primary"]{
+      background:#263f78!important;border-color:#263f78!important;color:#fff!important;
+    }
+    [data-testid="stButton"]>button:not([kind="primary"]),
+    [data-testid="stDownloadButton"]>button{
+      background:#fff!important;border-color:#d6dfed!important;color:#263f78!important;
+    }
+    [data-testid="stButton"]>button:hover,[data-testid="stDownloadButton"]>button:hover{
+      border-color:#263f78!important;color:#263f78!important;
+    }
+    [data-testid="stTabs"] [data-baseweb="tab-list"]{
+      gap:18px!important;border-bottom:1px solid #e0e6ef!important;overflow-x:auto!important;flex-wrap:nowrap!important;
+    }
+    [data-testid="stTabs"] [data-baseweb="tab"]{
+      white-space:nowrap!important;color:#7c8eaa!important;font-size:.79rem!important;
+    }
+    [data-testid="stTabs"] [aria-selected="true"]{color:#263f78!important;font-weight:800!important}
+    @media(max-width:900px){.block-container{padding-left:.9rem!important;padding-right:.9rem!important}}
+    @media(max-width:620px){.block-container{padding-left:.55rem!important;padding-right:.55rem!important}[data-testid="stRadio"] [role="radio"]{font-size:.68rem!important;padding:7px 9px!important}}
     </style>
     """, unsafe_allow_html=True)
 
@@ -19562,3 +19695,174 @@ elif workspace == "📅 My Reports & Monitoring":
 # ============================================================
 # END — DANIP AI + SEPARATE DANIP M&E MANAGEMENT HUB
 # ============================================================app
+
+# ============================================================
+# OPTIONAL VISUAL LAYER — NOURISH INVESTMENT OVERVIEW-INSPIRED LAYOUT
+# Presentation-only overrides. Existing app workflows and controls remain intact.
+# ============================================================
+st.markdown(r"""
+<style>
+:root {
+  --nourish-ink: #23385f;
+  --nourish-muted: #7d8da9;
+  --nourish-border: #dfe6f1;
+  --nourish-canvas: #f7f9fc;
+  --nourish-accent: #4d6096;
+  --nourish-green: #19a866;
+}
+html, body, [data-testid="stAppViewContainer"] {
+  background: var(--nourish-canvas) !important;
+  color: #17243b !important;
+}
+[data-testid="stMain"] > div,
+[data-testid="stMainBlockContainer"],
+.block-container {
+  background: transparent !important;
+}
+.block-container {
+  padding-top: .45rem !important;
+  padding-left: 1.25rem !important;
+  padding-right: 1.25rem !important;
+  max-width: 100% !important;
+}
+/* Clean white left navigation similar to the reference dashboard. */
+section[data-testid="stSidebar"],
+[data-testid="stSidebar"] > div:first-child {
+  background: #fff !important;
+  border-right: 1px solid var(--nourish-border) !important;
+  box-shadow: 1px 0 0 rgba(25,45,80,.02) !important;
+}
+[data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] span {
+  color: var(--nourish-ink) !important;
+  -webkit-text-fill-color: var(--nourish-ink) !important;
+}
+[data-testid="stSidebar"] .stCaption,
+[data-testid="stSidebar"] small,
+.common-sidebar-section {
+  color: var(--nourish-muted) !important;
+  -webkit-text-fill-color: var(--nourish-muted) !important;
+}
+.common-sidebar-brand {
+  border-bottom: 1px solid var(--nourish-border) !important;
+  color: var(--nourish-ink) !important;
+}
+.common-sidebar-brand * {
+  color: var(--nourish-ink) !important;
+  -webkit-text-fill-color: var(--nourish-ink) !important;
+}
+.common-sidebar-mark {
+  background: var(--nourish-accent) !important;
+  border-radius: 5px !important;
+}
+.common-sidebar-card {
+  background: #f7f9fc !important;
+  border: 1px solid var(--nourish-border) !important;
+  color: #455777 !important;
+}
+.common-sidebar-card b,
+.common-sidebar-card .sidebar-card-title,
+.common-sidebar-card .sidebar-card-text {
+  color: var(--nourish-ink) !important;
+  -webkit-text-fill-color: var(--nourish-ink) !important;
+}
+.sidebar-nav-card {
+  background: transparent !important;
+  border: 0 !important;
+  padding: 0 !important;
+}
+.sidebar-nav-item {
+  border: 1px solid transparent !important;
+  border-radius: 7px !important;
+  color: var(--nourish-ink) !important;
+  margin: 3px 0 !important;
+  padding: 10px 9px !important;
+}
+.sidebar-nav-item:hover {
+  background: #f1f4fa !important;
+  border-color: #e5eaf4 !important;
+}
+.sidebar-nav-item b,
+.sidebar-nav-item small {
+  color: var(--nourish-ink) !important;
+  -webkit-text-fill-color: var(--nourish-ink) !important;
+}
+/* The actual workspace switch remains interactive; restyle as a clean top nav. */
+div[data-testid="stRadio"] div[role="radiogroup"] {
+  min-height: 43px !important;
+  border-bottom: 1px solid var(--nourish-border) !important;
+  gap: 5px !important;
+}
+div[data-testid="stRadio"] div[role="radiogroup"] > label {
+  color: var(--nourish-ink) !important;
+  -webkit-text-fill-color: var(--nourish-ink) !important;
+  font-size: .82rem !important;
+  font-weight: 650 !important;
+  padding: 0 15px !important;
+}
+div[data-testid="stRadio"] div[role="radiogroup"] > label p,
+div[data-testid="stRadio"] div[role="radiogroup"] > label span,
+div[data-testid="stRadio"] div[role="radiogroup"] > label div {
+  color: var(--nourish-ink) !important;
+  -webkit-text-fill-color: var(--nourish-ink) !important;
+}
+div[data-testid="stRadio"] div[role="radiogroup"] > label:has(input:checked)::after {
+  background: var(--nourish-accent) !important;
+  height: 3px !important;
+  border-radius: 3px 3px 0 0 !important;
+}
+/* White cards, light borders and understated shadows. */
+div[data-testid="stMetric"],
+[data-testid="stVerticalBlockBorderWrapper"],
+[data-testid="stDataFrame"],
+[data-testid="stTable"] {
+  border-color: var(--nourish-border) !important;
+  border-radius: 11px !important;
+}
+div[data-testid="stMetric"] {
+  background: #fff !important;
+  box-shadow: 0 2px 7px rgba(29,48,83,.035) !important;
+  padding: .8rem .9rem !important;
+}
+[data-testid="stMetricLabel"],
+[data-testid="stCaptionContainer"] {
+  color: var(--nourish-muted) !important;
+}
+[data-testid="stMetricValue"] {
+  color: var(--nourish-ink) !important;
+  font-weight: 750 !important;
+}
+[data-testid="stTabs"] [data-baseweb="tab-list"] {
+  border-bottom: 1px solid var(--nourish-border) !important;
+  gap: 8px !important;
+}
+[data-testid="stTabs"] [data-baseweb="tab"] {
+  color: var(--nourish-muted) !important;
+  font-weight: 600 !important;
+}
+[data-testid="stTabs"] [aria-selected="true"] {
+  color: var(--nourish-ink) !important;
+  border-bottom-color: var(--nourish-accent) !important;
+}
+[data-testid="stButton"] > button {
+  border-radius: 7px !important;
+  border-color: #d6dfed !important;
+  font-weight: 650 !important;
+}
+[data-testid="stButton"] > button[kind="primary"] {
+  background: var(--nourish-accent) !important;
+  border-color: var(--nourish-accent) !important;
+  color: #fff !important;
+}
+input, textarea, [data-baseweb="select"] > div {
+  border-color: #d7e0ee !important;
+  border-radius: 7px !important;
+}
+@media (max-width: 760px) {
+  .block-container { padding-left: .65rem !important; padding-right: .65rem !important; }
+  div[data-testid="stRadio"] div[role="radiogroup"] > label { padding: 0 9px !important; font-size: .72rem !important; }
+}
+</style>
+""", unsafe_allow_html=True)
