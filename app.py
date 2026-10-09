@@ -92,7 +92,7 @@ st.set_page_config(
     page_title="NEXUS DANIP AI Data Intelligence",
     page_icon="🧠",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="auto",
 )
 
 # ============================================================
@@ -19983,6 +19983,108 @@ div[data-testid="stRadio"] div[role="radiogroup"] {
   [data-testid="stButton"] > button,
   [data-testid="stDownloadButton"] > button { font-size: .8rem !important; }
   [data-testid="stMetricValue"] { font-size: 1.2rem !important; }
+}
+</style>
+""", unsafe_allow_html=True)
+
+
+# ============================================================
+# FINAL SIDEBAR RESPONSIVENESS OVERRIDE
+# Keep the sidebar available on every screen, but let Streamlit
+# start it collapsed on narrow/mobile viewports (initial state=auto).
+# CSS-only: no authentication, data, or dashboard logic changes.
+# ============================================================
+st.markdown(r"""
+<style>
+/* Sidebar width and sizing: desktop */
+section[data-testid="stSidebar"] {
+  box-sizing: border-box !important;
+  min-width: 0 !important;
+  max-width: min(320px, 32vw) !important;
+}
+section[data-testid="stSidebar"] > div {
+  box-sizing: border-box !important;
+  width: 100% !important;
+  min-width: 0 !important;
+}
+section[data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+  box-sizing: border-box !important;
+  width: 100% !important;
+  min-width: 0 !important;
+  padding-left: clamp(.65rem, 2vw, 1rem) !important;
+  padding-right: clamp(.65rem, 2vw, 1rem) !important;
+}
+section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
+section[data-testid="stSidebar"] [data-testid="stVerticalBlock"],
+section[data-testid="stSidebar"] [data-testid="stElementContainer"] {
+  min-width: 0 !important;
+  max-width: 100% !important;
+  box-sizing: border-box !important;
+}
+section[data-testid="stSidebar"] img,
+section[data-testid="stSidebar"] svg,
+section[data-testid="stSidebar"] iframe {
+  max-width: 100% !important;
+}
+section[data-testid="stSidebar"] .stButton > button,
+section[data-testid="stSidebar"] .stDownloadButton > button {
+  width: 100% !important;
+  max-width: 100% !important;
+  white-space: normal !important;
+  overflow-wrap: anywhere !important;
+}
+section[data-testid="stSidebar"] [data-testid="stHorizontalBlock"] {
+  flex-wrap: wrap !important;
+  min-width: 0 !important;
+}
+section[data-testid="stSidebar"] [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+  min-width: 0 !important;
+  box-sizing: border-box !important;
+}
+
+/* Tablet */
+@media (max-width: 900px) {
+  section[data-testid="stSidebar"] { max-width: min(300px, 42vw) !important; }
+  section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
+    overflow-wrap: anywhere !important;
+  }
+}
+
+/* Phone: sidebar can still be opened with Streamlit's menu button,
+   but when open it uses most of the viewport without squeezing content. */
+@media (max-width: 640px) {
+  section[data-testid="stSidebar"] {
+    width: min(86vw, 340px) !important;
+    min-width: min(86vw, 340px) !important;
+    max-width: min(86vw, 340px) !important;
+  }
+  section[data-testid="stSidebar"] > div,
+  section[data-testid="stSidebar"] [data-testid="stSidebarContent"] {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+  }
+  section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+  section[data-testid="stSidebar"] [data-testid="stMarkdownContainer"] li,
+  section[data-testid="stSidebar"] label,
+  section[data-testid="stSidebar"] small {
+    font-size: .82rem !important;
+    line-height: 1.45 !important;
+    overflow-wrap: anywhere !important;
+    word-break: normal !important;
+  }
+  section[data-testid="stSidebar"] [data-testid="stMetric"] {
+    min-width: 0 !important;
+    padding: .65rem !important;
+  }
+  section[data-testid="stSidebar"] [data-testid="stRadio"] [role="radio"] {
+    white-space: normal !important;
+    overflow-wrap: anywhere !important;
+  }
+  section[data-testid="stSidebar"] [data-testid="stExpander"] {
+    width: 100% !important;
+    min-width: 0 !important;
+  }
 }
 </style>
 """, unsafe_allow_html=True)
