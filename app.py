@@ -11423,6 +11423,110 @@ def _chat_external_status_block(external_context, explicit_external_request=Fals
 
 
 
+
+
+def _chat_frame_to_markdown(frame, index=False):
+    """Render a small dataframe as Markdown without the optional tabulate package."""
+    if not isinstance(frame, pd.DataFrame):
+        return ""
+    view = frame.copy()
+    if index:
+        view = view.reset_index()
+    columns = [str(c) for c in view.columns]
+    def cell(value):
+        try:
+            if pd.isna(value):
+                value = ""
+        except (TypeError, ValueError):
+            pass
+        return str(value).replace("|", r"\|").replace("\r", " ").replace("\n", " ").strip()
+    rows = [[cell(v) for v in row] for row in view.itertuples(index=False, name=None)]
+    if not columns:
+        return ""
+    widths = [max(len(columns[i]), *(len(row[i]) for row in rows)) for i in range(len(columns))] if rows else [len(c) for c in columns]
+    header = "| " + " | ".join(columns[i].ljust(widths[i]) for i in range(len(columns))) + " |"
+    separator = "| " + " | ".join("-" * max(3, widths[i]) for i in range(len(columns))) + " |"
+    body = ["| " + " | ".join(row[i].ljust(widths[i]) for i in range(len(columns))) + " |" for row in rows]
+    return "\n".join([header, separator, *body])
+
+
+def _chat_top_missing_fields_answer(df):
+    """Rank fields by actual null/blank counts and list affected organization-period records."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return {"status": "NO_DHIS2_DATA", "source": "NO_DHIS2_DATA", "text": "The Complete Loaded Dataset is empty. Load the active dataset before requesting missing-value analysis."}
+
+    def is_missing(series):
+        mask = series.isna()
+        if pd.api.types.is_object_dtype(series.dtype) or pd.api.types.is_string_dtype(series.dtype):
+            mask = mask | series.astype("string").str.strip().eq("").fillna(False)
+        return mask
+
+    org_col = next((c for c in df.columns if str(c).strip().lower() in {
+        "organisationunitname", "organizationunitname", "organisation unit name", "organization unit name",
+        "organisation_unit_name", "organization_unit_name", "country", "country name", "facility", "facility name"
+    }), None)
+    period_col = next((c for c in df.columns if str(c).strip().lower() in {
+        "periodname", "period_name", "period name", "period", "reporting period", "reporting month", "month", "date"
+    }), None)
+
+    stats = []
+    masks = {}
+    total = len(df)
+    for col in df.columns:
+        mask = is_missing(df[col])
+        missing = int(mask.sum())
+        masks[col] = mask
+        stats.append({"Field": str(col), "Total missing records": missing,
+                      "Valid records": int(total - missing),
+                      "Missing percentage": (missing / total * 100.0) if total else 0.0})
+    stats.sort(key=lambda r: (-r["Total missing records"], r["Field"].casefold()))
+    top = [r for r in stats if r["Total missing records"] > 0][:3]
+    if not top:
+        return {"status": "SUCCESS", "source": "DANIP_COMPLETE_LOADED_DATASET", "text": (
+            f"## Missing-value analysis\n\nSource: **Complete Loaded Dataset**. Examined **{total:,} records** and **{len(df.columns):,} fields**. "
+            "No null or blank values were found in any field. Valid zeros were retained as reported values. No overall data-quality score was assigned."
+        ), "missing_value_analysis": {"rows": total, "fields": len(df.columns), "top_fields": []}}
+
+    summary = pd.DataFrame(top)
+    summary["Missing percentage"] = summary["Missing percentage"].map(lambda v: f"{v:.2f}%")
+    lines = [
+        "## Missing-value analysis — active Complete Loaded Dataset", "",
+        f"**Records examined:** {total:,}  ",
+        f"**Fields examined:** {len(df.columns):,}  ",
+        f"**Organization field:** `{org_col}`" if org_col else "**Organization field:** not identified in the schema",
+        f"**Reporting-period field:** `{period_col}`" if period_col else "**Reporting-period field:** not identified in the schema",
+        "", "### Three fields with the most missing values", "",
+        _chat_frame_to_markdown(summary, index=False), "",
+        "### Affected facilities and reporting periods", ""
+    ]
+    affected_records = {}
+    for item in top:
+        col = item["Field"]
+        mask = masks[col]
+        id_cols = [c for c in (org_col, period_col) if c]
+        lines.extend([f"**{col}** — {item['Total missing records']:,} missing, {item['Valid records']:,} valid ({item['Missing percentage']:.2f}% missing).", ""])
+        if id_cols:
+            affected = df.loc[mask, id_cols].copy().drop_duplicates()
+            affected_records[col] = affected.to_dict(orient="records")
+            if affected.empty:
+                lines.append("No affected organization-period identifiers were available.")
+            else:
+                lines.append(_chat_frame_to_markdown(affected, index=False))
+        else:
+            affected_records[col] = []
+            lines.append("Facility and reporting-period names could not be listed because the corresponding identifier fields were not found.")
+        lines.append("")
+    lines += [
+        "### Data interpretation and limitations", "",
+        "Missing values were identified from nulls and blank/whitespace-only text. **Numeric zero is treated as a valid reported value, not as missing.**",
+        "Counts and percentages above are calculated across all rows in the active dataframe. No stock reconciliation was performed, and no overall data-quality score was assigned because no documented scoring method and required inputs were provided."
+    ]
+    return {"status": "SUCCESS", "source": "DANIP_COMPLETE_LOADED_DATASET", "text": "\n".join(lines),
+            "missing_value_analysis": {"rows": total, "fields": len(df.columns), "top_fields": top,
+                                       "affected_records": affected_records, "organization_column": org_col,
+                                       "period_column": period_col}}
+
+
 def _chat_classify_analysis_intent(question):
     """Classify the requested operation before selecting an analysis function.
 
@@ -11564,7 +11668,7 @@ def _chat_indicator_ranking_answer(df, question):
         f"**Source:** Complete Loaded Dataset (active dataset).\n\n"
         f"**Field used:** `{value_col}`\n\n"
         f"**Result:** {direction.title()} value = **{float(extreme):,.6g}** across **{len(valid):,} valid numeric records**; **{len(df):,} loaded records examined**. Missing/non-numeric values excluded: **{excluded:,}**. Valid zeros were retained.\n\n"
-        f"**Country/facility and reporting month (all ties):**\n\n{ties.to_markdown(index=False)}\n\n"
+        f"**Country/facility and reporting month (all ties):**\n\n{_chat_frame_to_markdown(ties, index=False)}\n\n"
         f"Ranking was calculated deterministically with Pandas from the active dataset. No stock fields were required and no stock reconciliation was performed."
     ), "indicator_ranking":{"indicator":str(value_col),"direction":direction,"extreme_value":float(extreme),"ties":ties.to_dict(orient="records"),"valid_records_examined":int(len(valid)),"loaded_records_examined":int(len(df)),"missing_or_nonnumeric_excluded":excluded,"organisation_column":org_col,"period_column":period_col}}
 
@@ -11663,7 +11767,7 @@ def _chat_dataset_profile_answer(df, question):
             if id_cols:
                 missing_rows = df[df.isna().any(axis=1)]
                 if not missing_rows.empty:
-                    lines += ["", "**First 20 rows containing null values (identifiers only):**", "", missing_rows[id_cols].head(20).to_markdown(index=False)]
+                    lines += ["", "**First 20 rows containing null values (identifiers only):**", "", _chat_frame_to_markdown(missing_rows[id_cols].head(20), index=False)]
     lines += ["", "### Verified findings", "",
         f"- The dataframe contains **{missing_cells:,} missing cells** out of **{total_cells:,} total cells** (blank/null cell rate: **{(missing_cells / total_cells * 100) if total_cells else 0:.2f}%**).",
         "- Numeric summaries above are calculated from all rows in the active dataframe for each listed field. Invalid text values are treated as missing for that field; valid zeros are retained.",
@@ -12180,6 +12284,21 @@ def ask_analysis_chatbot(
             return {"status":"NO_DHIS2_DATA", "source":"NO_DHIS2_DATA", "text":"The active Complete Loaded Dataset is not loaded. Load the DHIS2 data before requesting this indicator ranking."}
         result = _chat_indicator_ranking_answer(current_df, question)
         # Store the active dataframe, never a previous answer/result.
+        st.session_state["nexus_chat_df"] = current_df
+        st.session_state["nexus_chat_source_url"] = current_source
+        return result
+
+    # Deterministic missing-field ranking must run before general dataset interpretation.
+    q_missing = question.lower()
+    asks_top_missing_fields = (
+        ("missing" in q_missing or "blank" in q_missing or "null" in q_missing)
+        and any(term in q_missing for term in ("top three", "three fields", "3 fields", "highest number", "most missing", "highest number of missing", "missing percentage"))
+    )
+    if asks_top_missing_fields:
+        _report_progress("I’m counting null and blank values across every field in the active Complete Loaded Dataset, then listing affected organization-period records. Zeros remain valid values; no stock reconciliation or quality score is used.")
+        if current_df is None or current_df.empty:
+            return {"status":"NO_DHIS2_DATA", "source":"NO_DHIS2_DATA", "text":"The active Complete Loaded Dataset is not loaded. Load the dataset before requesting missing-value analysis."}
+        result = _chat_top_missing_fields_answer(current_df)
         st.session_state["nexus_chat_df"] = current_df
         st.session_state["nexus_chat_source_url"] = current_source
         return result
