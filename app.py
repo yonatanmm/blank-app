@@ -3,6 +3,7 @@
 import os
 import base64
 import hashlib
+import math
 import hmac
 import secrets
 import html
@@ -10432,55 +10433,156 @@ def _chat_filter_internal_km_matches(question, rag):
     return out
 
 def retrieve_rag_context(question, indicators=None, top_k=RAG_TOP_K):
+    """Retrieve relevant internal guidance using generic, indicator-aware ranking.
+
+    This function is intentionally independent of the UI and DHIS2 loading.
+    It ranks the actual loaded knowledge chunks; it never supplies numerical
+    observations, and it does not assume a particular indicator or programme.
+    """
+    question_text = _rag_normalize(question)
     chunks, warnings = _rag_load_knowledge()
-    q_terms=_rag_terms(question)
-    extra=_rag_terms(" ".join(str(x) for x in (indicators or [])))
-    q_terms |= extra
+    if not question_text:
+        return {"chunks": [], "warnings": warnings, "source_name": RAG_SOURCE_NAME,
+                "query": question_text, "retrieval_status": "EMPTY_QUERY"}
     if not chunks:
-        return {"chunks":[],"warnings":warnings,"source_name":RAG_SOURCE_NAME}
+        return {"chunks": [], "warnings": warnings, "source_name": RAG_SOURCE_NAME,
+                "query": question_text, "retrieval_status": "NO_KNOWLEDGE"}
 
-    scored=[]
-    qlow=str(question or "").lower()
-    concept_terms = _chat_requested_concepts(question)
-    for c in chunks:
-        chunk_text = str(c.get("text", ""))
-        source_text = str(c.get("source", ""))
-        terms=_rag_terms(chunk_text)
-        overlap=len(q_terms & terms)
-        exact=0
-        for phrase in re.findall(r"\b[a-z0-9][a-z0-9 #:%()\-/]{3,100}\b", qlow):
-            phrase=phrase.strip()
-            if len(phrase)>5 and phrase in chunk_text.lower():
-                exact += 8
-        score = overlap + exact
+    # Include resolved indicator labels as retrieval hints, but keep the user's
+    # wording as the main query so a broad indicator name cannot dominate a
+    # specific request (e.g. formula, numerator, country applicability).
+    indicator_hints = [str(x).strip() for x in (indicators or []) if str(x).strip()]
+    query_text = question_text + (" " + " ".join(indicator_hints) if indicator_hints else "")
+    query_terms = _rag_terms(query_text)
+    question_terms = _rag_terms(question_text)
 
-        # PMF questions should preferentially retrieve the dedicated worksheet.
-        if "pmf" in qlow or "rollup" in qlow or "readiness" in qlow or "global_rollup_matrix" in qlow:
-            if RAG_GOOGLE_SHEET_TAB.lower() in chunk_text.lower() or RAG_GOOGLE_SHEET_TAB.lower() in source_text.lower():
-                score += 25
-
-        # Concept-aware ranking for Internal KM. Strongly reward the requested
-        # intervention/indicator concept and penalize a missing required concept.
-        if "mms" in concept_terms:
-            if "mms" in chunk_text.lower() or "multiple micronutrient" in chunk_text.lower():
-                score += 80
-            else:
-                score -= 100
-        if "pregnant" in concept_terms:
-            if "pregnant" in chunk_text.lower() or "pregnancy" in chunk_text.lower():
-                score += 25
-
-        if score>0:
-            scored.append((score,c))
-
-    scored.sort(key=lambda x: (-x[0], str(x[1].get("source", ""))))
-    result = {
-        "chunks":[c for _,c in scored[:top_k]],
-        "warnings":warnings,
-        "source_name":RAG_SOURCE_NAME,
-        "concepts":sorted(concept_terms),
+    stop_words = {
+        "the", "and", "for", "with", "from", "that", "this", "what", "which",
+        "where", "when", "how", "does", "did", "are", "was", "were", "can",
+        "could", "would", "should", "about", "into", "show", "tell", "give",
+        "please", "using", "use", "data", "indicator", "indicators", "value",
+        "values", "report", "reported", "current", "loaded", "dataset", "based",
+        "according", "explain", "describe", "find", "get", "from", "all", "any",
     }
-    return result
+    query_terms = {t for t in query_terms if t not in stop_words and len(t) > 1}
+    question_terms = {t for t in question_terms if t not in stop_words and len(t) > 1}
+    if not query_terms:
+        query_terms = {t for t in _rag_terms(query_text) if len(t) > 1}
+
+    # Document frequency provides a lightweight TF-IDF-like score without adding
+    # a dependency or changing the app's deployment requirements.
+    token_sets = []
+    document_frequency = {}
+    for chunk in chunks:
+        text = str(chunk.get("text", ""))
+        terms = _rag_terms(text)
+        token_sets.append(terms)
+        for term in query_terms.intersection(terms):
+            document_frequency[term] = document_frequency.get(term, 0) + 1
+
+    total_docs = max(1, len(chunks))
+    qlow = re.sub(r"\s+", " ", question_text.lower()).strip()
+    requested_concepts = _chat_requested_concepts(question_text)
+    pmf_request = any(x in qlow for x in (
+        "pmf", "rollup", "roll-up", "readiness", "global_rollup_matrix",
+        "global rollup matrix", "portfolio monitoring framework"
+    ))
+    scored = []
+    for index, chunk in enumerate(chunks):
+        body = _rag_normalize(chunk.get("text", ""))
+        body_lower = body.lower()
+        source = str(chunk.get("source", "unknown"))
+        source_lower = source.lower()
+        terms = token_sets[index]
+        overlap = question_terms.intersection(terms)
+        hint_overlap = (query_terms - question_terms).intersection(terms)
+
+        # Rare query terms carry more weight than common terms. The original
+        # question's terms weigh more than the optional indicator hints.
+        lexical_score = 0.0
+        for term in overlap:
+            df = document_frequency.get(term, 0)
+            lexical_score += 1.0 + (math.log((total_docs + 1) / (df + 1)) if df else 0.0)
+        for term in hint_overlap:
+            df = document_frequency.get(term, 0)
+            lexical_score += 0.35 * (1.0 + (math.log((total_docs + 1) / (df + 1)) if df else 0.0))
+
+        # Exact multiword matches are a strong signal, but phrases are extracted
+        # only from the user's query, not from generic instruction words.
+        phrase_score = 0.0
+        normalized_question = _chat_normalize_text(question_text)
+        for phrase in re.findall(r"[a-z0-9][a-z0-9 .%()/\-]{3,90}", normalized_question):
+            phrase = re.sub(r"\s+", " ", phrase).strip(" .-/")
+            phrase_terms = [t for t in _rag_terms(phrase) if t not in stop_words and len(t) > 1]
+            if len(phrase_terms) >= 2 and phrase in _chat_normalize_text(body):
+                phrase_score = max(phrase_score, 5.0 + min(len(phrase_terms), 8) * 0.5)
+
+        score = lexical_score + phrase_score
+
+        # Prefer the PMF worksheet only for PMF/readiness/roll-up questions.
+        if pmf_request:
+            is_pmf_source = RAG_GOOGLE_SHEET_TAB.lower() in source_lower or "google sheet" in source_lower
+            is_pmf_body = "global pmf code" in body_lower or "pmf_row" in body_lower
+            if is_pmf_source or is_pmf_body:
+                score += 12.0
+            elif "source role: primary pmf indicator source" in body_lower:
+                score += 10.0
+
+        # When a strong programme concept is explicit, penalize chunks that do
+        # not discuss it. This is generic concept protection, not indicator logic.
+        concept_terms = {
+            "mms": ("mms", "multiple micronutrient"),
+            "wifa": ("wifa", "iron folic", "ifa"),
+            "vas": ("vas", "vitamin a"),
+            "zinc": ("zinc",),
+            "fortified_food": ("fortified food", "fortification", "fortified products"),
+            "pregnant": ("pregnant", "pregnancy"),
+            "newborn": ("newborn", "neonatal", "neonate"),
+            "children": ("children", "child", "under five"),
+        }
+        for concept in requested_concepts:
+            phrases = concept_terms.get(concept)
+            if not phrases:
+                continue
+            if any(term in body_lower for term in phrases):
+                score += 3.0
+            else:
+                score -= 7.0
+
+        # Definitions/formulas should favor source chunks that explicitly contain
+        # metadata terms; this does not create or infer missing definitions.
+        if any(term in qlow for term in ("definition", "defined", "meaning", "formula", "numerator", "denominator", "calculated", "calculation")):
+            if any(term in body_lower for term in ("definition", "numerator", "denominator", "formula", "calculation", "means", "measure of")):
+                score += 2.5
+
+        if score > 0:
+            scored.append((score, chunk))
+
+    scored.sort(key=lambda item: (-item[0], str(item[1].get("source", ""))))
+    limit = max(1, int(top_k or RAG_TOP_K))
+    selected = [chunk for score, chunk in scored[:limit] if score >= 1.25]
+
+    # If ranking has evidence but the threshold removed everything, retain only
+    # the strongest result when its score is meaningful; otherwise report no match.
+    if not selected and scored and scored[0][0] >= 1.0:
+        selected = [scored[0][1]]
+
+    retrieval_status = "MATCHES_FOUND" if selected else "NO_RELEVANT_MATCH"
+    if not selected:
+        warnings = list(warnings or [])
+        warnings.append("No knowledge chunk met the relevance threshold for this question.")
+
+    return {
+        "chunks": selected,
+        "warnings": warnings,
+        "source_name": RAG_SOURCE_NAME,
+        "concepts": sorted(requested_concepts),
+        "query": question_text,
+        "indicator_hints": indicator_hints,
+        "retrieval_status": retrieval_status,
+        "candidate_count": len(scored),
+        "matched_count": len(selected),
+    }
 
 
 def _rag_context_text(result):
