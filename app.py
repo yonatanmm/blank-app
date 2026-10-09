@@ -11573,6 +11573,149 @@ def _chat_indicator_ranking_answer(df, question):
 def _chat_mms_pregnancy_indicator_ranking_answer(df, question):
     return _chat_indicator_ranking_answer(df, question)
 
+
+def _chat_dataset_profile_answer(df, question):
+    """Create a conservative, data-grounded summary from the active loaded dataframe."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return {"status":"NO_DHIS2_DATA", "source":"NO_DHIS2_DATA", "text":"The Complete Loaded Dataset is empty. Load a dataset before requesting numerical interpretation."}
+
+    import re as _re
+    q = str(question or "").lower()
+    org_col = next((c for c in df.columns if str(c).strip().lower() in {
+        "organisationunitname", "organizationunitname", "organisation unit name",
+        "organization unit name", "organisation_unit_name", "organization_unit_name",
+        "country", "country name", "facility", "facility name"
+    }), None)
+    period_col = next((c for c in df.columns if str(c).strip().lower() in {
+        "periodname", "period_name", "period name", "period", "reporting period",
+        "reporting month", "month", "date"
+    }), None)
+
+    # Only columns containing at least one valid numeric value are eligible.
+    numeric = {}
+    for col in df.columns:
+        if col == org_col or col == period_col:
+            continue
+        vals = pd.to_numeric(df[col], errors="coerce")
+        if vals.notna().any():
+            numeric[col] = vals
+
+    if not numeric:
+        return {"status":"NO_NUMERIC_FIELDS", "source":"DANIP_COMPLETE_LOADED_DATASET", "text":(
+            f"The active Complete Loaded Dataset contains **{len(df):,} records** and **{len(df.columns):,} columns**, "
+            "but no numeric field with valid values was detected. I cannot calculate an average, minimum or maximum. "
+            "No indicator or unit was inferred from the form title."
+        )}
+
+    # Resolve a specifically requested field only when semantic overlap is decisive.
+    selected = _chat_resolve_ranking_column(df, question)
+    asks_single = any(t in q for t in ("average of", "average for", "mean of", "minimum of", "maximum of", "min of", "max of", "summary of", "interpret the indicator", "analyze the indicator", "analyse the indicator"))
+    if asks_single and selected is None:
+        return {"status":"INDICATOR_COLUMN_UNAVAILABLE_OR_AMBIGUOUS", "source":"DANIP_COMPLETE_LOADED_DATASET", "text":(
+            "I could not confidently identify one indicator column in the active Complete Loaded Dataset. "
+            "I have not substituted another field. Please include the exact indicator/column label. "
+            "Available numeric fields: " + ", ".join(str(c) for c in numeric.keys()) + "."
+        )}
+
+    chosen = [selected] if selected in numeric else list(numeric.keys())
+    # A broad dataset summary is capped for readability, but counts below refer to the full dataframe.
+    if selected not in numeric:
+        chosen = chosen[:12]
+    lines = [
+        "## Evidence-based interpretation of the active dataset", "",
+        "**Source:** Complete Loaded Dataset (the active dataframe displayed in the application).",
+        f"**Records examined:** {len(df):,}",
+        f"**Columns:** {len(df.columns):,}",
+        f"**Organization field:** `{org_col}`" if org_col else "**Organization field:** not identified from the available schema",
+        f"**Reporting-period field:** `{period_col}`" if period_col else "**Reporting-period field:** not identified from the available schema",
+        "",
+        "### Numeric field evidence", "",
+        "| Field | Valid numeric values | Missing/non-numeric | Average | Minimum | Maximum |",
+        "|---|---:|---:|---:|---:|---:|"
+    ]
+    for col in chosen:
+        vals = numeric[col]
+        valid = vals.dropna()
+        missing = int(vals.isna().sum())
+        if valid.empty:
+            continue
+        lines.append(
+            f"| `{str(col).replace('|', r'\|')}` | {len(valid):,} | {missing:,} | "
+            f"{valid.mean():,.4f} | {valid.min():,.4f} | {valid.max():,.4f} |"
+        )
+
+    missing_cells = int(df.isna().sum().sum())
+    total_cells = int(df.shape[0] * df.shape[1])
+    if any(t in q for t in ("missing", "blank", "data quality", "quality issue", "dqa", "completeness")):
+        lines += ["", "### Missing-value profile", "", "| Field | Missing/null cells | Missing rate |", "|---|---:|---:|"]
+        for col in df.columns:
+            # Treat nulls and whitespace-only strings as missing for quality reporting.
+            series = df[col]
+            miss_count = int(series.isna().sum())
+            if series.dtype == object or pd.api.types.is_string_dtype(series.dtype):
+                miss_count = int((series.isna() | series.astype("string").str.strip().eq("")).sum())
+            rate = (miss_count / len(df) * 100) if len(df) else 0
+            if miss_count:
+                lines.append(f"| `{str(col).replace('|', r'\|')}` | {miss_count:,} | {rate:.2f}% |")
+        if org_col or period_col:
+            lines += ["", "Missing records are counted from the actual active rows. Where available, organization and reporting-period fields can be used to locate the affected records."]
+            id_cols = [c for c in (org_col, period_col) if c]
+            if id_cols:
+                missing_rows = df[df.isna().any(axis=1)]
+                if not missing_rows.empty:
+                    lines += ["", "**First 20 rows containing null values (identifiers only):**", "", missing_rows[id_cols].head(20).to_markdown(index=False)]
+    lines += ["", "### Verified findings", "",
+        f"- The dataframe contains **{missing_cells:,} missing cells** out of **{total_cells:,} total cells** (blank/null cell rate: **{(missing_cells / total_cells * 100) if total_cells else 0:.2f}%**).",
+        "- Numeric summaries above are calculated from all rows in the active dataframe for each listed field. Invalid text values are treated as missing for that field; valid zeros are retained.",
+        "- The dataset does not, by itself, establish indicator definitions, units, targets, denominators, or expected direction unless these are documented in available metadata.",
+        "", "### M&E interpretation and limitations", "",
+        "These are descriptive statistics, not a performance rating. A larger value does not necessarily mean better performance; interpretation depends on the documented indicator definition, unit, denominator, target and reporting context.",
+        "A data-quality score has **not** been assigned because a documented scoring method and its required inputs have not been established by this calculation. The missing-cell rate is reported as a descriptive quality metric only."
+    ]
+    return {"status":"SUCCESS", "source":"DANIP_COMPLETE_LOADED_DATASET", "text":"\n".join(lines),
+            "dataset_profile":{"rows":int(len(df)),"columns":int(len(df.columns)),"numeric_fields":chosen,
+            "missing_cells":missing_cells,"total_cells":total_cells,"organization_column":org_col,"period_column":period_col}}
+
+
+def _chat_is_general_dataset_interpretation_question(question):
+    """Recognize broad data interpretation/statistics requests without hijacking specialized workflows."""
+    q = str(question or "").lower()
+    if _chat_is_explicit_stock_reconciliation_question(q):
+        return False
+    # Specific intents have dedicated deterministic handlers elsewhere.
+    if _chat_classify_analysis_intent(q) in {"indicator_ranking", "percentage_change", "trend_or_change", "zero_value_analysis", "stock_reconciliation"}:
+        return False
+    if any(term in q for term in ("missing values", "missing data", "blank values", "not reported", "data quality", "quality issue", "dqa", "completeness")):
+        return True
+    return any(term in q for term in (
+        "interpret the loaded dataset", "interpret this dataset", "interpret the data",
+        "analyze the loaded dataset", "analyse the loaded dataset", "summarize the dataset",
+        "summarise the dataset", "main findings in this dataset", "main findings from this dataset",
+        "what does the dataset show", "what do the data show", "evidence-based interpretation",
+        "average, minimum and maximum", "average minimum and maximum", "give me a simple interpretation",
+        "summarize the loaded data", "summarise the loaded data", "dataset summary"
+    ))
+
+
+def _chat_dataset_sample_questions(df):
+    """Build up to six context-aware suggested questions from the current schema."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return ["What M&E concepts can you explain?", "Find an official indicator definition in the internal compendium."]
+    cols = list(df.columns)
+    org = any(str(c).strip().lower() in {"organisationunitname", "organizationunitname", "country", "facility", "facility name", "organisation unit name"} for c in cols)
+    period = any(str(c).strip().lower() in {"periodname", "period", "period_name", "reporting period", "reporting month", "date", "month"} for c in cols)
+    nums = [c for c in cols if pd.to_numeric(df[c], errors="coerce").notna().any()]
+    questions = ["Give me a simple interpretation of the loaded dataset.", "What are the main findings in this dataset?"]
+    if nums and org:
+        questions.append(f"Which location has the highest value for {nums[0]}?")
+        questions.append(f"Which location has the lowest value for {nums[0]}?")
+        questions.append(f"How do values for {nums[0]} differ across locations?")
+    if period and nums:
+        questions.append(f"What changes are visible over reporting periods for {nums[0]}?")
+    questions.append("Which fields contain missing or blank values?")
+    # Deduplicate, only suggest queries whose prerequisites exist, and limit to six.
+    return list(dict.fromkeys(questions))[:6]
+
 def _chat_is_closing_stock_extremes_question(question):
     """Detect requests for monthly highest/lowest reported closing stock, not reconciliation."""
     q = str(question or "").lower()
@@ -12037,6 +12180,15 @@ def ask_analysis_chatbot(
             return {"status":"NO_DHIS2_DATA", "source":"NO_DHIS2_DATA", "text":"The active Complete Loaded Dataset is not loaded. Load the DHIS2 data before requesting this indicator ranking."}
         result = _chat_indicator_ranking_answer(current_df, question)
         # Store the active dataframe, never a previous answer/result.
+        st.session_state["nexus_chat_df"] = current_df
+        st.session_state["nexus_chat_source_url"] = current_source
+        return result
+
+    if _chat_is_general_dataset_interpretation_question(question):
+        _report_progress("I’m inspecting the active Complete Loaded Dataset schema and calculating descriptive statistics from its current rows; no cached answer or stock reconciliation is being used.")
+        if current_df is None or current_df.empty:
+            return {"status":"NO_DHIS2_DATA", "source":"NO_DHIS2_DATA", "text":"The active Complete Loaded Dataset is not loaded. Load the dataset before requesting numerical interpretation."}
+        result = _chat_dataset_profile_answer(current_df, question)
         st.session_state["nexus_chat_df"] = current_df
         st.session_state["nexus_chat_source_url"] = current_source
         return result
@@ -12639,10 +12791,22 @@ def render_analysis_chatbot(
     # the button in a normal second column makes it jump to the far right.
     # We keep the widget in the same main content area and pull the clear
     # control back to the right edge of the chat composer with responsive CSS.
+    # Dynamic suggestions are generated from the current dataframe schema. Each
+    # suggestion feeds the same chatbot route as a typed question.
+    _suggestion_df = df if isinstance(df, pd.DataFrame) and not df.empty else None
+    _suggestions = _chat_dataset_sample_questions(_suggestion_df)
+    st.caption("Suggested questions based on the currently loaded dataset" if _suggestion_df is not None else "Suggested M&E questions (no dataset currently loaded)")
+    _suggestion_cols = st.columns(min(3, max(1, len(_suggestions))))
+    _suggested_question = None
+    for _i, _suggestion in enumerate(_suggestions):
+        with _suggestion_cols[_i % len(_suggestion_cols)]:
+            if st.button(_suggestion, key=f"dataset_suggestion_{_i}", use_container_width=True):
+                _suggested_question = _suggestion
+
     question=st.chat_input(
-        "Ask: What is VAS coverage? What is Impact Result 1000? What is the numerator?",
+        "Ask a question about the currently loaded data or an indicator definition...",
         key="analysis_chat_input",
-    )
+    ) or _suggested_question
 
     def _clear_analysis_chat():
         # IMPORTANT: clear ONLY chatbot state. Do not rerun from inside the
