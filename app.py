@@ -11422,6 +11422,124 @@ def _chat_external_status_block(external_context, explicit_external_request=Fals
     return "\n".join(lines), label
 
 
+def _chat_is_stock_inventory_analysis_question(question):
+    """Identify stock-card questions that must be answered from DANIP rows first."""
+    q = str(question or "").lower()
+    stock_terms = (
+        "stock", "closing stock", "opening stock", "damaged", "bottles",
+        "received this month", "receipts", "stock management", "mms",
+        "inventory", "reconciliation", "facility store", "stock monitoring",
+    )
+    analysis_terms = (
+        "facility", "facilities", "issue", "issues", "discrepancy",
+        "discrepancies", "unusually high", "follow-up", "follow up",
+        "based on the data", "based on data", "which", "highlight",
+        "compare", "analysis", "analyse", "analyze", "why",
+    )
+    return any(term in q for term in stock_terms) and any(term in q for term in analysis_terms)
+
+
+
+def _chat_stock_reconciliation_evidence(df, question):
+    """Build deterministic facility-period MMS stock evidence for the chat model.
+
+    This helper is deliberately limited to the chatbot. It does not change API
+    loading, dataframe preparation, authentication, dashboards, or exports.
+    Missing damaged-stock values remain unknown rather than being converted to 0.
+    """
+    q = str(question or '').lower()
+    stock_terms = ('stock', 'mms', 'bottles', 'opening', 'closing', 'issued', 'received', 'reconcil', 'discrepanc')
+    if not any(term in q for term in stock_terms):
+        return None
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+
+    import re as _re
+    def norm(value):
+        return _re.sub(r'[^a-z0-9]+', ' ', str(value).lower()).strip()
+
+    norms = {col: norm(col) for col in df.columns}
+    def find_col(groups, excluded=()):
+        for col, label in norms.items():
+            if any(x in label for x in excluded):
+                continue
+            if all(any(term in label for term in group) for group in groups):
+                return col
+        return None
+
+    org_col = next((c for c, n in norms.items() if n in ('organisationunitname', 'organizationunitname', 'organisation unit name', 'organization unit name') or any(x in n for x in ('facility name', 'health facility name', 'organisation unit', 'organization unit'))), None)
+    period_col = next((c for c, n in norms.items() if n in ('periodname', 'period name', 'reporting period') or n == 'period' or 'reporting month' in n), None)
+    opening_col = find_col([('opening',), ('stock',)])
+    received_col = find_col([('received', 'receipts')])
+    closing_col = find_col([('closing',), ('stock',)])
+    lhs_col = find_col([('lhs',), ('issued', 'issue')])
+    hcp_col = find_col([('issued', 'issue'), ('dispensary', 'hcp', 'health care provider')])
+    damaged_col = find_col([('damaged',)])
+
+    # Avoid silently using a similarly named but semantically different column.
+    if not all((org_col, opening_col, received_col, closing_col, lhs_col, hcp_col)):
+        return {
+            'status': 'INCOMPLETE_SCHEMA',
+            'message': 'Facility-level stock reconciliation could not run because one or more required columns were not identified.',
+            'identified_columns': {'organisation_unit': org_col, 'period': period_col, 'opening_stock': opening_col, 'receipts': received_col, 'LHS_issues': lhs_col, 'dispensary_HCP_issues': hcp_col, 'damaged_stock': damaged_col, 'closing_stock': closing_col},
+            'missing_required_columns': [name for name, col in [('organisation unit', org_col), ('opening stock', opening_col), ('MMS receipts', received_col), ('LHS issues', lhs_col), ('dispensary/HCP issues', hcp_col), ('closing stock', closing_col)] if not col],
+        }
+
+    records = []
+    for _, row in df.iterrows():
+        def number(col):
+            if not col:
+                return None
+            value = pd.to_numeric(pd.Series([row.get(col)]), errors='coerce').iloc[0]
+            return None if pd.isna(value) else float(value)
+        org = str(row.get(org_col, '')).strip() or 'Unknown organisation unit'
+        period = str(row.get(period_col, '')).strip() if period_col else ''
+        if period.lower() == 'nan':
+            period = ''
+        values = {'opening': number(opening_col), 'received': number(received_col), 'lhs_issues': number(lhs_col), 'hcp_issues': number(hcp_col), 'damaged': number(damaged_col), 'reported_closing': number(closing_col)}
+        missing = [label for label, key in [('opening stock','opening'), ('MMS received','received'), ('LHS issues','lhs_issues'), ('dispensary/HCP issues','hcp_issues'), ('closing stock','reported_closing')] if values[key] is None]
+        rec = {'organisation_unit': org, 'period': period or 'Period not available', **values}
+        if missing:
+            rec.update({'status': 'INCOMPLETE_REQUIRED_DATA', 'missing_fields': missing})
+        else:
+            expected_before_damage = values['opening'] + values['received'] - values['lhs_issues'] - values['hcp_issues']
+            rec['expected_closing_before_damage'] = expected_before_damage
+            if values['damaged'] is None:
+                rec['status'] = 'DAMAGED_STOCK_UNREPORTED'
+                rec['difference_before_damage_adjustment'] = values['reported_closing'] - expected_before_damage
+                rec['missing_fields'] = ['damaged stock']
+            else:
+                expected = expected_before_damage - values['damaged']
+                difference = values['reported_closing'] - expected
+                rec['expected_closing_after_damage'] = expected
+                rec['difference_reported_minus_expected'] = difference
+                rec['status'] = 'RECONCILED' if abs(difference) < 0.005 else 'DISCREPANCY'
+        records.append(rec)
+
+    # Include every facility-period row so the model can name the exact OU, not
+    # just summarize a single indicator's min/max.
+    counts = {}
+    for r in records:
+        counts[r['status']] = counts.get(r['status'], 0) + 1
+    return {
+        'status': 'CALCULATED',
+        'formula': 'Expected closing stock = opening stock + MMS received - LHS issues - dispensary/HCP issues - damaged bottles, when damaged bottles are reported separately.',
+        'difference_definition': 'Reported closing stock minus calculated expected closing stock.',
+        'rows_checked': len(records),
+        'status_counts': counts,
+        'columns_used': {'organisation_unit': org_col, 'period': period_col, 'opening_stock': opening_col, 'receipts': received_col, 'LHS_issues': lhs_col, 'dispensary_HCP_issues': hcp_col, 'damaged_stock': damaged_col, 'closing_stock': closing_col},
+        'rows': records,
+        'interpretation_rules': [
+            'Name organisation unit and period for each reported discrepancy.',
+            'Show the actual arithmetic and the reported-versus-expected difference.',
+            'Do not treat missing values as zero.',
+            'Rows with missing damaged stock are not final reconciliations.',
+            'Separate confirmed numerical discrepancies from incomplete records.',
+            'Use the DANIP CMP/Compendium only for official indicator context and interpretation, not as evidence of facility stock values.',
+        ],
+    }
+
+
 def ask_analysis_chatbot(
     user_question,
     df=None,
@@ -11430,44 +11548,159 @@ def ask_analysis_chatbot(
     quality_issues=None,
     quality_matrix=None,
     quality_summary=None,
+    progress_callback=None,
 ):
-    """Interpret the current DANIP/DHIS2 dataset only; no RAG or external sources."""
-    question = str(user_question or "").strip()
+    """Independent M&E/RAG chatbot with strict three-level search hierarchy.
+
+    SEARCH HIERARCHY (highest to lowest priority):
+      1) Internal DANIP / DHIS2 current evidence
+      2) Internal KM / ISG Indicator Compendium
+      3) External authoritative evidence (UNICEF, WHO, UN, etc.)
+
+    DANIP is always the source of truth for observed programme values.
+    Internal KM explains the indicator. External evidence is used only for
+    contextual validation/comparison and never replaces DANIP values.
+    """
+    question=str(user_question or "").strip()
     if not question:
         return None
 
-    current_df = df if isinstance(df, pd.DataFrame) and not df.empty else st.session_state.get("nexus_chat_df")
+    def _report_progress(message):
+        """Send short, user-facing progress narration to the chat UI when available."""
+        if callable(progress_callback):
+            try:
+                progress_callback(str(message))
+            except Exception:
+                pass
+
+    _report_progress("I’m identifying what you want to know and which evidence is needed.")
+    current_df = df if isinstance(df,pd.DataFrame) and not df.empty else st.session_state.get("nexus_chat_df")
     current_source = str(source_url or st.session_state.get("nexus_chat_source_url", "") or "").strip()
 
-    if not isinstance(current_df, pd.DataFrame) or current_df.empty:
-        return {
-            "status": "NO_DANIP_DATA",
-            "source": "NO_DANIP_DATA",
-            "text": (
-                "No DANIP/DHIS2 dataset is loaded. Load the relevant DANIP data first, "
-                "then ask for interpretation, trends, comparisons, reporting completeness, "
-                "consistency checks, or data-quality findings. This assistant uses the "
-                "loaded DANIP data only."
-            ),
-        }
+    # 1. Intent routing. External requests MUST bypass the pure-RAG early return.
+    # Otherwise an indicator question containing UNICEF can be answered by KM
+    # before Level 3 external research is reached.
+    rag_intent=_chat_is_rag_or_me_knowledge(question)
+    mixed_intent=_chat_mixed_rag_analysis_intent(question)
+    current_intent=_chat_requires_current_data(question)
+    explicit_external_request = _chat_external_research_requested(question)
+    internal_km_requested = _chat_internal_km_requested(question)
+    stock_inventory_analysis = _chat_is_stock_inventory_analysis_question(question)
 
-    st.session_state["nexus_chat_df"] = current_df
-    st.session_state["nexus_chat_source_url"] = current_source
+    # HARD SOURCE LOCK: when the user names the Indicator Compendium/internal KM,
+    # the requested source of context is internal. External RAG/web research is
+    # forbidden for this turn, even if another keyword accidentally matches the
+    # external-research detector. This is the highest-priority user source request.
+    if internal_km_requested:
+        _report_progress("You asked for internal DANIP CMP/Indicator Compendium knowledge. I’m searching that source first.")
+        explicit_external_request = False
+        internal_indicators = _chat_indicator_candidates(
+            question, current_df, chart_plan=chart_plan, limit=5
+        ) if isinstance(current_df, pd.DataFrame) and not current_df.empty else []
+        rag=retrieve_rag_context(
+            question,
+            indicators=internal_indicators,
+            top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K),
+        )
+        rag=_chat_filter_internal_km_matches(question, rag)
+        result=_chat_rag_knowledge_answer(question,rag)
+        if result:
+            result["source"]="ISG_INDICATOR_COMPENDIUM"
+            result["external_status"]="NOT_REQUESTED"
+            result["external_label"]=""
+            result["external_sources"]=[]
+            result["rag_warnings"]=rag.get("warnings",[])
+            return result
 
+    if rag_intent and not explicit_external_request and not mixed_intent and not (current_intent and not any(x in question.lower() for x in ("compendium","official definition","indicator definition","numerator","denominator","formula"))):
+        _report_progress("I’m retrieving the most relevant DANIP CMP passages and checking whether they answer your question.")
+        rag=retrieve_rag_context(question, indicators=[], top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K))
+        result=_chat_rag_knowledge_answer(question,rag)
+        if isinstance(current_df, pd.DataFrame) and not current_df.empty:
+            result=_chat_add_danip_interpretation(result, question, current_df, chart_plan=chart_plan, quality_issues=quality_issues)
+        result["rag_warnings"]=rag.get("warnings",[])
+        return result
+
+    # 2. Current-data request with no dataset loaded.
+    if current_df is None or current_df.empty:
+        _report_progress("I’m checking whether current DHIS2 data is loaded. If not, I’ll clearly separate knowledge-based guidance from data-dependent findings.")
+        if mixed_intent or rag_intent:
+            rag=retrieve_rag_context(question, indicators=[], top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K))
+            result=_chat_rag_knowledge_answer(question,rag)
+            if result:
+                note="\n\n**Current DHIS2 data:** Not loaded. The compendium/M&E part of the question was answered independently."
+                result["text"]=(result.get("text","")+note)
+                result["source"]="ISG_INDICATOR_COMPENDIUM"
+                return result
+        if current_intent:
+            return {"status":"NO_DHIS2_DATA","source":"NO_DHIS2_DATA","text":"This question requires current DHIS2/API data, but no dataset is loaded yet. Please load the DHIS2/API data for the current value, trend, country or performance result. Indicator definitions and general M&E questions can be answered without the API."}
+        # General M&E fallback — no API needed.
+        rag=retrieve_rag_context(question, indicators=[], top_k=(50 if _chat_compendium_table_request(question) else RAG_TOP_K))
+        if rag.get("chunks"):
+            return _chat_rag_knowledge_answer(question,rag)
+        return {"status":"NO_DHIS2_DATA","source":"M_AND_E_KNOWLEDGE","text":"The chatbot is ready without a DHIS2/API link. Ask an indicator-definition, results-framework, M&E or data-quality question, or load a dataset for current numerical analysis."}
+
+    # Keep the latest loaded dataset available across Streamlit reruns.
+    st.session_state["nexus_chat_df"]=current_df
+    st.session_state["nexus_chat_source_url"]=current_source
+
+    # 3. Performance target-gap mode remains deterministic.
     if _chat_performance_intent(question):
-        performance_report = _chat_performance_report_data(df=current_df, quality_issues=quality_issues)
-        return {
-            "status": performance_report.get("status", "SUCCESS"),
-            "source": "DANIP_DHIS2",
-            "text": performance_report.get("report", ""),
-            "performance_report": performance_report,
-        }
+        _report_progress("I’m calculating the performance and target-gap evidence from the loaded DANIP records.")
+        performance_report=_chat_performance_report_data(df=current_df,quality_issues=quality_issues)
+        return {"status":performance_report.get("status","SUCCESS"),"source":"CHAT_PERFORMANCE","text":performance_report.get("report",""),"performance_report":performance_report}
 
-    indicators = _chat_indicator_candidates(question, current_df, chart_plan=chart_plan, limit=3)
-    if not indicators and isinstance(chart_plan, dict):
-        indicators = [c for c in (chart_plan.get("y_columns") or []) if c in current_df.columns][:3]
+    indicators=_chat_indicator_candidates(question,current_df,chart_plan=chart_plan,limit=3)
+    if not indicators and isinstance(chart_plan,dict):
+        indicators=[c for c in (chart_plan.get("y_columns") or []) if c in current_df.columns][:3]
 
-    evidence = build_analysis_chat_evidence(
+    # 4. THREE-LEVEL SEARCH HIERARCHY for DANIP analysis.
+    #
+    # The order is strict:
+    #   1) Internal DANIP / DHIS2 current evidence FIRST
+    #   2) Internal KM / ISG Indicator Compendium SECOND
+    #   3) External authoritative evidence THIRD
+    #
+    # These are supporting research layers, not competing values. DANIP remains
+    # the source of truth for observed programme results.
+    rag_context={"chunks":[],"warnings":[]}
+    report_intent=_chat_report_intent(question)
+    danip_analysis_question = bool(
+        current_df is not None
+        and not current_df.empty
+        and (
+            _chat_danip_current_analysis_intent(question, current_df)
+            or current_intent
+            or mixed_intent
+            or report_intent
+            or _chat_is_indicator_detail_question(question)
+        )
+    )
+
+    # LEVEL 1 — INTERNAL DANIP / DHIS2
+    # The current dataframe and deterministic evidence have already been resolved
+    # above. This is always the first and authoritative numerical layer.
+    danip_source_context = {
+        "status": "AVAILABLE",
+        "source": "DANIP_DHIS2",
+        "indicator_count": len(indicators),
+    }
+
+    # LEVEL 2 — INTERNAL KM / ISG INDICATOR COMPENDIUM
+    # Search KM only after the DANIP indicator candidates have been identified,
+    # so retrieval is anchored to the actual DANIP question/indicator.
+    if danip_analysis_question or mixed_intent or report_intent or stock_inventory_analysis:
+        _report_progress("I’m matching your question to the relevant indicator names and retrieving supporting DANIP CMP guidance.")
+        rag_context=retrieve_rag_context(
+            question,
+            indicators=indicators,
+            top_k=(50 if report_intent else RAG_TOP_K),
+        )
+
+    # Build deterministic DANIP evidence BEFORE external search. The external layer
+    # must receive this evidence so it can perform a real comparability check.
+    _report_progress("I’m analysing the loaded DHIS2 rows, reporting periods, organisation units, and available numeric fields.")
+    evidence=build_analysis_chat_evidence(
         df=current_df,
         source_url=current_source,
         chart_plan=chart_plan,
@@ -11476,183 +11709,352 @@ def ask_analysis_chatbot(
         quality_summary=quality_summary,
         question=question,
     )
-    local_answer = _chat_local_mne_answer(
+
+    # For MMS inventory questions, provide row-level deterministic calculations
+    # to the LLM together with relevant DANIP CMP/Compendium context. This avoids
+    # generic indicator summaries and ensures answers name the actual OU/period.
+    if stock_inventory_analysis:
+        _report_progress("This is a stock-reconciliation question. I’m comparing opening stock, receipts, issues, damaged bottles, and closing stock by organisation unit and period.")
+    stock_evidence = _chat_stock_reconciliation_evidence(current_df, question) if stock_inventory_analysis else None
+    if stock_evidence is not None:
+        if isinstance(evidence, dict):
+            evidence['stock_reconciliation'] = stock_evidence
+        else:
+            evidence = {'general_evidence': evidence, 'stock_reconciliation': stock_evidence}
+
+    # LEVEL 3 — EXTERNAL AUTHORITATIVE EVIDENCE
+    # External research is performed after DANIP + KM. It can validate/contextualize
+    # the interpretation or provide an explicit comparison requested by the user.
+    # It must never replace, recalculate, cap, or override DANIP observations.
+    external_context={
+        "status":"NOT_REQUESTED",
+        "sources":[],
+        "text":"No external context retrieved."
+    }
+    # Level 3 is mandatory whenever the user explicitly names an external source.
+    # IMPORTANT: an explicit internal-KM/compendium request is INTERNAL ONLY.
+    # Do not call external RAG/web research unless the user separately asks for
+    # an external comparison/source/report.
+    if explicit_external_request and not internal_km_requested:
+        _report_progress("You requested external comparison, so I’m checking for relevant authoritative evidence without replacing DANIP values.")
+        try:
+            external_context=research_mne_external_context(
+                question=question,
+                indicators=indicators,
+                danip_evidence=evidence,
+                rag_context=rag_context,
+            ) or external_context
+        except Exception as exc:
+            external_context={
+                "status":"ERROR",
+                "sources":[],
+                "text":"External context unavailable; continue using DANIP and internal KM.",
+            }
+
+    # When the user explicitly names an external source/country/report (for example
+    # "compare with UNICEF Ethiopia this year"), the external result is part of the
+    # requested answer rather than hidden background context.
+    external_comparison_instruction = ""
+    if explicit_external_request:
+        external_comparison_instruction = """
+
+EXPLICIT EXTERNAL COMPARISON REQUEST:
+The user explicitly requested an external source/report. Therefore, after presenting
+the DANIP result, include a clearly labelled **External comparison** section.
+- Identify the requested organization (e.g. UNICEF), country (e.g. Ethiopia), and
+  reporting year/time period (e.g. this year) from the question.
+- Compare DANIP with the external source ONLY if the external source provides a
+  materially comparable indicator, population, geography and period.
+- State the external reported value exactly as found; do not invent or estimate it.
+- If the external source is not directly comparable, say **No directly comparable
+  UNICEF Ethiopia value was verified** and explain why briefly.
+- Include the external source name, report/title and URL when available.
+- Never replace the DANIP value with the external value.
+"""
+
+    _report_progress("I’m interpreting the calculations in M&E terms and checking for missing values or unsupported conclusions.")
+    local_answer=_chat_local_mne_answer(
         question=question,
         df=current_df,
         indicators=indicators,
         chart_plan=chart_plan,
         quality_issues=quality_issues,
     )
-
-    # Deterministic row-level evidence: this is intentionally calculated from
-    # the loaded DANIP dataframe, not guessed by the language model.
-    org_cols = [
-        c for c in current_df.columns
-        if any(k in str(c).lower() for k in (
-            "organisationunitname", "organisation unit name", "org unit name",
-            "organisation unit", "facility name", "facility", "district", "region", "province"
-        ))
-    ]
-    date_cols = [
-        c for c in current_df.columns
-        if any(k in str(c).lower() for k in (
-            "period", "date", "month", "year", "reporting period"
-        ))
-    ]
-    org_col = org_cols[0] if org_cols else None
-    date_col = date_cols[0] if date_cols else None
-    computed_sections = []
-    for col in (indicators or []):
-        if col not in current_df.columns:
-            continue
-        values = pd.to_numeric(current_df[col], errors="coerce")
-        valid = values.dropna()
-        if valid.empty:
-            continue
-        missing_count = int(values.isna().sum())
-        facts = [
-            f"Indicator/column: {col}",
-            f"Rows in dataset: {len(current_df)}",
-            f"Valid numeric observations: {len(valid)}",
-            f"Missing or non-numeric observations: {missing_count} ({missing_count / max(len(current_df), 1) * 100:.1f}%)",
-            f"Mean: {valid.mean():.2f}",
-            f"Median: {valid.median():.2f}",
-            f"Minimum: {valid.min():.2f}",
-            f"Maximum: {valid.max():.2f}",
-            f"Total: {valid.sum():.2f}",
-        ]
-        for label, idx in (("Minimum observation row", valid.idxmin()), ("Maximum observation row", valid.idxmax())):
-            row = current_df.loc[idx]
-            details = []
-            if org_col:
-                details.append(f"{org_col}={row.get(org_col, '')}")
-            if date_col:
-                details.append(f"{date_col}={row.get(date_col, '')}")
-            details.append(f"{col}={values.loc[idx]:.2f}")
-            facts.append(label + ": " + "; ".join(details))
-
-        # Compute a trend only when a usable date/period column exists.
-        trend_added = False
-        if date_col:
-            parsed_dates = pd.to_datetime(current_df[date_col], errors="coerce")
-            trend_frame = pd.DataFrame({"date": parsed_dates, "value": values}).dropna()
-            if len(trend_frame) >= 2 and trend_frame["date"].nunique() >= 2:
-                trend_frame["period"] = trend_frame["date"].dt.to_period("M").astype(str)
-                monthly = trend_frame.groupby("period", sort=True)["value"].mean()
-                if len(monthly) >= 2:
-                    first_period, last_period = monthly.index[0], monthly.index[-1]
-                    first_value, last_value = float(monthly.iloc[0]), float(monthly.iloc[-1])
-                    change = last_value - first_value
-                    pct_change = (change / abs(first_value) * 100) if first_value != 0 else None
-                    pct_text = f" ({pct_change:+.1f}%)" if pct_change is not None else " (percentage change not calculated because the starting value is zero)"
-                    facts.append(
-                        f"Monthly mean trend: {first_period}={first_value:.2f}; "
-                        f"{last_period}={last_value:.2f}; change={change:+.2f}{pct_text}; "
-                        "trend is descriptive and does not establish cause."
-                    )
-                    trend_added = True
-        if date_col and not trend_added:
-            facts.append("Trend: not calculated because the date/period column did not yield at least two valid distinct periods.")
-        computed_sections.append("\n".join("- " + item for item in facts))
-
-    computed_data_facts = "\n\n".join(computed_sections) if computed_sections else (
-        "No numeric indicator column could be reliably identified for deterministic summary. "
-        "Do not invent statistics; explain what column or reporting-period detail is needed."
-    )
-    if computed_sections:
-        local_answer = (
-            str(local_answer or "").strip()
-            + "\n\n## Calculated evidence from the loaded DANIP data\n"
-            + computed_data_facts
-            + "\n\nThese are descriptive statistics only. No quality score is inferred from these statistics."
-        ).strip()
+    # Never return external research as the answer for a DANIP analytical
+    # question. It is context for interpretation only.
 
     if client is None:
-        return {"status": "FALLBACK", "source": "DANIP_DHIS2", "text": local_answer}
+        _report_progress("The AI service is unavailable, so I’m preparing the evidence-based local analysis instead of inventing a generated response.")
+        fallback_text = local_answer
+        if stock_evidence and stock_evidence.get('status') == 'CALCULATED':
+            fallback_text += "\n\n## MMS stock reconciliation evidence\n\n" + safe_json_dumps(stock_evidence)
+        return {"status":"FALLBACK","source":"DANIP_DHIS2","text":fallback_text}
 
-    history = st.session_state.get("analysis_chat_messages", [])
-    recent_history = [
-        {"role": x.get("role"), "content": x.get("content")}
-        for x in history[-6:] if isinstance(x, dict)
-    ]
-    report_intent = _chat_report_intent(question)
-    prompt = f"""
-You are the DANIP AI Data Analyst and senior Monitoring, Evaluation and Learning advisor.
+    _report_progress("The evidence is ready. I’m preparing a conversational answer with the findings, calculations, caveats, and practical next steps.")
+    history=st.session_state.get("analysis_chat_messages",[])
+    recent_history=[{"role":x.get("role"),"content":x.get("content")} for x in history[-6:] if isinstance(x,dict)]
+    rag_text=_rag_context_text(rag_context)
+    rag_block=rag_text if rag_text else "No compendium passage was retrieved for this question. Do not invent official definitions."
+    internal_km_instruction = (
+        "INTERNAL KM ONLY: The user explicitly requested the Indicator Compendium/internal KM. "
+        "Use the retrieved internal KM as the contextual reference. Ignore external research unless "
+        "the user explicitly asks for an external comparison/source."
+        if internal_km_requested else ""
+    )
 
-SCOPE — STRICT DANIP-ONLY INTERPRETATION:
-- Use only the current DANIP/DHIS2 dataset, deterministic evidence below, and arithmetic you can transparently calculate from those data.
-- Do not use or mention the Indicator Compendium, PMF, RAG, knowledge-base passages, external research, external benchmarks, or internet sources.
-- Do not invent indicator definitions, targets, reporting periods, missing values, quality scores, or causes.
-- DANIP observations are the source of truth. Preserve the values as loaded; do not silently cap, replace, or alter them.
+    prompt=f"""
+You are the DANIP-NI M&E Conversational Assistant.
+You are a senior Monitoring, Evaluation and Learning advisor.
 
-ANALYSIS RULES:
-1. Answer the actual question, not just repeat a generic indicator definition or advice.
-2. Use the deterministic calculated evidence below as the factual baseline. When row-level values are available, name the reporting unit and period for the highest and lowest observations.
-3. State the indicator, valid observation count, missing count, geography/reporting units, and period covered when those fields exist.
-4. If dates/periods exist, describe the calculated direction and magnitude of change over time. If not, explicitly say trend analysis is unavailable from the loaded fields.
-5. Show formulas for calculated percentages, totals, differences, trends, completeness, and reconciliation checks.
-6. Treat blanks and non-numeric values as missing, not zero, unless the source explicitly defines them as zero.
-7. Separate observed facts, interpretation, plausible explanations, limitations, and recommended follow-up.
-8. Never claim that a high/low value proves stockout, overstocking, mismanagement, or causation without relevant fields and approved thresholds.
-9. For stock reconciliation, only calculate when opening stock, receipts, all relevant issues, documented losses/damages/adjustments, and closing stock are available. State the formula and flag any unaccounted difference.
-10. Data quality: report calculated completeness/missingness and specific detected issues only. Do not provide a numeric score or labels such as “Excellent” unless a documented scoring method and its actual component results are supplied.
-11. Management implications must be specific to the observed findings. Prioritize named reporting units for follow-up only when the data identifies them.
-12. Never fill gaps with invented values, indicator definitions, targets, benchmarks, or causal explanations.
+RESEARCH ARCHITECTURE — STRICT THREE-LEVEL SEARCH HIERARCHY:
+1. INTERNAL DANIP / DHIS2 — FIRST: identify the current indicator, period, organisation/country and observed values. This is the ONLY source of truth for DANIP numerical results.
+2. INTERNAL KM / ISG INDICATOR COMPENDIUM — SECOND: use it to explain the official indicator definition, result framework, measurement, calculation, interpretation and data-quality context.
+3. EXTERNAL AUTHORITATIVE SOURCES — THIRD: use UNICEF, WHO, UN and other authoritative sources for contextual validation or an explicitly requested comparison.
 
-NORMAL ANSWER FORMAT:
-- **Direct answer / key finding**
-- **Evidence from DANIP data** (values, counts and calculations)
-- **M&E interpretation**
-- **Data-quality limitations**
-- **Recommended follow-up**
+The search order is DANIP -> Internal KM -> External. Never allow a lower-priority source to replace a higher-priority DANIP observation.
 
-REPORT REQUEST:
-{"Generate a detailed table-first DANIP report with scope, executive summary, indicator-by-indicator findings, comparisons, M&E interpretation, data-quality assessment, programme implications, prioritized recommendations, conclusion, and limitations. Include every relevant selected indicator. Use only values and calculations supported by the current dataset." if report_intent else "Answer concisely but substantively, focused on the user's question."}
+INTERNAL KM SOURCE CONTROL:
+If the user asks for the Indicator Compendium, PMF, internal KM, internal knowledge, or an internal reference, use ONLY the retrieved internal KM/compendium content for the contextual explanation. Do not invoke, display, cite, summarize, or rely on external RAG/web research unless the user separately and explicitly requests an external source or comparison.
+
+CRITICAL OUTPUT RULE:
+The final answer for a DANIP analytical question must be presented as DANIP analytics.
+Do NOT replace the DANIP result with internal KM or external statistics.
+Do NOT display external research results, external benchmarks, external URLs or a separate external-evidence section UNLESS the user explicitly asks for an external comparison/source/report.
+When the user explicitly asks for an external comparison, show the verified external evidence in a separate **External comparison** section after the DANIP analysis. The section MUST state the DANIP value alongside the external value, match status, and the reason for comparability/non-comparability.
+Do NOT display the internal KM retrieval as the answer when the user is asking what the DANIP data show.
+Internal KM and external evidence are background/context unless the user explicitly requests the external comparison.
+
+RULES:
+1. First identify the user's actual task: explain, compare, calculate, find exceptions, interpret a trend, answer a follow-up, or prepare a report. Answer that task directly rather than defaulting to a generic indicator profile.
+2. Never invent, change, cap or replace a DANIP number.
+3. Use the exact DANIP indicator name, organisation unit, period and observed values. If the user asks "which organisation unit/facility", name the specific unit(s) from row-level evidence; do not answer only with indicator statistics.
+4. Use internal KM/DANIP CMP to learn official indicator meaning, definitions, calculation rules, intended interpretation, and programme context. Blend that guidance with the user's requested analysis in natural conversational language, like a helpful analytical assistant. Do not merely paste retrieved passages or make the user restate their request.
+5. Use internal KM to understand the indicator; never invent missing official metadata.
+4. Use external evidence only as contextual support; never use it to alter the DANIP value.
+5. If external research is unavailable, continue normally using DANIP evidence + internal KM + general M&E expertise.
+6. Distinguish observed facts from interpretation and possible explanations; do not claim causality from descriptive data.
+7. The answer should follow: DANIP RESULT -> OBSERVATION -> M&E INTERPRETATION -> DATA QUALITY -> PROGRAMME IMPLICATION.
+8. If the indicator is absent from the compendium, continue using the exact DANIP indicator and general M&E expertise; clearly distinguish that from official compendium metadata.
+9. If asked for a report, generate it from the DANIP evidence first and use KM/external research only to contextualize the interpretation.
+10. For facility stock/inventory questions (including MMS bottle stock), analyse the actual DANIP rows and columns first. Name a facility only when its name and supporting values are present in the current dataset/evidence. Show opening stock, receipts, damaged bottles, issues/dispensing (if present), and closing stock where available. Calculate reconciliation only when the required fields exist; state the formula and any missing fields. Flag high closing stock or damaged stock as a follow-up signal, not proof of mismanagement. Never use an unrelated compendium passage as evidence about a facility's stock.
+11. If evidence does not contain the facility-level values needed, state which columns or records are missing and do not invent facility names, values, discrepancies, or causes.
+
+REQUEST TYPE:
+{"DETAILED NARRATIVE REPORT" if report_intent else "NORMAL CHAT QUESTION"}
 
 USER QUESTION:
 {question}
 
-RECENT CHAT CONTEXT:
+RECENT CHAT:
 {safe_json_dumps(recent_history)}
 
-CURRENT DANIP SOURCE:
-{current_source or 'Source URL not provided'}
+LEVEL 1 — CURRENT DANIP / DHIS2:
+{safe_json_dumps(danip_source_context)}
 
-CURRENT DANIP DATA EVIDENCE:
+LEVEL 2 — INTERNAL KM / ISG INDICATOR COMPENDIUM:
+{rag_block}
+
+CURRENT DHIS2 SOURCE:
+{current_source or 'Current DHIS2 source not explicitly named'}
+
+CURRENT DHIS2 / DETERMINISTIC EVIDENCE:
 {safe_json_dumps(evidence)}
 
-DETERMINISTIC DANIP ANALYSIS (use as a starting point; verify against the evidence above):
-{local_answer}
+EXTERNAL RESEARCH CONTEXT (LEVEL 3):
+{safe_json_dumps(external_context)}
+EXTERNAL SEARCH STATUS: {external_context.get("status", "UNKNOWN")}
+EXTERNAL SEARCH ENGINE: {external_context.get("engine", "not available") or "not available"}
+EXTERNAL SOURCE URLS: {safe_json_dumps(external_context.get("sources", []))}
+{internal_km_instruction}
+{external_comparison_instruction}
 
-ROW-LEVEL CALCULATIONS FROM THE CURRENT DATAFRAME:
-{computed_data_facts}
+EXTERNAL COMPARISON OUTPUT RULE:
+If external comparison was explicitly requested, do not hide the external result in the narrative.
+Use this format:
+## External comparison
+| Dimension | DANIP | External source | Assessment |
+|---|---|---|---|
+| Indicator | ... | ... | ... |
+| Geography | ... | ... | ... |
+| Period | ... | ... | ... |
+| Value | ... | ... | DIRECTLY COMPARABLE / RELATED BUT NOT DIRECTLY COMPARABLE / NO VERIFIED MATCH |
+Then explain the comparison in 1-3 sentences. If the external layer returned no directly comparable value, say exactly: **NO DIRECTLY COMPARABLE EXTERNAL VALUE FOUND.** Do not invent one.
+
+STOCK / INVENTORY ANALYSIS OVERRIDE:
+When the question concerns MMS, bottles, opening/closing stock, receipts, damaged stock,
+or facility stock-management issues, the current DANIP dataset is the primary evidence.
+Use the row-level `stock_reconciliation` evidence when supplied. Name each organisation
+unit and reporting period, show the exact calculation and reported-minus-expected
+ difference, and separate confirmed discrepancies from incomplete rows. Do not answer
+by summarising RAG chunks or by reporting only a single indicator's average/minimum/
+maximum. Use the DANIP CMP/Compendium only to explain the official indicator or method;
+it must not supply facility values. Missing values are unknown, not zero. If damaged-stock
+values are absent, label the reconciliation provisional/incomplete. If the row-level data
+show no confirmed discrepancies, say so and list records that still need verification.
+
+USER-FACING ANSWER REQUIREMENT:
+For ordinary DANIP analytical questions, present the current DANIP/DHIS2 findings and their M&E interpretation.
+When explicit_external_request is TRUE, the **External comparison** section is REQUIRED after the DANIP analysis, even if the external result is NO VERIFIED MATCH or the search failed. Never silently hide Level-3 status.
+
+If this is a REPORT REQUEST (for example, the user asks to generate, write,
+prepare, create or produce a narrative report), DO NOT give a short answer.
+Generate a detailed professional M&E narrative report using the selected/current
+indicators and the deterministic DHIS2 evidence. The ISG Indicator Compendium
+is supporting authoritative context when retrieved; it is not a prerequisite.
+If an indicator is not found in the compendium, continue the report from the
+DHIS2 evidence and explicitly note that compendium metadata was unavailable for
+that indicator. Never stop or refuse the report because RAG returned no match.
+
+For a REPORT REQUEST, use a CLEAR TABLE-FIRST FORMAT. Do not return a short prose summary.
+Use the following structure exactly. Tables must be real Markdown tables with a header row and separator row.
+
+## 1. Report Scope
+| Dimension | Details |
+|---|---|
+| Indicators | ... |
+| Reporting period | ... |
+| Organisation/country | ... |
+| Data source | ... |
+| Analysis scope | ... |
+
+## 2. Executive Summary
+| Area | Finding | Management meaning |
+|---|---|---|
+| Overall result | ... | ... |
+| Strongest indicator | ... | ... |
+| Weakest indicator | ... | ... |
+| Main variation | ... | ... |
+| Main data-quality consideration | ... | ... |
+
+## 3. Indicator-by-Indicator Analysis
+Cover EVERY selected indicator in ONE complete table:
+| Indicator | Current/observed result | Highest OU/period | Lowest OU/period | Variation | Data-quality note | Interpretation |
+|---|---:|---|---|---|---|---|
+Do not omit indicators because compendium metadata was not retrieved.
+
+## 4. Comparative Analysis
+| Comparison dimension | Indicator A | Indicator B | Indicator C | Interpretation |
+|---|---|---|---|---|
+Include all selected indicators. Add rows for level, difference, percentage-point difference where valid, trend, OU/period drivers, exceptions and data-quality effects.
+
+## 5. Detailed M&E Narrative
+After the tables, provide 3-6 substantive paragraphs explaining the observed patterns, programme-monitoring meaning and possible explanations. Do not claim causality.
+
+## 6. Indicator Compendium Context
+For EACH selected indicator with retrieved compendium evidence, create a separate table using the official Parameter / Description structure:
+| Parameter | Description |
+|---|---|
+| Intervention | ... |
+| Indicator name | ... |
+| Indicator code | ... |
+| PMF expected results statement | ... |
+| Rolls into | ... |
+| Akin indicators | ... |
+| Definition | ... |
+| Purpose/ objective | ... |
+| Relevance | ... |
+| Measurement Unit | ... |
+| Data Source | ... |
+| Data Collection Frequency | ... |
+| Baseline | ... |
+| Target | ... |
+| Calculation Method | ... |
+| Interpretation | ... |
+| Use/Application | ... |
+| Data quality considerations | ... |
+| Reporting and Dissemination | ... |
+| References | ... |
+| Version | ... |
+| Date of update | ... |
+Only include parameters actually supported by the retrieved compendium. Never invent missing values. If no match exists, use:
+| Parameter | Description |
+|---|---|
+| Compendium status | Not found in the ISG Indicator Compendium retrieval for this report |
+
+## 7. Data Quality Assessment
+| Quality dimension | Finding | Severity | Effect on analysis | Recommended action |
+|---|---|---|---|---|
+
+## 8. Programme Management Implications
+| Finding | Programme implication | Management use |
+|---|---|---|
+
+## 9. Areas Requiring Attention
+| Priority area | Evidence | Why it matters | Follow-up |
+|---|---|---|---|
+
+## 10. Recommendations
+| # | Recommendation | Evidence/rationale | Responsible focus |
+|---:|---|---|---|
+
+## 11. Conclusion
+Provide a substantive 1-3 paragraph conclusion after the tables.
+
+## 12. Confidence and Limitations
+| Item | Assessment |
+|---|---|
+| Confidence | High/Medium/Low with reason |
+| Data limitations | ... |
+| Compendium limitations | ... |
+| Interpretation limitations | ... |
+
+IMPORTANT TABLE RULES:
+- Keep tables complete, readable and detailed; do not collapse them into prose.
+- Use the exact indicator names from the evidence.
+- Preserve calculated values from deterministic evidence.
+- Do not invent values when evidence is unavailable; write "Not available in supplied evidence".
+- The report must remain detailed, not shortened into 4-6 bullets.
+
+For a NORMAL NON-REPORT QUESTION, remain concise and use sections where useful:
+**Indicator / Direct answer**
+**M&E interpretation**
+**Current evidence**
+**Programme-management implication**
+**Data quality note**
 """
-    errors = []
-    models = [OPENAI_MODEL] + [m for m in ("gpt-5-mini", "gpt-4.1-mini") if m and m != OPENAI_MODEL]
+
+    errors=[]
+    models=[OPENAI_MODEL]+[m for m in ("gpt-5-mini","gpt-4.1-mini") if m and m!=OPENAI_MODEL]
     for model in models:
         try:
-            response = client.responses.create(model=model, input=prompt)
-            answer = (response.output_text or "").strip()
+            response=client.responses.create(model=model,input=prompt)
+            answer=(response.output_text or "").strip()
             if answer:
+                external_block, external_label = _chat_external_status_block(
+                    external_context, explicit_external_request=explicit_external_request
+                )
+                if explicit_external_request and external_block and "## 🌐 External RAG Analysis" not in answer:
+                    answer = answer.rstrip() + "\n\n---\n\n" + external_block
                 return {
-                    "status": "SUCCESS",
-                    "source": "DANIP_DHIS2",
-                    "model": model,
-                    "text": answer,
-                    "sources": [],
+                    "status":"SUCCESS",
+                    "source":"OPENAI_M_AND_E",
+                    "model":model,
+                    "text":answer,
+                    "sources":external_context.get("sources", []) if explicit_external_request else [],
+                    "external_status":external_context.get("status", "NOT_REQUESTED"),
+                    "external_label":external_label,
+                    "external_engine":external_context.get("engine", ""),
                 }
         except Exception as exc:
-            msg = str(exc)
-            errors.append(f"{model}: {msg}")
-            low = msg.lower()
-            if any(t in low for t in ("insufficient_quota", "credit_balance_exhausted", "rate limit", "429", "invalid_api_key", "401", "authentication")):
+            msg=str(exc); errors.append(f"{model}: {msg}")
+            low=msg.lower()
+            if any(t in low for t in ("insufficient_quota","credit_balance_exhausted","rate limit","429","invalid_api_key","401","authentication")):
                 break
-
+    external_block, external_label = _chat_external_status_block(
+        external_context, explicit_external_request=explicit_external_request
+    )
+    fallback_text = local_answer
+    if explicit_external_request and external_block and "## 🌐 External RAG Analysis" not in fallback_text:
+        fallback_text = fallback_text.rstrip() + "\n\n---\n\n" + external_block
     return {
-        "status": "FALLBACK",
-        "source": "DANIP_DHIS2",
-        "text": local_answer,
-        "error": " | ".join(errors)[-3000:],
+        "status":"FALLBACK",
+        "source":"LOCAL_M_AND_E",
+        "text":fallback_text,
+        "error":" | ".join(errors)[-3000:],
+        "sources":external_context.get("sources", []) if explicit_external_request else [],
+        "external_status":external_context.get("status", "NOT_REQUESTED"),
+        "external_label":external_label,
+        "external_engine":external_context.get("engine", ""),
     }
 
 
@@ -11810,11 +12212,39 @@ def render_analysis_chatbot(
     with st.chat_message("user"):
         st.markdown(question)
     with st.chat_message("assistant"):
-        with st.spinner("🧠 Checking the indicator compendium and M&E evidence..."):
-            try:
-                result=ask_analysis_chatbot(user_question=question,df=df,source_url=chat_source,chart_plan=chart_plan,quality_issues=quality_issues,quality_matrix=quality_matrix,quality_summary=quality_summary)
-            except Exception as exc:
-                result={"status":"ERROR","source":"CHAT","text":f"The chatbot encountered an error: {str(exc)[-1200:]}"}
+        # Live agent-style narration: update the visible activity log as each
+        # analysis stage is reached, without changing API loading or other UI.
+        if hasattr(st, "status"):
+            with st.status("🤖 DANIP AI is thinking through your question…", expanded=True) as agent_status:
+                progress_lines = []
+                progress_area = st.empty()
+
+                def _chat_progress(message):
+                    progress_lines.append(f"- {message}")
+                    progress_area.markdown("\n".join(progress_lines))
+                    agent_status.update(label=f"🤖 {message}", state="running", expanded=True)
+
+                try:
+                    result=ask_analysis_chatbot(
+                        user_question=question,
+                        df=df,
+                        source_url=chat_source,
+                        chart_plan=chart_plan,
+                        quality_issues=quality_issues,
+                        quality_matrix=quality_matrix,
+                        quality_summary=quality_summary,
+                        progress_callback=_chat_progress,
+                    )
+                except Exception as exc:
+                    result={"status":"ERROR","source":"CHAT","text":f"The chatbot encountered an error: {str(exc)[-1200:]}"}
+                agent_status.update(label="✅ Analysis complete", state="complete", expanded=False)
+        else:
+            # Compatibility fallback for older Streamlit versions.
+            with st.spinner("🤖 DANIP AI is analysing your question and the available evidence..."):
+                try:
+                    result=ask_analysis_chatbot(user_question=question,df=df,source_url=chat_source,chart_plan=chart_plan,quality_issues=quality_issues,quality_matrix=quality_matrix,quality_summary=quality_summary)
+                except Exception as exc:
+                    result={"status":"ERROR","source":"CHAT","text":f"The chatbot encountered an error: {str(exc)[-1200:]}"}
         answer=(result or {}).get("text","")
         st.markdown(answer)
         if (result or {}).get("source")=="ISG_INDICATOR_COMPENDIUM":
