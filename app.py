@@ -11484,6 +11484,89 @@ def ask_analysis_chatbot(
         quality_issues=quality_issues,
     )
 
+    # Deterministic row-level evidence: this is intentionally calculated from
+    # the loaded DANIP dataframe, not guessed by the language model.
+    org_cols = [
+        c for c in current_df.columns
+        if any(k in str(c).lower() for k in (
+            "organisationunitname", "organisation unit name", "org unit name",
+            "organisation unit", "facility name", "facility", "district", "region", "province"
+        ))
+    ]
+    date_cols = [
+        c for c in current_df.columns
+        if any(k in str(c).lower() for k in (
+            "period", "date", "month", "year", "reporting period"
+        ))
+    ]
+    org_col = org_cols[0] if org_cols else None
+    date_col = date_cols[0] if date_cols else None
+    computed_sections = []
+    for col in (indicators or []):
+        if col not in current_df.columns:
+            continue
+        values = pd.to_numeric(current_df[col], errors="coerce")
+        valid = values.dropna()
+        if valid.empty:
+            continue
+        missing_count = int(values.isna().sum())
+        facts = [
+            f"Indicator/column: {col}",
+            f"Rows in dataset: {len(current_df)}",
+            f"Valid numeric observations: {len(valid)}",
+            f"Missing or non-numeric observations: {missing_count} ({missing_count / max(len(current_df), 1) * 100:.1f}%)",
+            f"Mean: {valid.mean():.2f}",
+            f"Median: {valid.median():.2f}",
+            f"Minimum: {valid.min():.2f}",
+            f"Maximum: {valid.max():.2f}",
+            f"Total: {valid.sum():.2f}",
+        ]
+        for label, idx in (("Minimum observation row", valid.idxmin()), ("Maximum observation row", valid.idxmax())):
+            row = current_df.loc[idx]
+            details = []
+            if org_col:
+                details.append(f"{org_col}={row.get(org_col, '')}")
+            if date_col:
+                details.append(f"{date_col}={row.get(date_col, '')}")
+            details.append(f"{col}={values.loc[idx]:.2f}")
+            facts.append(label + ": " + "; ".join(details))
+
+        # Compute a trend only when a usable date/period column exists.
+        trend_added = False
+        if date_col:
+            parsed_dates = pd.to_datetime(current_df[date_col], errors="coerce")
+            trend_frame = pd.DataFrame({"date": parsed_dates, "value": values}).dropna()
+            if len(trend_frame) >= 2 and trend_frame["date"].nunique() >= 2:
+                trend_frame["period"] = trend_frame["date"].dt.to_period("M").astype(str)
+                monthly = trend_frame.groupby("period", sort=True)["value"].mean()
+                if len(monthly) >= 2:
+                    first_period, last_period = monthly.index[0], monthly.index[-1]
+                    first_value, last_value = float(monthly.iloc[0]), float(monthly.iloc[-1])
+                    change = last_value - first_value
+                    pct_change = (change / abs(first_value) * 100) if first_value != 0 else None
+                    pct_text = f" ({pct_change:+.1f}%)" if pct_change is not None else " (percentage change not calculated because the starting value is zero)"
+                    facts.append(
+                        f"Monthly mean trend: {first_period}={first_value:.2f}; "
+                        f"{last_period}={last_value:.2f}; change={change:+.2f}{pct_text}; "
+                        "trend is descriptive and does not establish cause."
+                    )
+                    trend_added = True
+        if date_col and not trend_added:
+            facts.append("Trend: not calculated because the date/period column did not yield at least two valid distinct periods.")
+        computed_sections.append("\n".join("- " + item for item in facts))
+
+    computed_data_facts = "\n\n".join(computed_sections) if computed_sections else (
+        "No numeric indicator column could be reliably identified for deterministic summary. "
+        "Do not invent statistics; explain what column or reporting-period detail is needed."
+    )
+    if computed_sections:
+        local_answer = (
+            str(local_answer or "").strip()
+            + "\n\n## Calculated evidence from the loaded DANIP data\n"
+            + computed_data_facts
+            + "\n\nThese are descriptive statistics only. No quality score is inferred from these statistics."
+        ).strip()
+
     if client is None:
         return {"status": "FALLBACK", "source": "DANIP_DHIS2", "text": local_answer}
 
@@ -11503,16 +11586,18 @@ SCOPE — STRICT DANIP-ONLY INTERPRETATION:
 - DANIP observations are the source of truth. Preserve the values as loaded; do not silently cap, replace, or alter them.
 
 ANALYSIS RULES:
-1. Answer the user's actual question using relevant columns and rows from the loaded data.
-2. State the data scope: indicator/measure, reporting period, geography/organisation, and number of records when available.
-3. Show calculations and formulas for percentages, totals, differences, trends, completeness, or reconciliation checks.
-4. For missing values, say “missing/not reported”; do not treat blanks as zero unless the data explicitly defines them as zero.
-5. Distinguish facts directly observed in the data from interpretation, possible explanations, and recommended follow-up.
-6. Do not claim that high or low values prove mismanagement, stockout, overstocking, or causation without supporting fields and thresholds.
-7. If fields needed for a calculation are absent or ambiguous, say exactly what is missing and do not fabricate the result.
-8. For stock reconciliation, only calculate when opening stock, receipts, all relevant issues, documented losses/damages/adjustments, and closing stock are available. State the formula and flag any unaccounted difference.
-9. For data-quality assessment, report only metrics supported by the loaded rows. Never generate a generic quality score such as 95/100 unless it is present in the supplied data or can be computed from an explicit method and evidence.
-10. Give practical, prioritized programme-management actions linked to the observed evidence.
+1. Answer the actual question, not just repeat a generic indicator definition or advice.
+2. Use the deterministic calculated evidence below as the factual baseline. When row-level values are available, name the reporting unit and period for the highest and lowest observations.
+3. State the indicator, valid observation count, missing count, geography/reporting units, and period covered when those fields exist.
+4. If dates/periods exist, describe the calculated direction and magnitude of change over time. If not, explicitly say trend analysis is unavailable from the loaded fields.
+5. Show formulas for calculated percentages, totals, differences, trends, completeness, and reconciliation checks.
+6. Treat blanks and non-numeric values as missing, not zero, unless the source explicitly defines them as zero.
+7. Separate observed facts, interpretation, plausible explanations, limitations, and recommended follow-up.
+8. Never claim that a high/low value proves stockout, overstocking, mismanagement, or causation without relevant fields and approved thresholds.
+9. For stock reconciliation, only calculate when opening stock, receipts, all relevant issues, documented losses/damages/adjustments, and closing stock are available. State the formula and flag any unaccounted difference.
+10. Data quality: report calculated completeness/missingness and specific detected issues only. Do not provide a numeric score or labels such as “Excellent” unless a documented scoring method and its actual component results are supplied.
+11. Management implications must be specific to the observed findings. Prioritize named reporting units for follow-up only when the data identifies them.
+12. Never fill gaps with invented values, indicator definitions, targets, benchmarks, or causal explanations.
 
 NORMAL ANSWER FORMAT:
 - **Direct answer / key finding**
@@ -11538,6 +11623,9 @@ CURRENT DANIP DATA EVIDENCE:
 
 DETERMINISTIC DANIP ANALYSIS (use as a starting point; verify against the evidence above):
 {local_answer}
+
+ROW-LEVEL CALCULATIONS FROM THE CURRENT DATAFRAME:
+{computed_data_facts}
 """
     errors = []
     models = [OPENAI_MODEL] + [m for m in ("gpt-5-mini", "gpt-4.1-mini") if m and m != OPENAI_MODEL]
