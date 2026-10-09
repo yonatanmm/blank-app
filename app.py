@@ -11422,6 +11422,116 @@ def _chat_external_status_block(external_context, explicit_external_request=Fals
     return "\n".join(lines), label
 
 
+
+def _chat_is_closing_stock_extremes_question(question):
+    """Detect requests for monthly highest/lowest reported closing stock, not reconciliation."""
+    q = str(question or "").lower()
+    asks_extremes = any(x in q for x in ("highest", "maximum", "max stock", "lowest", "minimum", "min stock", "highest and lowest", "top and bottom"))
+    asks_closing = any(x in q for x in ("closing stock", "closing-stock", "stock at close", "closing balance"))
+    asks_monthly = any(x in q for x in ("month", "monthly", "reporting period", "reporting month", "each reporting"))
+    asks_missing = "missing" in q or "blank" in q or "not reported" in q
+    explicitly_disables_reconciliation = any(x in q for x in ("do not perform stock reconciliation", "don't perform stock reconciliation", "without reconciliation", "do not reconcile", "don't reconcile"))
+    asks_for_reconciliation = any(x in q for x in ("perform stock reconciliation", "reconcile the stock", "calculate expected stock", "stock balance calculation")) and not explicitly_disables_reconciliation
+    return asks_extremes and asks_closing and (asks_monthly or asks_missing) and not asks_for_reconciliation
+
+
+def _chat_closing_stock_extremes_answer(df):
+    """Summarize actual closing-stock values by month from the Complete Loaded Dataset only."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return {"status": "NO_DHIS2_DATA", "source": "NO_DHIS2_DATA", "text": "The Complete Loaded Dataset is empty. Load the actual DANIP Form A data first."}
+
+    import re as _re
+    def norm(value):
+        return _re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
+
+    cols = {col: norm(col) for col in df.columns}
+    def first_col(predicate):
+        return next((c for c, n in cols.items() if predicate(n)), None)
+
+    org_col = first_col(lambda n: n in ("organisationunitname", "organizationunitname", "organisation unit name", "organization unit name", "facility name", "health facility name") or "organisation unit" in n or "organization unit" in n)
+    period_col = first_col(lambda n: n in ("periodname", "period name", "period", "reporting period", "reporting month", "month") or "reporting month" in n)
+    closing_col = first_col(lambda n: "closing" in n and "stock" in n and not any(x in n for x in ("opening", "expected", "variance", "difference")))
+
+    if not org_col or not period_col or not closing_col:
+        missing = [label for label, col in (("organisation/facility name", org_col), ("reporting month/period", period_col), ("reported closing stock", closing_col)) if not col]
+        return {"status": "INCOMPLETE_SCHEMA", "source": "DANIP_DHIS2", "text": "## Monthly reported MMS closing stock\n\nI could not produce the monthly ranking from the Complete Loaded Dataset because these required columns were not identified: " + ", ".join(missing) + ". No reconciliation was attempted."}
+
+    work = df[[org_col, period_col, closing_col]].copy()
+    work["_org"] = work[org_col].astype("string").str.strip()
+    work["_period_raw"] = work[period_col].astype("string").str.strip()
+    work["_closing"] = pd.to_numeric(work[closing_col], errors="coerce")
+    work.loc[work["_org"].isin(["", "<NA>", "nan", "None"]), "_org"] = "Organisation unit not reported"
+    work.loc[work["_period_raw"].isin(["", "<NA>", "nan", "None"]), "_period_raw"] = "Reporting month not reported"
+
+    def period_key(value):
+        v = str(value).strip()
+        # DHIS2 monthly period IDs such as 202504 or YYYY-MM.
+        m = _re.search(r"(20\d{2})\D?(0?[1-9]|1[0-2])", v)
+        if m:
+            return (int(m.group(1)), int(m.group(2)), v.lower())
+        # Month name followed by year, or year followed by month name.
+        try:
+            ts = pd.to_datetime(v, errors="raise")
+            return (int(ts.year), int(ts.month), v.lower())
+        except Exception:
+            return (9999, 99, v.lower())
+
+    periods = sorted(work["_period_raw"].dropna().unique().tolist(), key=period_key)
+    rows_out = []
+    missing_out = []
+    for period in periods:
+        part = work[work["_period_raw"] == period]
+        missing_part = part[part["_closing"].isna()]
+        for _, r in missing_part.iterrows():
+            missing_out.append({"period": period, "organisation_unit": r["_org"]})
+        valid = part[part["_closing"].notna()]
+        if valid.empty:
+            rows_out.append({"period": period, "highest_facilities": [], "lowest_facilities": [], "note": "No reported closing-stock values in this month."})
+            continue
+        high = valid["_closing"].max()
+        low = valid["_closing"].min()
+        highs = [{"organisation_unit": str(r["_org"]), "closing_stock": float(r["_closing"])} for _, r in valid[valid["_closing"] == high].iterrows()]
+        lows = [{"organisation_unit": str(r["_org"]), "closing_stock": float(r["_closing"])} for _, r in valid[valid["_closing"] == low].iterrows()]
+        rows_out.append({"period": period, "highest_facilities": highs, "lowest_facilities": lows})
+
+    def fmt(v):
+        try:
+            return f"{float(v):,.0f}" if abs(float(v) - round(float(v))) < 0.000001 else f"{float(v):,.2f}"
+        except Exception:
+            return str(v)
+
+    lines = [
+        "## Monthly highest and lowest reported MMS closing stock",
+        "",
+        f"Source: **Complete Loaded Dataset** — {len(df):,} loaded rows. Field used: **{closing_col}**. This analysis uses only actual reported closing-stock values; it does not calculate expected stock or perform reconciliation.",
+        "",
+        "| Reporting month | Highest facility (closing stock, bottles) | Lowest facility (closing stock, bottles) |",
+        "|---|---|---|",
+    ]
+    for item in rows_out:
+        period = item["period"]
+        if item.get("note"):
+            lines.append(f"| {period} | Not available | Not available — {item['note']} |")
+            continue
+        high_text = "; ".join(f"{x['organisation_unit']} — {fmt(x['closing_stock'])}" for x in item["highest_facilities"])
+        low_text = "; ".join(f"{x['organisation_unit']} — {fmt(x['closing_stock'])}" for x in item["lowest_facilities"])
+        lines.append(f"| {period} | {high_text} | {low_text} |")
+
+    lines += ["", f"### Missing reported closing stock ({len(missing_out)} facility-month records)", ""]
+    if missing_out:
+        lines += ["| Reporting month | Facility |", "|---|---|"]
+        for item in missing_out:
+            lines.append(f"| {item['period']} | {item['organisation_unit']} |")
+    else:
+        lines.append("No missing closing-stock values were found in the loaded records.")
+    lines += ["", "**Method:** For each reporting month, the maximum and minimum are taken across non-missing reported closing-stock values. Ties are all shown. Blank/non-numeric closing stock is listed as missing, not treated as zero. No other stock fields were used."]
+    return {
+        "status": "CLOSING_STOCK_MONTHLY_EXTREMES",
+        "source": "DANIP_COMPLETE_LOADED_DATASET",
+        "text": "\n".join(lines),
+        "closing_stock_extremes": {"rows": rows_out, "missing": missing_out, "columns_used": {"organisation_unit": org_col, "period": period_col, "reported_closing_stock": closing_col}, "loaded_rows": len(df)},
+    }
+
 def _chat_is_stock_inventory_analysis_question(question):
     """Identify stock-card questions that must be answered from DANIP rows first."""
     q = str(question or "").lower()
@@ -11653,6 +11763,19 @@ def ask_analysis_chatbot(
     _report_progress("I’m identifying what you want to know and which evidence is needed.")
     current_df = df if isinstance(df,pd.DataFrame) and not df.empty else st.session_state.get("nexus_chat_df")
     current_source = str(source_url or st.session_state.get("nexus_chat_source_url", "") or "").strip()
+
+    # The Complete Loaded Dataset section is the underlying source of truth for
+    # data interpretation. Specific monthly closing-stock ranking requests are
+    # answered directly from its current dataframe and must never be routed into
+    # the separate stock-reconciliation calculation.
+    if _chat_is_closing_stock_extremes_question(question):
+        _report_progress("I’m reading the Complete Loaded Dataset and ranking only the reported closing-stock values by reporting month.")
+        if current_df is None or current_df.empty:
+            return {"status":"NO_DHIS2_DATA", "source":"NO_DHIS2_DATA", "text":"The Complete Loaded Dataset is not loaded. Load the actual DANIP Form A data before requesting monthly closing-stock rankings."}
+        result = _chat_closing_stock_extremes_answer(current_df)
+        st.session_state["nexus_chat_df"] = current_df
+        st.session_state["nexus_chat_source_url"] = current_source
+        return result
 
     # 1. Intent routing. External requests MUST bypass the pure-RAG early return.
     # Otherwise an indicator question containing UNICEF can be answered by KM
@@ -11921,6 +12044,8 @@ RULES:
 1. First identify the user's actual task: explain, compare, calculate, find exceptions, interpret a trend, answer a follow-up, or prepare a report. Answer that task directly rather than defaulting to a generic indicator profile.
 2. Never invent, change, cap or replace a DANIP number.
 3. Use the exact DANIP indicator name, organisation unit, period and observed values. If the user asks "which organisation unit/facility", name the specific unit(s) from row-level evidence; do not answer only with indicator statistics.
+3A. The **Complete Loaded Dataset** section is the authoritative current-data reference for interpretation. The dataframe supplied to this chatbot is the same loaded dataset displayed in that section. Inspect its actual columns and row-level values for facility names, reporting periods, rankings, missing values and trends. Do not substitute RAG excerpts, single-indicator averages, generic summaries, or assumptions for the loaded rows.
+3B. If the user asks for highest/lowest reported closing stock by month, use only the actual reported closing-stock column in the Complete Loaded Dataset. List missing closing-stock facility-months separately. Do not calculate expected stock or perform reconciliation unless explicitly requested.
 4. Use internal KM/DANIP CMP to learn official indicator meaning, definitions, calculation rules, intended interpretation, and programme context. Blend that guidance with the user's requested analysis in natural conversational language, like a helpful analytical assistant. Do not merely paste retrieved passages or make the user restate their request.
 5. Use internal KM to understand the indicator; never invent missing official metadata.
 4. Use external evidence only as contextual support; never use it to alter the DANIP value.
@@ -11975,15 +12100,16 @@ Then explain the comparison in 1-3 sentences. If the external layer returned no 
 
 STOCK / INVENTORY ANALYSIS OVERRIDE:
 When the question concerns MMS, bottles, opening/closing stock, receipts, damaged stock,
-or facility stock-management issues, the current DANIP dataset is the primary evidence.
-Use the row-level `stock_reconciliation` evidence when supplied. Name each organisation
-unit and reporting period, show the exact calculation and reported-minus-expected
- difference, and separate confirmed discrepancies from incomplete rows. Do not answer
-by summarising RAG chunks or by reporting only a single indicator's average/minimum/
-maximum. Use the DANIP CMP/Compendium only to explain the official indicator or method;
-it must not supply facility values. Missing values are unknown, not zero. If damaged-stock
-values are absent, label the reconciliation provisional/incomplete. If the row-level data
-show no confirmed discrepancies, say so and list records that still need verification.
+or facility stock-management issues, the Complete Loaded Dataset is the primary evidence.
+Follow the exact operation requested: rank reported closing stock when asked for highest/lowest;
+list missing closing-stock values when asked for missing data; perform reconciliation ONLY when
+explicitly requested. For monthly highest/lowest questions, use only the actual reported closing-
+stock column, show facility and reporting month, and do not calculate expected stock. For explicit
+reconciliation questions, use row-level `stock_reconciliation` evidence, show calculations and
+separate confirmed discrepancies from incomplete rows. Never answer only with a single indicator's
+average/minimum/maximum when facility-level rows are requested. Use the DANIP CMP/Compendium only
+to explain official indicator context; it must not supply facility values. Missing values are unknown,
+not zero.
 
 USER-FACING ANSWER REQUIREMENT:
 For ordinary DANIP analytical questions, present the current DANIP/DHIS2 findings and their M&E interpretation.
