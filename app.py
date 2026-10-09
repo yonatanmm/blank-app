@@ -11423,6 +11423,156 @@ def _chat_external_status_block(external_context, explicit_external_request=Fals
 
 
 
+def _chat_classify_analysis_intent(question):
+    """Classify the requested operation before selecting an analysis function.
+
+    Generic indicator rankings take priority over specialized stock workflows;
+    stock-related questions are routed to stock handlers only when their wording
+    actually identifies stock, and reconciliation requires explicit intent.
+    """
+    q = str(question or "").lower()
+    if _chat_is_explicit_stock_reconciliation_question(q):
+        return "stock_reconciliation"
+    asks_extreme = any(x in q for x in (
+        "highest", "maximum", "max value", "highest value", "largest value",
+        "lowest", "minimum", "min value", "lowest value", "smallest value",
+        "top value", "rank highest", "rank lowest"
+    ))
+    mentions_stock = any(x in q for x in (
+        "closing stock", "closing-stock", "mms stock", "stock level",
+        "stock balance", "opening stock", "damaged stock", "stock bottles"
+    ))
+    if asks_extreme and not mentions_stock:
+        return "indicator_ranking"
+    if any(x in q for x in ("percentage change", "percent change", "% change")):
+        return "percentage_change"
+    if any(x in q for x in ("month-to-month", "month to month", "month on month", "trend", "increased", "decreased")):
+        return "trend_or_change"
+    if any(x in q for x in ("missing values", "missing data", "blank values", "not reported")):
+        return "missing_value_analysis"
+    if "zero" in q or "zeros" in q:
+        return "zero_value_analysis"
+    if any(x in q for x in ("data quality", "quality issue", "quality matrix")):
+        return "data_quality"
+    if any(x in q for x in ("compare facilities", "compare countries", "facility comparison", "country comparison")):
+        return "facility_or_country_comparison"
+    if any(x in q for x in ("indicator", "pregnant women", "coverage", "received mms")):
+        return "general_indicator_analysis"
+    if any(x in q for x in ("recommend", "interpret", "what should", "m&e interpretation")):
+        return "me_interpretation"
+    return "general_question"
+
+
+def _chat_is_mms_pregnancy_indicator_ranking_question(question):
+    """Backward-compatible name; now detects any non-stock indicator ranking."""
+    q = str(question or "").lower()
+    asks_extreme = any(x in q for x in (
+        "highest", "maximum", "max value", "highest value", "largest value",
+        "lowest", "minimum", "min value", "lowest value", "smallest value",
+        "top value", "rank highest", "rank lowest"
+    ))
+    stock_context = any(x in q for x in (
+        "closing stock", "closing-stock", "mms stock", "stock level",
+        "stock balance", "opening stock", "damaged stock", "stock bottles"
+    ))
+    return asks_extreme and not stock_context and not _chat_is_explicit_stock_reconciliation_question(q)
+
+
+def _chat_resolve_ranking_column(df, question):
+    """Resolve a numeric field from the active schema using explicit names or token overlap."""
+    import re as _re
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return None
+    q = str(question or "")
+    # If the user explicitly quoted a column name, prefer that exact field.
+    for quoted in _re.findall(r"[`\"']([^`\"']{2,})[`\"']", q):
+        if quoted in df.columns:
+            return quoted
+    stop = {
+        "which", "country", "countries", "facility", "facilities", "organisation", "organization",
+        "unit", "recorded", "records", "record", "the", "a", "an", "of", "in", "on", "for",
+        "during", "and", "or", "with", "from", "value", "values", "number", "count", "total",
+        "highest", "lowest", "maximum", "minimum", "max", "min", "largest", "smallest", "month",
+        "monthly", "reporting", "period", "periodname", "organisationunitname", "organizationunitname",
+        "compare", "comparison", "show", "tell", "me", "what", "is", "are", "was", "were",
+        "who", "that", "has", "have", "had", "all", "any", "during", "reported", "report"
+    }
+    def tokens(value):
+        ts=set(_re.findall(r"[a-z0-9]+", str(value).lower())) - stop
+        # Common generic abbreviation expansion for field labels.
+        if "pw" in ts:
+            ts.update(("pregnant", "women"))
+        if "women" in ts and "pregnant" in ts:
+            ts.add("pw")
+        return ts
+    qtokens=tokens(q)
+    if not qtokens:
+        return None
+    candidates=[]
+    for col in df.columns:
+        if str(col).lower() in {"organisationunitname", "organizationunitname", "periodname", "period", "organisationunitid", "dataelementid"}:
+            continue
+        vals=pd.to_numeric(df[col], errors="coerce")
+        if not vals.notna().any():
+            continue
+        c_tokens=tokens(col)
+        overlap=len(qtokens & c_tokens)
+        if overlap:
+            # Favor specific overlap and coverage, not arbitrary first-column matches.
+            score=(overlap / max(1, len(qtokens))) + (overlap / max(1, len(c_tokens)))
+            candidates.append((score, overlap, col))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x:(x[0], x[1]), reverse=True)
+    best=candidates[0]
+    if best[1] < 2:
+        return None
+    if len(candidates)>1 and candidates[1][0] >= best[0]*0.95 and candidates[1][1] == best[1]:
+        return None  # Ambiguous request: do not silently pick a different indicator.
+    return best[2]
+
+
+def _chat_indicator_ranking_answer(df, question):
+    """Rank the requested numeric indicator from the active Complete Loaded Dataset."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return {"status":"NO_DHIS2_DATA", "source":"NO_DHIS2_DATA", "text":"The Complete Loaded Dataset is empty. Load the active dataset before requesting a ranking."}
+    value_col = _chat_resolve_ranking_column(df, question)
+    if value_col is None:
+        numeric_cols=[str(c) for c in df.columns if pd.to_numeric(df[c], errors="coerce").notna().any()]
+        available=", ".join(numeric_cols[:25]) if numeric_cols else "none identified"
+        return {"status":"INDICATOR_COLUMN_UNAVAILABLE_OR_AMBIGUOUS", "source":"DANIP_COMPLETE_LOADED_DATASET", "text":"I could not confidently match your question to one numeric indicator column in the active Complete Loaded Dataset, so I did not substitute another analysis or run stock reconciliation. Please mention the indicator/measure more specifically. Numeric columns detected: " + available + "."}
+    org_col=next((c for c in ("organisationunitname", "organizationunitname", "organisationUnitName", "organizationUnitName") if c in df.columns), None)
+    period_col=next((c for c in ("periodname", "period_name", "periodName", "period") if c in df.columns), None)
+    missing_cols=[name for name,col in (("organisationunitname",org_col),("periodname",period_col)) if col is None]
+    if missing_cols:
+        return {"status":"INCOMPLETE_SCHEMA", "source":"DANIP_COMPLETE_LOADED_DATASET", "text":"I matched the requested numeric field **"+str(value_col)+"**, but cannot report country/facility and reporting month because these fields are unavailable: "+", ".join(missing_cols)+". No alternative analysis was substituted."}
+    work=df[[org_col,period_col,value_col]].copy()
+    work["_numeric_value"]=pd.to_numeric(work[value_col],errors="coerce")
+    valid=work[work["_numeric_value"].notna()].copy()  # zero remains a valid observation
+    excluded=int(work["_numeric_value"].isna().sum())
+    if valid.empty:
+        return {"status":"NO_VALID_INDICATOR_VALUES", "source":"DANIP_COMPLETE_LOADED_DATASET", "text":f"The matched field **{value_col}** has no valid numeric values. {len(df):,} loaded records were examined; missing/non-numeric values were excluded. No stock reconciliation was attempted."}
+    q=str(question or "").lower()
+    lowest=any(x in q for x in ("lowest","minimum","min value","smallest value","rank lowest")) and not any(x in q for x in ("highest","maximum","max value","largest value","rank highest"))
+    extreme=valid["_numeric_value"].min() if lowest else valid["_numeric_value"].max()
+    ties=valid[valid["_numeric_value"]==extreme][[org_col,period_col,value_col]].copy()
+    ties=ties.rename(columns={org_col:"Country / facility",period_col:"Reporting month",value_col:"Indicator value"})
+    ties["Indicator value"]=ties["Indicator value"].map(lambda x:f"{float(x):,.0f}" if float(x).is_integer() else f"{float(x):,.6g}")
+    direction="lowest" if lowest else "highest"
+    return {"status":"INDICATOR_RANKING", "source":"DANIP_COMPLETE_LOADED_DATASET", "text":(
+        f"## Indicator ranking: {direction.title()} reported value\n\n"
+        f"**Source:** Complete Loaded Dataset (active dataset).\n\n"
+        f"**Field used:** `{value_col}`\n\n"
+        f"**Result:** {direction.title()} value = **{float(extreme):,.6g}** across **{len(valid):,} valid numeric records**; **{len(df):,} loaded records examined**. Missing/non-numeric values excluded: **{excluded:,}**. Valid zeros were retained.\n\n"
+        f"**Country/facility and reporting month (all ties):**\n\n{ties.to_markdown(index=False)}\n\n"
+        f"Ranking was calculated deterministically with Pandas from the active dataset. No stock fields were required and no stock reconciliation was performed."
+    ), "indicator_ranking":{"indicator":str(value_col),"direction":direction,"extreme_value":float(extreme),"ties":ties.to_dict(orient="records"),"valid_records_examined":int(len(valid)),"loaded_records_examined":int(len(df)),"missing_or_nonnumeric_excluded":excluded,"organisation_column":org_col,"period_column":period_col}}
+
+
+# Backward-compatible alias for code that referenced the earlier named handler.
+def _chat_mms_pregnancy_indicator_ranking_answer(df, question):
+    return _chat_indicator_ranking_answer(df, question)
+
 def _chat_is_closing_stock_extremes_question(question):
     """Detect requests for monthly highest/lowest reported closing stock, not reconciliation."""
     q = str(question or "").lower()
@@ -11877,6 +12027,19 @@ def ask_analysis_chatbot(
     _report_progress("I’m identifying what you want to know and which evidence is needed.")
     current_df = df if isinstance(df,pd.DataFrame) and not df.empty else st.session_state.get("nexus_chat_df")
     current_source = str(source_url or st.session_state.get("nexus_chat_source_url", "") or "").strip()
+
+    # Classify intent first. A pregnancy MMS indicator ranking is not inventory
+    # reconciliation and must use only its exact indicator column.
+    analysis_intent = _chat_classify_analysis_intent(question)
+    if analysis_intent == "indicator_ranking" and _chat_is_mms_pregnancy_indicator_ranking_question(question):
+        _report_progress("I identified an indicator-ranking request. I’m validating the exact indicator column and ranking its numeric values from the active Complete Loaded Dataset; stock reconciliation is not involved.")
+        if current_df is None or current_df.empty:
+            return {"status":"NO_DHIS2_DATA", "source":"NO_DHIS2_DATA", "text":"The active Complete Loaded Dataset is not loaded. Load the DHIS2 data before requesting this indicator ranking."}
+        result = _chat_indicator_ranking_answer(current_df, question)
+        # Store the active dataframe, never a previous answer/result.
+        st.session_state["nexus_chat_df"] = current_df
+        st.session_state["nexus_chat_source_url"] = current_source
+        return result
 
     # The Complete Loaded Dataset section is the underlying source of truth for
     # data interpretation. Route the requested operation BEFORE any generic stock
