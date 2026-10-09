@@ -19860,9 +19860,129 @@ input, textarea, [data-baseweb="select"] > div {
   border-color: #d7e0ee !important;
   border-radius: 7px !important;
 }
+/* ============================================================
+   RESPONSIVE LAYOUT LAYER — CSS ONLY
+   Preserve existing app logic, controls, data loading and navigation.
+   ============================================================ */
+/* Prevent long labels, tables and embedded content from forcing page width. */
+html, body, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
+  max-width: 100% !important;
+  overflow-x: hidden !important;
+}
+[data-testid="stMainBlockContainer"], .block-container {
+  width: 100% !important;
+  max-width: 100% !important;
+  box-sizing: border-box !important;
+}
+[data-testid="stMarkdownContainer"], [data-testid="stText"],
+[data-testid="stCaptionContainer"], [data-testid="stMetricLabel"] {
+  overflow-wrap: anywhere !important;
+  word-break: normal;
+}
+[data-testid="stDataFrame"], [data-testid="stTable"],
+[data-testid="stDataEditor"], [data-testid="stPlotlyChart"],
+[data-testid="stVegaLiteChart"], [data-testid="stImage"] {
+  max-width: 100% !important;
+  min-width: 0 !important;
+}
+[data-testid="stDataFrame"] > div,
+[data-testid="stDataEditor"] > div {
+  max-width: 100% !important;
+  overflow-x: auto !important;
+}
+[data-testid="stHorizontalBlock"] { min-width: 0 !important; }
+[data-testid="stHorizontalBlock"] > [data-testid="column"] {
+  min-width: 0 !important;
+  box-sizing: border-box !important;
+}
+[data-testid="stButton"] > button,
+[data-testid="stDownloadButton"] > button,
+[data-testid="stFormSubmitButton"] > button {
+  max-width: 100% !important;
+  white-space: normal !important;
+  overflow-wrap: anywhere !important;
+  min-height: 2.45rem;
+}
+input, textarea, [data-baseweb="select"], [data-testid="stDateInput"],
+[data-testid="stNumberInput"] { max-width: 100% !important; }
+/* Keep workspace selector and app tabs usable when there is little width. */
+div[data-testid="stRadio"] div[role="radiogroup"] {
+  flex-wrap: wrap !important;
+  align-items: stretch !important;
+  max-width: 100% !important;
+}
+[data-testid="stTabs"] [data-baseweb="tab-list"] {
+  max-width: 100% !important;
+  overflow-x: auto !important;
+  overflow-y: hidden !important;
+  flex-wrap: nowrap !important;
+  scrollbar-width: thin;
+}
+[data-testid="stTabs"] [data-baseweb="tab"] {
+  flex: 0 0 auto !important;
+  white-space: nowrap !important;
+}
+/* Tablet: reduce whitespace and keep columns from becoming too narrow. */
+@media (max-width: 1100px) {
+  .block-container, [data-testid="stMainBlockContainer"] {
+    padding-left: 1rem !important;
+    padding-right: 1rem !important;
+  }
+  [data-testid="stHorizontalBlock"] { gap: .8rem !important; }
+  [data-testid="stMetric"] { padding: .7rem !important; }
+  [data-testid="stMetricValue"] { font-size: clamp(1.1rem, 2.4vw, 1.8rem) !important; }
+}
+/* Mobile: stack Streamlit columns, form fields and KPI cards. */
 @media (max-width: 760px) {
-  .block-container { padding-left: .65rem !important; padding-right: .65rem !important; }
-  div[data-testid="stRadio"] div[role="radiogroup"] > label { padding: 0 9px !important; font-size: .72rem !important; }
+  .block-container, [data-testid="stMainBlockContainer"] {
+    padding: .65rem .6rem 1.25rem !important;
+  }
+  [data-testid="stHorizontalBlock"] {
+    flex-wrap: wrap !important;
+    gap: .55rem !important;
+    align-items: stretch !important;
+  }
+  [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+    flex: 1 1 100% !important;
+    width: 100% !important;
+    min-width: 100% !important;
+    max-width: 100% !important;
+  }
+  [data-testid="stMetric"] { width: 100% !important; padding: .7rem !important; }
+  [data-testid="stMetricValue"] { font-size: 1.35rem !important; }
+  [data-testid="stMetricLabel"] { font-size: .78rem !important; }
+  div[data-testid="stRadio"] div[role="radiogroup"] { gap: .25rem !important; }
+  div[data-testid="stRadio"] div[role="radiogroup"] > label {
+    min-height: 38px !important;
+    padding: 7px 9px !important;
+    font-size: .76rem !important;
+    white-space: normal !important;
+  }
+  [data-testid="stTabs"] [data-baseweb="tab"] {
+    min-height: 42px !important;
+    padding: 0 .65rem !important;
+    font-size: .78rem !important;
+  }
+  [data-testid="stPlotlyChart"] { overflow-x: auto !important; }
+  [data-testid="stChatMessage"] { padding: .65rem !important; }
+  [data-testid="stChatInput"] { padding-left: 0 !important; padding-right: 0 !important; }
+  h1 { font-size: clamp(1.45rem, 6vw, 2rem) !important; line-height: 1.2 !important; }
+  h2 { font-size: clamp(1.2rem, 5vw, 1.55rem) !important; line-height: 1.25 !important; }
+  h3 { font-size: clamp(1.05rem, 4vw, 1.3rem) !important; }
+  [data-testid="stAlert"] { padding: .7rem !important; }
+}
+@media (max-width: 420px) {
+  .block-container, [data-testid="stMainBlockContainer"] {
+    padding-left: .45rem !important;
+    padding-right: .45rem !important;
+  }
+  [data-testid="stTabs"] [data-baseweb="tab"] {
+    padding: 0 .48rem !important;
+    font-size: .72rem !important;
+  }
+  [data-testid="stButton"] > button,
+  [data-testid="stDownloadButton"] > button { font-size: .8rem !important; }
+  [data-testid="stMetricValue"] { font-size: 1.2rem !important; }
 }
 </style>
 """, unsafe_allow_html=True)
