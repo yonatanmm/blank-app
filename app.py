@@ -11629,6 +11629,190 @@ def _chat_top_missing_fields_answer(df):
                                        "period_column": period_col}}
 
 
+def _chat_build_generic_analysis_plan(question, df=None):
+    """Create a question-specific, generic analysis plan without hardcoded indicators."""
+    q = str(question or "").strip().lower()
+    intents = []
+    def has(*terms): return any(t in q for t in terms)
+    if has("definition", "define ", "what does", "what is meant by", "formula", "numerator", "denominator"):
+        intents.append("definition_lookup")
+    if has("data quality matrix", "quality matrix", "data quality", "quality assessment", "dqa"):
+        intents.append("data_quality_matrix")
+    if has("missing", "null", "blank", "not reported", "incomplete", "completeness"):
+        intents.append("missing_data_analysis")
+    if has("trend", "over time", "changed over", "change over time", "month to month", "month-on-month", "period-to-period", "increased", "decreased"):
+        intents.append("trend_analysis")
+    if has("compare periods", "period comparison", "compared with", "versus", " vs ", "between "):
+        intents.append("period_comparison")
+    if has("highest in each", "highest each month", "each month", "per month", "within each period", "by month", "by period"):
+        intents.append("grouped_ranking")
+    elif has("highest", "lowest", "rank", "ranking", "top ", "maximum", "minimum", "largest", "smallest"):
+        intents.append("overall_ranking")
+    if has("compare facilities", "facility comparison", "across facilities", "by facility"):
+        intents.append("facility_comparison")
+    if has("compare countries", "country comparison", "across countries", "by country"):
+        intents.append("country_comparison")
+    if has("outlier", "anomal", "unusual value", "extreme value"):
+        intents.append("outlier_analysis")
+    if has("correlation", "correlate", "relationship between"):
+        intents.append("correlation_analysis")
+    if has("compare indicators", "indicator comparison", "compare the indicators", "among indicators"):
+        intents.append("indicator_comparison")
+    if has("what is", "how many", "what was", "show me", "give me the value", "total", "average", "mean", "count"):
+        intents.append("direct_value")
+    if has("interpret", "recommend", "what does this mean", "main finding", "implication", "m&e"):
+        intents.append("general_mne_interpretation")
+    if not intents:
+        intents.append("follow_up_question" if has("that", "those", "same facility", "what about it", "and then") else "general_mne_interpretation")
+
+    period_col = find_period_column(df) if isinstance(df, pd.DataFrame) and not df.empty else None
+    org_col = find_ou_column(df) if isinstance(df, pd.DataFrame) and not df.empty else None
+    numeric_cols = get_numeric_columns(df) if isinstance(df, pd.DataFrame) and not df.empty else []
+    return {
+        "intent": list(dict.fromkeys(intents)),
+        "dataset_id": st.session_state.get("nexus_chat_source_url") or st.session_state.get("active_dataset_name"),
+        "indicators": [str(c) for c in numeric_cols],
+        "statistics": [x for x in ("sum" if has("total", "sum") else None, "average" if has("average", "mean") else None, "count" if has("count", "how many") else None, "max" if has("highest", "maximum", "largest") else None, "min" if has("lowest", "minimum", "smallest") else None) if x],
+        "dimensions": [str(c) for c in (org_col, period_col) if c],
+        "time_scope": "all_available_periods" if has("all available", "all periods", "across all", "overall") else ("period_specific" if period_col and has("month", "period", "year", "quarter") else None),
+        "grouping": [str(period_col)] if period_col and has("each month", "per month", "by month", "by period", "each period") else [],
+        "filters": {},
+        "ranking_scope": "within_each_period" if has("each month", "highest each", "per month", "within each period", "by month") else ("overall_across_periods" if has("across all", "all periods", "overall", "across available") else None),
+        "missing_value_policy": "preserve_and_report",
+        "requires_rag": any(x in intents for x in ("definition_lookup",)),
+        "requires_calculation": any(x in intents for x in ("direct_value", "overall_ranking", "grouped_ranking", "trend_analysis", "period_comparison", "facility_comparison", "country_comparison", "missing_data_analysis", "data_quality_matrix", "outlier_analysis", "correlation_analysis", "indicator_comparison")),
+        "requested_outputs": intents[:],
+    }
+
+
+def _chat_generic_data_quality_matrix_answer(df):
+    """Compute a transparent whole-dataset quality matrix from active rows and fields."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return {"status":"NO_DHIS2_DATA", "source":"NO_DHIS2_DATA", "text":"The active Complete Loaded Dataset is not loaded or is empty."}
+    total_rows, total_cols = len(df), len(df.columns)
+    rows=[]
+    for col in df.columns:
+        series=df[col]
+        missing=series.isna()
+        if pd.api.types.is_object_dtype(series.dtype) or pd.api.types.is_string_dtype(series.dtype):
+            missing = missing | series.astype("string").str.strip().eq("").fillna(False)
+        numeric=pd.to_numeric(series, errors="coerce")
+        numeric_like=bool(numeric.notna().any())
+        valid_numeric=numeric.dropna()
+        rows.append({
+            "Field":str(col), "Data type":str(series.dtype), "Missing":int(missing.sum()),
+            "Missing %":float(missing.mean()*100) if total_rows else 0.0,
+            "Valid records":int(total_rows-missing.sum()), "Distinct values":int(series[~missing].nunique(dropna=True)),
+            "Zero values":int((valid_numeric==0).sum()) if numeric_like else None,
+            "Negative values":int((valid_numeric<0).sum()) if numeric_like else None,
+            "Numeric outliers (IQR)":int(((valid_numeric < valid_numeric.quantile(.25)-1.5*(valid_numeric.quantile(.75)-valid_numeric.quantile(.25))) | (valid_numeric > valid_numeric.quantile(.75)+1.5*(valid_numeric.quantile(.75)-valid_numeric.quantile(.25)))).sum()) if numeric_like and len(valid_numeric)>=4 and valid_numeric.quantile(.75)!=valid_numeric.quantile(.25) else (0 if numeric_like else None),
+        })
+    matrix=pd.DataFrame(rows).sort_values(["Missing %","Missing","Field"],ascending=[False,False,True])
+    display=matrix.copy(); display["Missing %"]=display["Missing %"].map(lambda x:f"{x:.2f}%")
+    numeric_fields=int(sum(pd.to_numeric(df[c],errors="coerce").notna().any() for c in df.columns))
+    total_missing=int(matrix["Missing"].sum())
+    text=(f"## Data Quality Matrix — Complete Loaded Dataset\n\n**Records examined:** {total_rows:,}  \n**Fields examined:** {total_cols:,}  \n**Numeric fields detected:** {numeric_fields:,}  \n**Total missing cells:** {total_missing:,} of {total_rows*total_cols:,} ({(total_missing/(total_rows*total_cols)*100 if total_rows*total_cols else 0):.2f}%).\n\n"
+          "| Field | Data type | Missing | Missing % | Valid records | Distinct values | Zero values | Negative values | Numeric outliers (IQR) |\n|---|---|---:|---:|---:|---:|---:|---:|---:|\n" + "\n".join("| " + " | ".join(str(v) for v in row) + " |" for row in display.fillna("—").itertuples(index=False,name=None)) +
+          "\n\n**Interpretation limits:** zeros are treated as valid reported values. Outliers are statistical flags using the 1.5×IQR rule, not confirmed errors. This matrix does not assign an overall quality score because no approved scoring formula was provided. Duplicate rows and DHIS2-specific validity rules require explicit record keys/rules in the active dataset or metadata.")
+    return {"status":"SUCCESS", "source":"DANIP_COMPLETE_LOADED_DATASET", "text":text, "data_quality_matrix":matrix.to_dict(orient="records"), "analysis_plan":{"intent":["data_quality_matrix"],"missing_value_policy":"preserve_and_report"}}
+
+
+def _chat_generic_trend_answer(df, question):
+    """Return period-ordered observations for a numeric field; do not aggregate into totals."""
+    value_col=_chat_resolve_ranking_column(df, question)
+    if value_col is None: return None
+    period_col=find_period_column(df)
+    org_col=find_ou_column(df)
+    if not period_col:
+        return {"status":"INCOMPLETE_SCHEMA","source":"DANIP_COMPLETE_LOADED_DATASET","text":f"I matched `{value_col}`, but cannot calculate a trend because the active dataset has no identifiable reporting-period field."}
+    work=df.copy()
+    work["_value"]=pd.to_numeric(work[value_col],errors="coerce")
+    work=work[work["_value"].notna() & work[period_col].notna()].copy()
+    if work.empty: return None
+    # For a follow-up such as 'how did that facility change over time?', use the
+    # last entity selected by this chatbot only when it is present in this dataset.
+    selected=st.session_state.get("nexus_last_ranked_entity")
+    if org_col and selected is not None and any(x in str(question).lower() for x in ("that facility","that organisation","that organization","that country","it change","its value","same facility")):
+        if work[org_col].astype(str).eq(str(selected)).any():
+            work=work[work[org_col].astype(str).eq(str(selected))]
+    # If question names an entity exactly, filter to it. No fuzzy arbitrary entity selection.
+    if org_col:
+        qnorm=_chat_normalize_name(question)
+        exact_entities=[str(v) for v in work[org_col].dropna().unique() if _chat_normalize_name(v) and _chat_normalize_name(v) in qnorm]
+        if len(exact_entities)==1:
+            work=work[work[org_col].astype(str).eq(exact_entities[0])]
+    work["_period_sort"]=pd.to_datetime(work[period_col].astype(str),errors="coerce")
+    work=work.sort_values(["_period_sort",period_col],kind="stable",na_position="last")
+    group_cols=[org_col,period_col] if org_col else [period_col]
+    # Multiple rows at the same entity-period can be a duplicate/grain issue. Do
+    # not silently sum them: show the mean with row counts and flag the grain.
+    grouped=work.groupby(group_cols,dropna=False).agg(value=("_value","mean"), observations=("_value","count"), minimum=("_value","min"), maximum=("_value","max")).reset_index()
+    grouped["_period_sort"]=pd.to_datetime(grouped[period_col].astype(str),errors="coerce")
+    grouped=grouped.sort_values(["_period_sort",period_col],kind="stable",na_position="last")
+    grouped["Change"] = grouped.groupby(org_col)["value"].diff() if org_col else grouped["value"].diff()
+    prev=grouped.groupby(org_col)["value"].shift(1) if org_col else grouped["value"].shift(1)
+    grouped["Change %"]=(grouped["Change"]/prev.abs()*100).where(prev.notna() & prev.ne(0))
+    output_cols=([org_col] if org_col else [])+[period_col,"value","observations","minimum","maximum","Change","Change %"]
+    display=grouped[output_cols].copy().rename(columns={value_col:"Indicator", "value":"Indicator value", "observations":"Source rows"})
+    for c in ("Indicator value","minimum","maximum","Change","Change %"):
+        if c in display:
+            display[c]=display[c].map(lambda v:"—" if pd.isna(v) else (f"{float(v):,.2f}" if c=="Change %" else f"{float(v):,.6g}"))
+    vals=grouped["value"]
+    maxrow=grouped.loc[vals.idxmax()]; minrow=grouped.loc[vals.idxmin()]
+    multi=bool((grouped["observations"]>1).any())
+    return {"status":"TREND_ANALYSIS","source":"DANIP_COMPLETE_LOADED_DATASET","text":(f"## Trend analysis: {value_col}\n\n**Reporting-period field:** `{period_col}`  \n**Entity field:** `{org_col}`  \n**Valid entity-period observations:** {len(grouped):,}. Missing/non-numeric values excluded from the displayed trend: {len(df)-len(work):,}.\n\n"+(f"**Entity filter:** `{work[org_col].iloc[0]}`.\n\n" if org_col and work[org_col].nunique(dropna=True)==1 else "**Entity scope:** all entities represented in the active dataset.\n\n")+f"**Highest observed period value:** {maxrow[period_col]} — {float(maxrow['value']):,.6g}.  \n**Lowest observed period value:** {minrow[period_col]} — {float(minrow['value']):,.6g}.\n\n"+_chat_frame_to_markdown(display,index=False)+"\n\nValues are ordered by reporting period. Changes are calculated between consecutive available observations; percentage change is omitted when the previous value is zero or unavailable. "+("Multiple source rows occur for at least one entity-period; the displayed period value is their mean and row counts are shown. Confirm the intended reporting grain before treating this as a deduplicated series." if multi else "Each displayed entity-period has one source row.")+" No total or stock reconciliation was calculated."),"analysis_plan":{"intent":["trend_analysis"],"numeric_field":str(value_col),"period_dimension":str(period_col),"entity_dimension":str(org_col) if org_col else None,"aggregation":"mean only when multiple rows share entity-period; otherwise observed value","missing_value_policy":"preserve_and_report"},"trend":grouped.drop(columns=["_period_sort"],errors="ignore").to_dict(orient="records")}
+
+
+def _chat_generic_overall_ranking_answer(df, question):
+    """Rank entities using an explicit cross-period aggregation; never confuse row maxima with overall rank."""
+    value_col=_chat_resolve_ranking_column(df, question)
+    if value_col is None:
+        return None
+    org_col=find_ou_column(df)
+    period_col=find_period_column(df)
+    if not org_col:
+        return None
+    q=str(question or "").lower()
+    lowest=any(x in q for x in ("lowest","minimum","smallest")) and not any(x in q for x in ("highest","maximum","largest"))
+    if any(x in q for x in ("average","mean")):
+        aggregation="mean"
+    elif any(x in q for x in ("latest","most recent","last period")):
+        aggregation="latest"
+    elif any(x in q for x in ("maximum","max across","highest single","largest single")) and not any(x in q for x in ("overall", "across all periods", "all available periods")):
+        aggregation="max"
+    elif any(x in q for x in ("total","sum")):
+        aggregation="sum"
+    elif any(x in q for x in ("across all periods","all available periods","overall","over all reporting periods","across all available")):
+        aggregation="sum"
+    else:
+        # A cross-period statistic is ambiguous without wording or documented metadata.
+        return {"status":"CLARIFICATION_REQUIRED","source":"DANIP_COMPLETE_LOADED_DATASET","text":f"I matched `{value_col}` and the entity field `{org_col}`, but the question does not establish how repeated reporting-period values should be combined. Should the overall ranking use the **sum**, **average**, **maximum**, or **latest reported value**? I have not silently selected an aggregation."}
+    work=df[[org_col]+([period_col] if period_col else [])+[value_col]].copy()
+    work["_value"]=pd.to_numeric(work[value_col],errors="coerce")
+    work=work[work[org_col].notna() & work["_value"].notna()].copy()
+    if work.empty: return None
+    if aggregation=="latest":
+        if not period_col: return {"status":"INCOMPLETE_SCHEMA","source":"DANIP_COMPLETE_LOADED_DATASET","text":"The latest-value ranking requires a reporting-period field, which is unavailable."}
+        work["_period_sort"]=pd.to_datetime(work[period_col].astype(str),errors="coerce")
+        # DHIS2 YYYYMM period strings are parsed by a fallback normalized lexical sort.
+        work=work.sort_values(["_period_sort",period_col],na_position="first")
+        grouped=work.groupby(org_col,dropna=True).tail(1).set_index(org_col)["_value"]
+    else:
+        grouped=work.groupby(org_col,dropna=True)["_value"].agg(aggregation)
+    ranked=grouped.sort_values(ascending=lowest,kind="stable")
+    if ranked.empty: return None
+    top=ranked.iloc[0]
+    ties=ranked[ranked==top]
+    table=ranked.rename("Rank value").reset_index().rename(columns={org_col:"Entity"})
+    table.insert(0,"Rank",range(1,len(table)+1))
+    table=table.head(20)
+    try:
+        st.session_state["nexus_last_ranked_entity"] = str(ties.index[0])
+    except Exception:
+        pass
+    return {"status":"OVERALL_RANKING","source":"DANIP_COMPLETE_LOADED_DATASET","text":(f"## Overall ranking: {'lowest' if lowest else 'highest'} {value_col}\n\n**Entity field:** `{org_col}`  \n**Numeric field:** `{value_col}`  \n**Scope:** all eligible active-dataset records{' across available reporting periods' if period_col else ''}.  \n**Aggregation:** `{aggregation}` by entity.  \n**Valid records used:** {len(work):,}; records without a numeric value or entity were excluded: {len(df)-len(work):,}.  \n**Top result:** **{ties.index[0]} — {float(top):,.6g}**"+(f" (tied entities: {', '.join(map(str,ties.index))})" if len(ties)>1 else "")+".\n\n### Ranking\n\n"+_chat_frame_to_markdown(table,index=False)+"\n\nThis is an entity-level ranking after the stated aggregation, not the largest individual row or a month-by-month ranking. No reconciliation was performed."),"analysis_plan":{"intent":["overall_ranking"],"numeric_field":str(value_col),"entity_dimension":str(org_col),"period_dimension":str(period_col) if period_col else None,"aggregation":aggregation,"ranking_scope":"overall_across_periods","valid_records":int(len(work)),"excluded_records":int(len(df)-len(work))},"ranking":table.to_dict(orient="records")}
+
+
 def _chat_classify_analysis_intent(question):
     """Classify the user's current task before selecting an analysis function.
 
@@ -12400,6 +12584,37 @@ def ask_analysis_chatbot(
     _report_progress("I’m identifying what you want to know and which evidence is needed.")
     current_df = df if isinstance(df,pd.DataFrame) and not df.empty else st.session_state.get("nexus_chat_df")
     current_source = str(source_url or st.session_state.get("nexus_chat_source_url", "") or "").strip()
+
+    # Generic question plan: the current question drives routing; RAG is for
+    # documented definitions/rules, while calculations use the active dataframe.
+    generic_plan = _chat_build_generic_analysis_plan(question, current_df)
+    if isinstance(current_df, pd.DataFrame) and not current_df.empty:
+        if "data_quality_matrix" in generic_plan["intent"]:
+            result = _chat_generic_data_quality_matrix_answer(current_df)
+            result["analysis_plan"] = generic_plan
+            st.session_state["nexus_chat_df"] = current_df
+            st.session_state["nexus_chat_source_url"] = current_source
+            return result
+        if "trend_analysis" in generic_plan["intent"] and not _chat_is_explicit_stock_reconciliation_question(question):
+            trend_result = _chat_generic_trend_answer(current_df, question)
+            if trend_result is not None:
+                trend_result.setdefault("analysis_plan", generic_plan)
+                st.session_state["nexus_chat_df"] = current_df
+                st.session_state["nexus_chat_source_url"] = current_source
+                return trend_result
+        # Explicit cross-period overall ranking must run before older row-extreme
+        # and stock-specific handlers. Explicit reconciliation remains untouched.
+        if ("overall_ranking" in generic_plan["intent"]
+                and generic_plan.get("ranking_scope") == "overall_across_periods"
+                and not _chat_is_explicit_stock_reconciliation_question(question)
+                and not _chat_is_monthly_closing_stock_change_question(question)
+                and not _chat_is_percentage_stock_change_question(question)):
+            generic_result = _chat_generic_overall_ranking_answer(current_df, question)
+            if generic_result is not None:
+                generic_result.setdefault("analysis_plan", generic_plan)
+                st.session_state["nexus_chat_df"] = current_df
+                st.session_state["nexus_chat_source_url"] = current_source
+                return generic_result
 
     # Classify intent first. A pregnancy MMS indicator ranking is not inventory
     # reconciliation and must use only its exact indicator column.
