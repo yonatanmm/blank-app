@@ -11528,19 +11528,51 @@ def _chat_top_missing_fields_answer(df):
 
 
 def _chat_classify_analysis_intent(question):
-    """Classify the requested operation before selecting an analysis function.
+    """Classify the user's current task before selecting an analysis function.
 
-    Generic indicator rankings take priority over specialized stock workflows;
-    stock-related questions are routed to stock handlers only when their wording
-    actually identifies stock, and reconciliation requires explicit intent.
+    Specific analytical intents are resolved before broad ranking keywords so a
+    phrase such as "highest number of missing values" cannot be mistaken for
+    a highest-indicator-value request. Reconciliation requires explicit intent.
     """
     q = str(question or "").lower()
-    if _chat_is_explicit_stock_reconciliation_question(q):
+
+    # Explicitly negated reconciliation must never route to the reconciliation handler.
+    if any(x in q for x in (
+        "do not perform stock reconciliation", "don't perform stock reconciliation",
+        "do not reconcile", "don't reconcile", "without reconciliation", "no reconciliation"
+    )):
+        reconciliation_requested = False
+    else:
+        reconciliation_requested = _chat_is_explicit_stock_reconciliation_question(q)
+    if reconciliation_requested:
         return "stock_reconciliation"
+
+    # Missingness/completeness intent has priority over "highest", "top", or "rank".
+    missing_terms = (
+        "missing", "null value", "null values", "blank value", "blank values",
+        "incomplete", "completeness", "not reported", "unreported", "empty cells",
+    )
+    missing_context = any(x in q for x in missing_terms)
+    if missing_context and any(x in q for x in (
+        "field", "fields", "column", "columns", "value", "values", "record", "records",
+        "data", "most", "highest", "top", "three", "3", "count", "percentage", "percent",
+        "complete", "completeness", "affected", "which", "identify", "list", "analy"
+    )):
+        return "missing_value_analysis"
+    if any(x in q for x in ("zero values", "zero-value", "zeros", "reported zero", "valid zero")):
+        return "zero_value_analysis"
+    if any(x in q for x in ("data quality", "quality issue", "quality matrix", "dqa", "quality assessment")):
+        return "data_quality"
+
+    if any(x in q for x in ("percentage change", "percent change", "% change", "percentage increase", "percentage decrease")):
+        return "percentage_change"
+    if any(x in q for x in ("month-to-month", "month to month", "month on month", "month-on-month", "trend", "increased", "decreased", "period-to-period", "period to period")):
+        return "trend_or_change"
+
     asks_extreme = any(x in q for x in (
         "highest", "maximum", "max value", "highest value", "largest value",
         "lowest", "minimum", "min value", "lowest value", "smallest value",
-        "top value", "rank highest", "rank lowest"
+        "top value", "rank highest", "rank lowest", "highest number", "lowest number"
     ))
     mentions_stock = any(x in q for x in (
         "closing stock", "closing-stock", "mms stock", "stock level",
@@ -11548,22 +11580,14 @@ def _chat_classify_analysis_intent(question):
     ))
     if asks_extreme and not mentions_stock:
         return "indicator_ranking"
-    if any(x in q for x in ("percentage change", "percent change", "% change")):
-        return "percentage_change"
-    if any(x in q for x in ("month-to-month", "month to month", "month on month", "trend", "increased", "decreased")):
-        return "trend_or_change"
-    if any(x in q for x in ("missing values", "missing data", "blank values", "not reported")):
-        return "missing_value_analysis"
-    if "zero" in q or "zeros" in q:
-        return "zero_value_analysis"
-    if any(x in q for x in ("data quality", "quality issue", "quality matrix")):
-        return "data_quality"
-    if any(x in q for x in ("compare facilities", "compare countries", "facility comparison", "country comparison")):
+    if any(x in q for x in ("compare facilities", "compare countries", "facility comparison", "country comparison", "compare locations", "compare organisations", "compare organizations")):
         return "facility_or_country_comparison"
     if any(x in q for x in ("indicator", "pregnant women", "coverage", "received mms")):
         return "general_indicator_analysis"
-    if any(x in q for x in ("recommend", "interpret", "what should", "m&e interpretation")):
+    if any(x in q for x in ("recommend", "interpret", "what should", "m&e interpretation", "main findings")):
         return "me_interpretation"
+    if any(x in q for x in ("dataset overview", "dataset summary", "summarize the dataset", "summarise the dataset", "interpret the dataset")):
+        return "dataset_overview"
     return "general_question"
 
 
@@ -12288,13 +12312,9 @@ def ask_analysis_chatbot(
         st.session_state["nexus_chat_source_url"] = current_source
         return result
 
-    # Deterministic missing-field ranking must run before general dataset interpretation.
-    q_missing = question.lower()
-    asks_top_missing_fields = (
-        ("missing" in q_missing or "blank" in q_missing or "null" in q_missing)
-        and any(term in q_missing for term in ("top three", "three fields", "3 fields", "highest number", "most missing", "highest number of missing", "missing percentage"))
-    )
-    if asks_top_missing_fields:
+    # Deterministic missing-value analysis runs according to the classified current
+    # intent, before indicator ranking, generic interpretation, RAG, or stock logic.
+    if analysis_intent == "missing_value_analysis":
         _report_progress("I’m counting null and blank values across every field in the active Complete Loaded Dataset, then listing affected organization-period records. Zeros remain valid values; no stock reconciliation or quality score is used.")
         if current_df is None or current_df.empty:
             return {"status":"NO_DHIS2_DATA", "source":"NO_DHIS2_DATA", "text":"The active Complete Loaded Dataset is not loaded. Load the dataset before requesting missing-value analysis."}
