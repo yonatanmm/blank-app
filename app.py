@@ -11629,11 +11629,169 @@ def _chat_top_missing_fields_answer(df):
                                        "period_column": period_col}}
 
 
+def _chat_is_dataset_inventory_question(question):
+    """Detect schema/catalog discovery requests before statistical intent routing."""
+    q = re.sub(r"\s+", " ", str(question or "").strip().lower())
+    if not q:
+        return False
+    inventory_phrases = (
+        "what data is available", "what data do we have", "what fields are available",
+        "which fields are available", "list the fields", "list all fields", "show all fields",
+        "list the columns", "list all columns", "show all columns", "what columns",
+        "which columns", "what are the columns", "what variables are available",
+        "available variables", "dataset inventory", "data inventory", "schema discovery",
+        "show the schema", "describe the schema", "dataset schema", "metadata for the dataset",
+        "what indicators are available", "list available indicators", "show available indicators",
+        "what indicators and data elements", "which indicators and data elements",
+        "what data elements are available", "list data elements", "show data elements",
+        "what is in this dataset", "what does this dataset contain", "what does the dataset contain",
+        "describe this dataset", "describe the loaded dataset", "dataset structure",
+        "fields in the loaded dataset", "columns in the loaded dataset",
+    )
+    if any(phrase in q for phrase in inventory_phrases):
+        return True
+    # Generic catalog verbs plus schema-oriented nouns. This is dynamic and does
+    # not depend on any particular programme, country, indicator, or field name.
+    catalog_nouns = ("field", "column", "schema", "metadata", "data element", "indicator", "variable", "dataset")
+    catalog_verbs = ("list", "show", "display", "enumerate", "discover", "available", "contain", "contains", "include", "included", "describe", "inspect")
+    asks_for_catalog = any(n in q for n in catalog_nouns) and any(v in q for v in catalog_verbs)
+    # If user explicitly asks for a statistic/trend/ranking, treat it as analytics,
+    # not inventory, even if the sentence also mentions a field or dataset.
+    analytical_terms = ("average", "mean", "median", "sum", "total", "highest", "lowest", "rank", "ranking", "trend", "over time", "increase", "decrease", "correlation", "outlier", "missing values", "missing data", "percentage", "compare values")
+    return asks_for_catalog and not any(t in q for t in analytical_terms)
+
+
+def _chat_dataset_inventory_answer(df, dataset_id=None):
+    """Describe the live dataframe schema; never calculate indicator performance statistics."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return {"status": "NO_DHIS2_DATA", "source": "NO_DHIS2_DATA", "text": "The active dataset is not loaded or contains no rows. Load a dataset before requesting its schema or metadata."}
+    rows=[]
+    for col in df.columns:
+        series=df[col]
+        missing=series.isna()
+        if pd.api.types.is_object_dtype(series.dtype) or pd.api.types.is_string_dtype(series.dtype):
+            missing = missing | series.astype("string").str.strip().eq("").fillna(False)
+        nonmissing=series[~missing]
+        samples=[]
+        for value in nonmissing.drop_duplicates().head(3).tolist():
+            text=str(value).replace("\n", " ").strip()
+            samples.append(text[:90])
+        numeric=pd.to_numeric(series, errors="coerce")
+        numeric_count=int(numeric.notna().sum())
+        rows.append({"Field":str(col), "Data type":str(series.dtype), "Non-missing values":int((~missing).sum()),
+                     "Missing values":int(missing.sum()), "Distinct values":int(nonmissing.nunique(dropna=True)),
+                     "Numeric values":numeric_count, "Example values":"; ".join(samples) if samples else "—"})
+    schema=pd.DataFrame(rows)
+    # Keep the schema complete; do not truncate to numeric columns or a fixed indicator list.
+    display=schema.copy()
+    lines=["## Active dataset inventory and schema", "",
+           f"**Dataset:** `{str(dataset_id or 'Active loaded dataset')}`",
+           f"**Rows:** {len(df):,}  ", f"**Columns/fields:** {len(df.columns):,}  ",
+           f"**Numeric-compatible fields:** {int(sum(pd.to_numeric(df[c], errors='coerce').notna().any() for c in df.columns)):,}",
+           "", "### Available fields", "",
+           "| Field / column | Data type | Non-missing | Missing | Distinct values | Numeric values | Example values |",
+           "|---|---|---:|---:|---:|---:|---|"]
+    for row in display.itertuples(index=False, name=None):
+        vals=[str(v).replace('|', r'\|') for v in row]
+        lines.append("| " + " | ".join(vals) + " |")
+    lines += ["", "### Interpretation", "",
+              "This is schema and metadata discovery from the currently active dataframe. It lists all loaded fields, including identifier, organisation, period, descriptive, and numeric-compatible fields. Numeric-compatible does not prove a field is an approved indicator or define its unit/formula.",
+              "", "**Metadata limitation:** Official indicator definitions, data-element IDs, formulas, targets, and authoritative descriptions are shown only when those metadata are actually present in the loaded schema or retrievable from the connected knowledge sources. No indicator ranking, average, total, trend, or stock reconciliation was calculated."]
+    return {"status":"DATASET_INVENTORY", "source":"DANIP_ACTIVE_DATASET_SCHEMA", "text":"\n".join(lines),
+            "dataset_inventory":{"dataset_id":str(dataset_id or "Active loaded dataset"),"rows":int(len(df)),"columns":int(len(df.columns)),"fields":rows},
+            "analysis_plan":{"intent":["dataset_inventory"],"requires_schema_discovery":True,"requires_calculation":False,"requires_rag":False,"missing_value_policy":"preserve_and_report"}}
+
+
+def _chat_dataset_fingerprint(df, dataset_id=None):
+    """Stable identity for the active dataframe schema and content shape.
+
+    The fingerprint is deliberately independent of indicator names and is used
+    to stop conversational state from silently reusing analysis from another
+    dataset or changed schema.
+    """
+    if not isinstance(df, pd.DataFrame):
+        return None
+    try:
+        schema = [(str(c), str(df[c].dtype)) for c in df.columns]
+        identity = {
+            "dataset_id": str(dataset_id or "active-dataset"),
+            "rows": int(len(df)),
+            "columns": schema,
+        }
+        return hashlib.sha256(json.dumps(identity, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    except Exception:
+        return None
+
+
+def _chat_build_metadata_registry(df, metadata=None, dataset_id=None):
+    """Build a generic, non-destructive registry from available schema/metadata.
+
+    Formal definitions/formulas/targets are only marked verified when supplied
+    by an explicit metadata source. Column-name inference remains labelled as
+    inferred and is never promoted to an official definition.
+    """
+    if not isinstance(df, pd.DataFrame):
+        return {"dataset_id": str(dataset_id or "active-dataset"), "fields": [], "status": "NO_DATASET"}
+    supplied = metadata if isinstance(metadata, dict) else {}
+    fields = []
+    for col in df.columns:
+        series = df[col]
+        item = supplied.get(str(col), {}) if isinstance(supplied.get(str(col), {}), dict) else {}
+        missing = series.isna()
+        if pd.api.types.is_object_dtype(series.dtype) or pd.api.types.is_string_dtype(series.dtype):
+            missing = missing | series.astype("string").str.strip().eq("").fillna(False)
+        fields.append({
+            "field": str(col), "field_id": item.get("id") or item.get("uid"),
+            "name": item.get("name") or str(col), "description": item.get("description"),
+            "definition": item.get("definition"), "indicator_type": item.get("indicator_type"),
+            "unit": item.get("unit"), "numerator": item.get("numerator"),
+            "denominator": item.get("denominator"), "formula": item.get("formula"),
+            "scale_factor": item.get("scale_factor"), "aggregation_type": item.get("aggregation_type"),
+            "target": item.get("target"), "reporting_frequency": item.get("reporting_frequency"),
+            "validation_rules": item.get("validation_rules"), "source": item.get("source"),
+            "verification_status": "verified_metadata" if item else "schema_only_or_inferred",
+            "dtype": str(series.dtype), "rows": int(len(series)),
+            "missing_count": int(missing.sum()), "nonmissing_count": int((~missing).sum()),
+            "distinct_count": int(series[~missing].nunique(dropna=True)),
+            "numeric_compatible_count": int(pd.to_numeric(series, errors="coerce").notna().sum()),
+        })
+    return {"dataset_id": str(dataset_id or "active-dataset"), "fingerprint": _chat_dataset_fingerprint(df, dataset_id),
+            "row_count": int(len(df)), "field_count": int(len(df.columns)), "fields": fields,
+            "status": "PARTIAL_METADATA" if any(x["verification_status"] != "verified_metadata" for x in fields) else "VERIFIED_METADATA"}
+
+
+def _chat_validate_analysis_result(result, question, df):
+    """Attach reproducibility/provenance and perform basic scope validation."""
+    if not isinstance(result, dict):
+        return {"status": "VALIDATION_FAILED", "source": "DANIP_COMPLETE_LOADED_DATASET",
+                "text": "The analysis did not return a structured result, so it cannot be safely presented."}
+    plan = result.get("analysis_plan") if isinstance(result.get("analysis_plan"), dict) else {}
+    result["result_validation"] = {
+        "structured_result": True,
+        "active_dataset_fingerprint": _chat_dataset_fingerprint(df, plan.get("dataset_id") or st.session_state.get("nexus_chat_source_url")),
+        "active_row_count": int(len(df)) if isinstance(df, pd.DataFrame) else None,
+        "question": str(question or ""),
+        "intent": plan.get("intent", []),
+        "scope_checked": bool(plan),
+        "limitations": list(result.get("limitations") or []),
+    }
+    return result
+
+
 def _chat_build_generic_analysis_plan(question, df=None):
     """Create a question-specific, generic analysis plan without hardcoded indicators."""
     q = str(question or "").strip().lower()
     intents = []
     def has(*terms): return any(t in q for t in terms)
+    if _chat_is_dataset_inventory_question(q):
+        period_col = find_period_column(df) if isinstance(df, pd.DataFrame) and not df.empty else None
+        org_col = find_ou_column(df) if isinstance(df, pd.DataFrame) and not df.empty else None
+        return {"intent":["dataset_inventory"], "dataset_id":st.session_state.get("nexus_chat_source_url") or st.session_state.get("active_dataset_name"),
+                "indicators":[], "statistics":[], "dimensions":[str(c) for c in (org_col, period_col) if c],
+                "time_scope":None, "grouping":[], "filters":{}, "ranking_scope":None,
+                "missing_value_policy":"preserve_and_report", "requires_rag":False,
+                "requires_calculation":False, "requires_schema_discovery":True,
+                "requested_outputs":["schema", "field_metadata", "example_values"]}
     if has("definition", "define ", "what does", "what is meant by", "formula", "numerator", "denominator"):
         intents.append("definition_lookup")
     if has("data quality matrix", "quality matrix", "data quality", "quality assessment", "dqa"):
@@ -11682,6 +11840,9 @@ def _chat_build_generic_analysis_plan(question, df=None):
         "requires_rag": any(x in intents for x in ("definition_lookup",)),
         "requires_calculation": any(x in intents for x in ("direct_value", "overall_ranking", "grouped_ranking", "trend_analysis", "period_comparison", "facility_comparison", "country_comparison", "missing_data_analysis", "data_quality_matrix", "outlier_analysis", "correlation_analysis", "indicator_comparison")),
         "requested_outputs": intents[:],
+        "dataset_fingerprint": _chat_dataset_fingerprint(df, st.session_state.get("nexus_chat_source_url") or st.session_state.get("active_dataset_name")) if isinstance(df, pd.DataFrame) else None,
+        "metadata_registry": _chat_build_metadata_registry(df, dataset_id=st.session_state.get("nexus_chat_source_url") or st.session_state.get("active_dataset_name")) if isinstance(df, pd.DataFrame) else None,
+        "aggregation_resolution": "explicit_user_request" if has("total", "sum", "average", "mean", "median", "latest", "maximum", "minimum") else "requires_metadata_or_clarification",
     }
 
 
@@ -11821,6 +11982,11 @@ def _chat_classify_analysis_intent(question):
     a highest-indicator-value request. Reconciliation requires explicit intent.
     """
     q = str(question or "").lower()
+
+    # Dataset catalog/schema requests take priority over broad phrases such as
+    # "what indicators" or "show me" that could otherwise trigger statistics.
+    if _chat_is_dataset_inventory_question(q):
+        return "dataset_inventory"
 
     # Explicitly negated reconciliation must never route to the reconciliation handler.
     if any(x in q for x in (
@@ -12585,6 +12751,30 @@ def ask_analysis_chatbot(
     current_df = df if isinstance(df,pd.DataFrame) and not df.empty else st.session_state.get("nexus_chat_df")
     current_source = str(source_url or st.session_state.get("nexus_chat_source_url", "") or "").strip()
 
+    # Track active dataset/schema identity on each turn. A changed source or schema
+    # invalidates cached analysis context rather than allowing a stale answer to win.
+    active_fingerprint = _chat_dataset_fingerprint(current_df, current_source) if isinstance(current_df, pd.DataFrame) else None
+    previous_fingerprint = st.session_state.get("nexus_chat_active_dataset_fingerprint")
+    if active_fingerprint != previous_fingerprint:
+        st.session_state["nexus_chat_active_dataset_fingerprint"] = active_fingerprint
+        st.session_state.pop("nexus_chat_last_analysis_result", None)
+        st.session_state.pop("nexus_chat_last_analysis_plan", None)
+    st.session_state["nexus_chat_df"] = current_df
+    st.session_state["nexus_chat_source_url"] = current_source
+
+    # Schema discovery is a distinct task: never send inventory questions into
+    # indicator ranking, descriptive statistics, or subject-specific workflows.
+    if _chat_is_dataset_inventory_question(question):
+        if not isinstance(current_df, pd.DataFrame) or current_df.empty:
+            return {"status":"NO_DHIS2_DATA", "source":"NO_DHIS2_DATA", "text":"The active dataset is not loaded or contains no rows. Load a dataset before requesting its schema or metadata."}
+        inventory_result = _chat_dataset_inventory_answer(current_df, current_source or st.session_state.get("active_dataset_name"))
+        inventory_result["analysis_plan"] = _chat_build_generic_analysis_plan(question, current_df)
+        inventory_result["metadata_registry"] = _chat_build_metadata_registry(current_df, dataset_id=current_source or st.session_state.get("active_dataset_name"))
+        inventory_result = _chat_validate_analysis_result(inventory_result, question, current_df)
+        st.session_state["nexus_chat_df"] = current_df
+        st.session_state["nexus_chat_source_url"] = current_source
+        return inventory_result
+
     # Generic question plan: the current question drives routing; RAG is for
     # documented definitions/rules, while calculations use the active dataframe.
     generic_plan = _chat_build_generic_analysis_plan(question, current_df)
@@ -12592,6 +12782,7 @@ def ask_analysis_chatbot(
         if "data_quality_matrix" in generic_plan["intent"]:
             result = _chat_generic_data_quality_matrix_answer(current_df)
             result["analysis_plan"] = generic_plan
+            result = _chat_validate_analysis_result(result, question, current_df)
             st.session_state["nexus_chat_df"] = current_df
             st.session_state["nexus_chat_source_url"] = current_source
             return result
@@ -12599,6 +12790,7 @@ def ask_analysis_chatbot(
             trend_result = _chat_generic_trend_answer(current_df, question)
             if trend_result is not None:
                 trend_result.setdefault("analysis_plan", generic_plan)
+                trend_result = _chat_validate_analysis_result(trend_result, question, current_df)
                 st.session_state["nexus_chat_df"] = current_df
                 st.session_state["nexus_chat_source_url"] = current_source
                 return trend_result
@@ -12612,6 +12804,7 @@ def ask_analysis_chatbot(
             generic_result = _chat_generic_overall_ranking_answer(current_df, question)
             if generic_result is not None:
                 generic_result.setdefault("analysis_plan", generic_plan)
+                generic_result = _chat_validate_analysis_result(generic_result, question, current_df)
                 st.session_state["nexus_chat_df"] = current_df
                 st.session_state["nexus_chat_source_url"] = current_source
                 return generic_result
