@@ -150,7 +150,7 @@ DANIP_OAUTH_ME_URL = _dhis2_secret(
 # can be restored later by changing only this value.
 # ============================================================
 
-ENABLE_DHIS2_AUTHENTICATION = False
+ENABLE_DHIS2_AUTHENTICATION = True
 
 
 if "danip_authenticated" not in st.session_state:
@@ -549,20 +549,6 @@ if ENABLE_DHIS2_AUTHENTICATION:
 
         _render_dhis2_login()
         st.stop()
-
-
-# ============================================================
-# DEVELOPMENT MODE WHEN DHIS2 AUTHENTICATION IS DISABLED
-# ============================================================
-
-if not ENABLE_DHIS2_AUTHENTICATION:
-    st.session_state["danip_authenticated"] = True
-
-    if not st.session_state.get("danip_user"):
-        st.session_state["danip_user"] = {
-            "username": "Development mode",
-            "displayName": "Development mode",
-        }
 
 
 # ============================================================
@@ -2593,8 +2579,12 @@ DANIP_ACCESS_TOKEN = st.session_state.get(
     "",
 )
 
+if DANIP_ACCESS_TOKEN:
+    session.headers.update({
+        "Authorization": f"Bearer {DANIP_ACCESS_TOKEN}",
+    })
+
 session.headers.update({
-    "Authorization": f"Bearer {DANIP_ACCESS_TOKEN}",
     "User-Agent": "DANIP-DHIS2-AI/2.0",
 })
 
@@ -2662,15 +2652,45 @@ def safe_json_dumps(value):
 # DHIS2 REQUEST
 # ============================================================
 
+def _require_dhis2_auth():
+    """Require the per-user DHIS2 OAuth session supplied by the login gateway."""
+    authenticated = bool(st.session_state.get("danip_authenticated"))
+    token = str(st.session_state.get("danip_access_token", "") or "").strip()
+
+    if not authenticated or not token:
+        raise PermissionError(
+            "No authenticated DHIS2 user session is available. "
+            "Please sign in through the NEXUS DANIP authentication gateway."
+        )
+
+    return token
+
+
+def _dhis2_session():
+    """Return a session carrying the current authenticated user's token."""
+    token = _require_dhis2_auth()
+    session.headers["Authorization"] = f"Bearer {token}"
+    return session
+
+
 def dhis2_get(url, accept="application/json", timeout=180):
     try:
-        response = session.get(
+        response = _dhis2_session().get(
             url,
             headers={"Accept": accept},
             timeout=timeout,
         )
     except requests.exceptions.RequestException as e:
         raise Exception(f"Unable to connect to DHIS2:\n\n{e}")
+
+    if response.status_code == 401:
+        st.session_state["danip_authenticated"] = False
+        st.session_state["danip_access_token"] = ""
+        st.session_state["danip_refresh_token"] = ""
+        raise PermissionError(
+            "The DHIS2 user session has expired or is no longer authorized. "
+            "Please sign in again."
+        )
 
     if response.status_code != 200:
         raise Exception(
@@ -2743,44 +2763,119 @@ def change_extension(url, new_extension):
 
 
 def get_csv_from_analytics_url(url):
-    csv_url = change_extension(url, "csv")
+    """Request the original DHIS2 Analytics URL as CSV.
 
-    response = session.get(
-        csv_url,
-        headers={"Accept": "application/csv"},
+    Do not rewrite /api/analytics into /api/analytics.csv. DHIS2
+    Analytics is a query endpoint; the response format is negotiated
+    through the request headers/query parameters.
+    """
+    response = _dhis2_session().get(
+        url,
+        headers={
+            "Accept": "text/csv,application/csv;q=0.9,*/*;q=0.1",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        },
         timeout=180,
     )
 
-    if response.status_code == 200:
-        return pd.read_csv(StringIO(response.text))
+    if response.status_code == 401:
+        _handle_dhis2_response_error(response, url)
+
+    if response.status_code != 200:
+        return None
+
+    content_type = (response.headers.get("Content-Type") or "").lower()
+    text = response.text
+
+    # Only parse as CSV when DHIS2 actually returned a CSV-like response.
+    if "csv" in content_type or "text/plain" in content_type:
+        try:
+            return pd.read_csv(StringIO(text))
+        except Exception:
+            return None
+
+    # Some DHIS2 deployments do not send a useful Content-Type.
+    # Detect a CSV response conservatively from the first non-empty line.
+    first_line = next((line for line in text.splitlines() if line.strip()), "")
+    if "," in first_line or "\t" in first_line:
+        try:
+            candidate = pd.read_csv(StringIO(text))
+            if not candidate.empty:
+                return candidate
+        except Exception:
+            pass
 
     return None
 
 
-def read_xls_response(response):
+def _read_dhis2_excel_response(response, engine):
+    """Read a DHIS2 Analytics workbook and detect the real header row.
+
+    Some DHIS2 Analytics Excel exports contain a blank/formatting row before
+    the actual column-name row.  In that case pandas otherwise creates
+    ``Unnamed: 0``, ``Unnamed: 1`` ... columns and treats the real headers as
+    the first data record.  We detect that layout and use the second row as
+    the header while leaving normal one-row-header workbooks unchanged.
+    """
+    content = BytesIO(response.content)
+
     try:
-        return pd.read_excel(
-            BytesIO(response.content),
-            engine="xlrd",
+        # Read a small raw preview first so we can determine whether the first
+        # spreadsheet row is only a blank/formatting row.
+        preview = pd.read_excel(
+            content,
+            engine=engine,
+            header=None,
+            nrows=5,
         )
+
+        if preview.empty:
+            return pd.DataFrame()
+
+        first_row = preview.iloc[0]
+        first_values = [
+            str(value).strip()
+            for value in first_row.tolist()
+            if pd.notna(value) and str(value).strip()
+        ]
+
+        second_row_values = []
+        if len(preview.index) > 1:
+            second_row_values = [
+                str(value).strip()
+                for value in preview.iloc[1].tolist()
+                if pd.notna(value) and str(value).strip()
+            ]
+
+        # If the first row is blank (or contains fewer than two meaningful
+        # cells) and the second row contains the real field names, use row 2
+        # (Excel row 2 / pandas header=1) as the dataframe header.
+        use_second_row = (
+            len(first_values) <= 1
+            and len(second_row_values) >= 2
+        )
+
+        content.seek(0)
+        return pd.read_excel(
+            content,
+            engine=engine,
+            header=1 if use_second_row else 0,
+        )
+
     except Exception as e:
         raise Exception(
-            "DHIS2 returned Excel data, but Python could not read the XLS file.\n\n"
+            "DHIS2 returned Excel data, but Python could not read the Excel file.\n\n"
             f"{e}"
         )
+
+
+def read_xls_response(response):
+    return _read_dhis2_excel_response(response, "xlrd")
 
 
 def read_xlsx_response(response):
-    try:
-        return pd.read_excel(
-            BytesIO(response.content),
-            engine="openpyxl",
-        )
-    except Exception as e:
-        raise Exception(
-            "DHIS2 returned Excel data, but Python could not read the XLSX file.\n\n"
-            f"{e}"
-        )
+    return _read_dhis2_excel_response(response, "openpyxl")
 
 
 def read_csv_response(response):
@@ -2804,51 +2899,844 @@ def read_json_response(response):
 
 
 def get_analytics_data(url):
+    """Load a DHIS2 Analytics endpoint using the authenticated user token.
+
+    Registry APIs can be published as /api/analytics.xls, /api/analytics.xlsx,
+    /api/analytics.csv, or as a normal extension-less Analytics endpoint.
+    File extensions are handled directly so an Excel response is never sent
+    to the JSON parser.
+    """
+    _require_dhis2_auth()
+
     extension = get_extension(url)
 
-    if extension in ["xls", "xlsx", "csv", ""]:
-        try:
-            csv_df = get_csv_from_analytics_url(url)
-            if csv_df is not None and not csv_df.empty:
-                return csv_df
-        except Exception:
-            pass
+    # The registry's Analytics XLS/XLSX/CSV URLs are data files. Read them
+    # according to their declared extension before attempting the generic
+    # Analytics CSV/JSON negotiation below.
+    if extension == "xls":
+        return read_xls_response(
+            dhis2_get(url, accept="application/vnd.ms-excel", timeout=180)
+        )
 
     if extension == "xlsx":
         return read_xlsx_response(
             dhis2_get(
                 url,
                 accept="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-        )
-
-    if extension == "xls":
-        return read_xls_response(
-            dhis2_get(
-                url,
-                accept="application/vnd.ms-excel",
+                timeout=180,
             )
         )
 
     if extension == "csv":
         return read_csv_response(
-            dhis2_get(
-                url,
-                accept="application/csv",
-            )
+            dhis2_get(url, accept="text/csv,application/csv", timeout=180)
         )
 
-    return read_json_response(
-        dhis2_get(url, accept="application/json")
+    # First request the ORIGINAL extension-less Analytics endpoint as CSV.
+    # This avoids the old and incorrect /api/analytics.csv path transformation.
+    try:
+        csv_df = get_csv_from_analytics_url(url)
+        if isinstance(csv_df, pd.DataFrame) and not csv_df.empty:
+            return csv_df
+    except PermissionError:
+        raise
+    except requests.exceptions.RequestException:
+        pass
+    except Exception:
+        pass
+
+    # Fall back to the original endpoint as JSON.
+    response = dhis2_get(
+        url,
+        accept="application/json",
+        timeout=180,
+    )
+    return read_json_response(response)
+
+
+def _is_dhis2_url(url):
+    """Return True when the URL belongs to the configured DHIS2 server."""
+    try:
+        target = urlparse(str(url or ""))
+        configured = urlparse(str(DHIS2_URL or ""))
+        return bool(
+            target.scheme
+            and target.netloc
+            and configured.netloc
+            and target.netloc.lower() == configured.netloc.lower()
+        )
+    except Exception:
+        return False
+
+
+def _handle_dhis2_response_error(response, url):
+    if response.status_code == 401:
+        st.session_state["danip_authenticated"] = False
+        st.session_state["danip_access_token"] = ""
+        st.session_state["danip_refresh_token"] = ""
+        raise PermissionError(
+            "The authenticated DHIS2 session has expired or is no longer authorized. "
+            "Please sign in again through the NEXUS DANIP authentication gateway."
+        )
+
+    if response.status_code != 200:
+        raise Exception(
+            f"DHIS2 returned HTTP {response.status_code}\n\n"
+            f"URL:\n{response.url or url}\n\n"
+            f"Server response:\n{response.text[:5000]}"
+        )
+
+
+def get_visualization_data(uid):
+    """Retrieve the data behind a DHIS2 Data Visualizer saved visualization."""
+    token_session = _dhis2_session()
+
+    data_url = f"{DHIS2_URL}/api/visualizations/{uid}/data"
+
+    try:
+        response = token_session.get(
+            data_url,
+            headers={"Accept": "application/json"},
+            timeout=180,
+        )
+    except requests.exceptions.RequestException as e:
+        raise Exception(f"Unable to connect to the DHIS2 visualization API:\n\n{e}")
+
+    _handle_dhis2_response_error(response, data_url)
+
+    return response.json()
+
+
+def _dhis2_metadata_get(path, params=None, timeout=180):
+    """GET DHIS2 metadata using the authenticated user's OAuth token."""
+    url = path if str(path).startswith("http") else f"{DHIS2_URL.rstrip('/')}/{str(path).lstrip('/')}"
+    response = _dhis2_session().get(
+        url,
+        params=params or {},
+        headers={"Accept": "application/json"},
+        timeout=timeout,
+    )
+    _handle_dhis2_response_error(response, url)
+    return response.json()
+
+
+def _dhis2_indicator_metadata():
+    """Return readable indicators available to the authenticated DHIS2 user."""
+    data = _dhis2_metadata_get(
+        "/api/indicators",
+        params={
+            "fields": "id,name,displayName,shortName",
+            "paging": "false",
+        },
+    )
+
+    indicators = data.get("indicators", []) if isinstance(data, dict) else []
+    return [
+        item
+        for item in indicators
+        if isinstance(item, dict) and str(item.get("id", "")).strip()
+    ]
+
+
+def _dhis2_data_element_metadata():
+    """Return readable aggregate data elements available to the authenticated user.
+
+    DHIS2 Analytics can query data elements as well as indicators.  This is
+    important for DANIP because much of the reporting data is stored as
+    aggregate data elements inside datasets, while an indicator may exist in
+    metadata without having values for the requested period.
+    """
+    data = _dhis2_metadata_get(
+        "/api/dataElements",
+        params={
+            "fields": "id,name,displayName,shortName,domainType",
+            "paging": "false",
+        },
+    )
+
+    elements = data.get("dataElements", []) if isinstance(data, dict) else []
+    return [
+        item
+        for item in elements
+        if isinstance(item, dict)
+        and str(item.get("id", "")).strip()
+        and str(item.get("domainType", "AGGREGATE") or "AGGREGATE").upper() == "AGGREGATE"
+    ]
+
+
+def _select_danip_indicators(indicators):
+    """Select DANIP/M&E indicators or data elements by meaningful names."""
+    approved_patterns = [
+        r"\bvas\b",
+        r"vitamin\s*a",
+        r"universal\s*salt\s*iod",
+        r"\busi\b",
+        r"fortified\s*flour",
+        r"\bff\b",
+        r"wifa",
+        r"zinc",
+        r"mnhn",
+        r"icmnci",
+    ]
+
+    selected = []
+    for item in indicators:
+        text = " ".join(
+            str(item.get(key, "") or "")
+            for key in ("name", "displayName", "shortName")
+        ).strip().lower()
+
+        if text and any(
+            re.search(pattern, text, flags=re.IGNORECASE)
+            for pattern in approved_patterns
+        ):
+            selected.append(item)
+
+    if selected:
+        return selected
+
+    # Keep the fallback deliberately small.  The purpose of the fallback is
+    # connection testing when an installation uses non-standard indicator
+    # names; the normal DANIP path is name-matched above.
+    return indicators[:25]
+
+
+def build_dhis2_automatic_analytics_url(period="2026", indicator_ids=None):
+    """Build a real authenticated DHIS2 Analytics URL."""
+    if indicator_ids is None:
+        indicators = _dhis2_indicator_metadata()
+        selected = _select_danip_indicators(indicators)
+        indicator_ids = [
+            str(item.get("id", "")).strip()
+            for item in selected
+            if str(item.get("id", "")).strip()
+        ]
+    else:
+        selected = []
+        indicator_ids = [
+            str(value).strip() for value in indicator_ids if str(value).strip()
+        ]
+
+    if not indicator_ids:
+        raise ValueError(
+            "The authenticated DHIS2 user can connect, but no readable indicators were returned."
+        )
+
+    period = str(period or "2026").strip() or "2026"
+
+    params = [
+        ("dimension", f"dx:{';'.join(indicator_ids)}"),
+        ("dimension", f"pe:{period}"),
+        # USER_ORGUNIT_CHILDREN is intentionally retained because it respects
+        # the authenticated user's DHIS2 organisation-unit scope.
+        ("dimension", "ou:USER_ORGUNIT;USER_ORGUNIT_CHILDREN"),
+        ("displayProperty", "NAME"),
+        ("outputIdScheme", "NAME"),
+        ("tableLayout", "true"),
+        ("hideEmptyRows", "false"),
+        ("skipMeta", "false"),
+    ]
+
+    url = f"{DHIS2_URL.rstrip('/')}/api/analytics?{urlencode(params)}"
+    return url, selected
+
+
+def _merge_dhis2_analytics_frames(frames):
+    """Merge Analytics responses without losing their column structure."""
+    valid = [
+        frame for frame in frames
+        if isinstance(frame, pd.DataFrame) and not frame.empty
+    ]
+    if not valid:
+        return pd.DataFrame()
+
+    merged = pd.concat(valid, ignore_index=True, sort=False)
+    try:
+        merged = merged.drop_duplicates().reset_index(drop=True)
+    except Exception:
+        pass
+    return merged
+
+
+def get_dhis2_automatic_analytics_data(period="2026"):
+    """Discover and pull DANIP data using the authenticated user's DHIS2 session.
+
+    The loader first checks indicators, then aggregate data elements.  This is
+    more reliable than assuming that every reporting value is represented by
+    an indicator.  Both are queried through the same authenticated Analytics
+    API and the resulting frames are merged for the NEXUS pipeline.
+    """
+    _require_dhis2_auth()
+
+    indicators = _dhis2_indicator_metadata()
+    data_elements = _dhis2_data_element_metadata()
+
+    selected_indicators = _select_danip_indicators(indicators)
+    selected_data_elements = _select_danip_indicators(data_elements)
+
+    # If there are real DANIP name matches, do not inflate the query with the
+    # first 25 unrelated metadata members.  A fallback is used only when the
+    # server has no DANIP-style names at all.
+    indicator_ids = [
+        str(item.get("id", "")).strip()
+        for item in selected_indicators
+        if str(item.get("id", "")).strip()
+    ]
+    data_element_ids = [
+        str(item.get("id", "")).strip()
+        for item in selected_data_elements
+        if str(item.get("id", "")).strip()
+    ]
+
+    frames = []
+    successful_urls = []
+    errors = []
+    sources = []
+
+    def pull_dimension_batches(ids, source_name):
+        if not ids:
+            return
+
+        batch_size = 20
+        for index in range(0, len(ids), batch_size):
+            batch_ids = ids[index:index + batch_size]
+            url, _ = build_dhis2_automatic_analytics_url(
+                period=period,
+                indicator_ids=batch_ids,
+            )
+
+            try:
+                raw = get_analytics_data(url)
+                frame = normalize_dataframe(raw)
+                if not frame.empty:
+                    frames.append(frame)
+                    successful_urls.append(url)
+                    sources.append(source_name)
+            except PermissionError:
+                raise
+            except Exception as exc:
+                errors.append(f"{source_name}: {exc}")
+
+    # Indicators and data elements are both valid DHIS2 Analytics dx members.
+    # Querying both avoids the common case where indicators exist in metadata
+    # but the actual period data is stored under aggregate data elements.
+    pull_dimension_batches(indicator_ids, "Indicators")
+    pull_dimension_batches(data_element_ids, "Data elements")
+
+    merged = _merge_dhis2_analytics_frames(frames)
+
+    if merged.empty:
+        detail_lines = [
+            f"Period requested: {period}",
+            f"Readable indicators discovered: {len(indicators):,}",
+            f"Readable aggregate data elements discovered: {len(data_elements):,}",
+            f"Indicator members queried: {len(indicator_ids):,}",
+            f"Data-element members queried: {len(data_element_ids):,}",
+        ]
+        if errors:
+            detail_lines.append("\n".join(errors[:3]))
+        else:
+            detail_lines.append(
+                "DHIS2 returned successful Analytics responses, but no rows contained "
+                "values for the requested period and the authenticated user's organisation-unit scope."
+            )
+
+        raise RuntimeError(
+            "DHIS2 Analytics returned no data for period "
+            f"{period}.\n\n" + "\n".join(detail_lines)
+        )
+
+    source_url = successful_urls[0] if len(successful_urls) == 1 else (
+        f"{DHIS2_URL.rstrip('/')}/api/analytics (automatic; "
+        f"{len(successful_urls)} batched request(s); period={period}; "
+        f"sources={','.join(sorted(set(sources)))})"
+    )
+
+    selected = selected_indicators + selected_data_elements
+    return merged, source_url, selected
+
+# ============================================================
+# DANIP PROJECT / PROGRAM REGISTRY
+# ============================================================
+# The registry is the controlled configuration layer for NEXUS.
+# Whenever a new active project/program is added to the workbook,
+# NEXUS reads the registry on the next DHIS2 pull and automatically
+# retrieves that project's API URL. The AI receives project/program
+# and country metadata through the normalized master dataset.
+
+# Google Sheets is the live NEXUS Project/Program Registry.
+# Keep this source dynamic: adding a new row to the Sheet makes the
+# project/API available after "Reload Projects" without changing Python code.
+DANIP_PROJECT_REGISTRY_URL = os.getenv(
+    "DANIP_PROJECT_REGISTRY_URL",
+    "https://docs.google.com/spreadsheets/d/1fttFFXUJOciGasfXsoESXVsFmUXarA2r/edit?usp=sharing",
+)
+
+
+def _extract_google_drive_file_id(url):
+    url = str(url or "").strip()
+    patterns = [
+        r"/file/d/([A-Za-z0-9_-]+)",
+        r"[?&]id=([A-Za-z0-9_-]+)",
+        r"/d/([A-Za-z0-9_-]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return ""
+
+
+def _project_registry_download_url(url):
+    """Convert common Google Drive / Google Sheets links to export/download URLs."""
+    url = str(url or "").strip()
+    if not url:
+        return ""
+
+    # Google Sheets -> XLSX export. This keeps the registry dynamic while
+    # allowing the user to maintain it directly in Google Sheets.
+    sheet_match = re.search(r"/spreadsheets/d/([A-Za-z0-9_-]+)", url)
+    if sheet_match:
+        file_id = sheet_match.group(1)
+        return f"https://docs.google.com/spreadsheets/d/{file_id}/export?format=xlsx"
+
+    file_id = _extract_google_drive_file_id(url)
+    if file_id:
+        # drive.usercontent is generally more reliable for programmatic
+        # downloads than the interactive Drive sharing page.
+        return f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t"
+
+    return url
+
+
+def _is_excel_bytes(content):
+    """Return True for common XLSX/XLS file signatures."""
+    if not content:
+        return False
+    return content[:4] in (b"PK\x03\x04", b"\xd0\xcf\x11\xe0")
+
+
+def _google_drive_confirmation_url(html_text, original_url):
+    """Extract a Google Drive confirmation/download URL from an HTML response."""
+    text = str(html_text or "")
+    if not text:
+        return ""
+
+    # Google Drive may return a form containing a confirmation token for
+    # files that require a confirmation step before the binary is served.
+    action_match = re.search(r'<form[^>]+action=["\']([^"\']+)["\']', text, flags=re.I)
+    if not action_match:
+        return ""
+
+    action = html.unescape(action_match.group(1)).replace("&amp;", "&")
+    hidden = {}
+    for name, value in re.findall(
+        r'<input[^>]+name=["\']([^"\']+)["\'][^>]+value=["\']([^"\']*)["\']',
+        text,
+        flags=re.I,
+    ):
+        hidden[name] = html.unescape(value)
+
+    if "confirm" not in hidden:
+        token_match = re.search(r'name=["\']confirm["\'][^>]+value=["\']([^"\']+)', text, flags=re.I)
+        if token_match:
+            hidden["confirm"] = html.unescape(token_match.group(1))
+
+    if not hidden.get("confirm") and not action:
+        return ""
+
+    if hidden:
+        separator = "&" if "?" in action else "?"
+        params = "&".join(
+            f"{requests.utils.quote(str(k), safe='')}={requests.utils.quote(str(v), safe='')}"
+            for k, v in hidden.items()
+            if str(k).strip()
+        )
+        return action + (separator + params if params else "")
+
+    return action or original_url
+
+
+def _download_project_registry_bytes(source_url):
+    """Download registry bytes from Excel, Google Drive, or Google Sheets."""
+    source_url = str(source_url or "").strip()
+    if not source_url:
+        raise ValueError("DANIP_PROJECT_REGISTRY_URL is not configured.")
+
+    download_url = _project_registry_download_url(source_url)
+    session = requests.Session()
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/154.0 Safari/537.36 NEXUS-DANIP/1.0"
+        ),
+        "Accept": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,"
+                  "application/vnd.ms-excel,text/csv,text/plain,text/html;q=0.8,*/*;q=0.5",
+    }
+
+    # First attempt: direct source/export URL.
+    response = session.get(
+        download_url,
+        timeout=45,
+        allow_redirects=True,
+        headers=headers,
+    )
+    response.raise_for_status()
+    content = response.content
+    content_type = str(response.headers.get("content-type", "")).lower()
+
+    if _is_excel_bytes(content):
+        return content
+
+    # Google Drive sometimes returns an HTML confirmation page instead of
+    # the workbook. Follow the form action + hidden confirmation parameters.
+    if "text/html" in content_type or content.lstrip().lower().startswith(b"<!doctype html") or b"Google Drive" in content[:5000]:
+        confirmation_url = _google_drive_confirmation_url(response.text, download_url)
+        if confirmation_url and confirmation_url != download_url:
+            confirmed = session.get(
+                confirmation_url,
+                timeout=45,
+                allow_redirects=True,
+                headers=headers,
+            )
+            confirmed.raise_for_status()
+            if _is_excel_bytes(confirmed.content):
+                return confirmed.content
+
+    # Fallback for Google Drive file IDs using the alternate download host.
+    file_id = _extract_google_drive_file_id(source_url)
+    if file_id:
+        fallback_urls = [
+            f"https://drive.google.com/uc?export=download&id={file_id}&confirm=t",
+            f"https://drive.usercontent.google.com/download?id={file_id}&export=download&confirm=t",
+        ]
+        for fallback_url in fallback_urls:
+            if fallback_url == download_url:
+                continue
+            try:
+                fallback = session.get(
+                    fallback_url,
+                    timeout=45,
+                    allow_redirects=True,
+                    headers=headers,
+                )
+                fallback.raise_for_status()
+                if _is_excel_bytes(fallback.content):
+                    return fallback.content
+                if "text/html" in str(fallback.headers.get("content-type", "")).lower():
+                    confirmation_url = _google_drive_confirmation_url(fallback.text, fallback_url)
+                    if confirmation_url and confirmation_url != fallback_url:
+                        confirmed = session.get(
+                            confirmation_url,
+                            timeout=45,
+                            allow_redirects=True,
+                            headers=headers,
+                        )
+                        confirmed.raise_for_status()
+                        if _is_excel_bytes(confirmed.content):
+                            return confirmed.content
+            except Exception:
+                continue
+
+    # Keep a useful diagnostic for non-Excel sources. Do not dump the HTML.
+    preview = re.sub(r"\s+", " ", response.text[:240]) if "text/html" in content_type else ""
+    if preview:
+        raise ValueError(
+            "The registry URL returned an HTML page instead of an Excel workbook. "
+            "For Google Drive, set the file to 'Anyone with the link' / Viewer access, "
+            "or use a Google Sheets link or direct .xlsx URL."
+        )
+
+    raise ValueError(
+        "The registry source did not return an Excel workbook (.xlsx/.xls). "
+        f"Received content type: {content_type or 'unknown'}."
     )
 
 
+def _clean_registry_api_url(value):
+    """Extract a usable URL from plain URL or Markdown-style URL text."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+
+    markdown_match = re.search(r"\((https?://[^)]+)\)", text)
+    if markdown_match:
+        text = markdown_match.group(1)
+    else:
+        url_match = re.search(r"https?://\S+", text)
+        if url_match:
+            text = url_match.group(0)
+
+    text = text.replace("\\&", "&").strip()
+    return text
+
+
+def _registry_active(value):
+    return str(value or "").strip().lower() in {
+        "yes", "true", "1", "active", "y", "on"
+    }
+
+
+def load_danip_project_registry():
+    """Read the current DANIP project/program registry workbook.
+
+    The workbook is intentionally read at pull time so adding a new row
+    automatically makes the new project available to NEXUS without changing
+    Python code. The file must be shared so the deployed Streamlit app can
+    download it without interactive Google authentication.
+    """
+    source_url = str(DANIP_PROJECT_REGISTRY_URL or "").strip()
+    if not source_url:
+        raise ValueError("DANIP_PROJECT_REGISTRY_URL is not configured.")
+
+    content = _download_project_registry_bytes(source_url)
+
+    # Read the first worksheet by default. The registry is a configuration
+    # table, not the reporting dataset itself. Use an explicit engine for XLSX
+    # so the loader does not depend on pandas' automatic engine detection.
+    try:
+        if content[:4] == b"PK\x03\x04":
+            # Modern .xlsx workbook. openpyxl is the supported reader.
+            registry = pd.read_excel(
+                BytesIO(content),
+                sheet_name=0,
+                engine="openpyxl",
+            )
+        elif content[:4] == b"\xd0\xcf\x11\xe0":
+            # Legacy .xls workbook. This requires xlrd 2.x.
+            try:
+                registry = pd.read_excel(
+                    BytesIO(content),
+                    sheet_name=0,
+                    engine="xlrd",
+                )
+            except ImportError as exc:
+                raise ValueError(
+                    "The DANIP Project Registry is a legacy .xls workbook, but "
+                    "the xlrd package is not installed. Convert the registry to "
+                    ".xlsx, or add xlrd>=2.0.1 to the application's dependencies."
+                ) from exc
+        else:
+            # Last-resort support for a registry published as CSV/text. This is
+            # useful when Google Drive/Sheets exports the table as CSV instead
+            # of an Excel workbook.
+            try:
+                registry = pd.read_csv(BytesIO(content))
+            except Exception as csv_exc:
+                raise ValueError(
+                    "The registry download is neither a readable .xlsx/.xls workbook "
+                    "nor a CSV table. Check the registry sharing/download URL."
+                ) from csv_exc
+    except ValueError:
+        raise
+    except Exception as exc:
+        # Preserve the real reader error so the deployed app reports the actual
+        # workbook problem instead of hiding it behind a generic Excel message.
+        raise ValueError(
+            "Unable to read the DANIP Project Registry workbook. "
+            f"Reader error: {str(exc)[:500]}"
+        ) from exc
+
+    registry = normalize_dataframe(registry)
+    if registry.empty:
+        raise ValueError("The DANIP Project Registry is empty.")
+
+    # Normalize expected column names while preserving the original table.
+    column_map = {}
+    for column in registry.columns:
+        normalized = re.sub(r"[^a-z0-9]+", " ", str(column).strip().lower()).strip()
+        if normalized in {"project program name", "project program", "program name", "project name", "programme name"}:
+            column_map[column] = "Project/Program Name"
+        elif normalized in {"country", "countries"}:
+            column_map[column] = "Country"
+        elif normalized in {"api url", "api", "api endpoint", "api link"}:
+            column_map[column] = "API URL"
+        elif normalized in {"data source", "source"}:
+            column_map[column] = "Data Source"
+        elif normalized in {"type", "api type", "report type", "activity type", "data type", "category", "programme type", "program type"}:
+            column_map[column] = "Type"
+        elif normalized in {"active", "status", "enabled"}:
+            column_map[column] = "Active"
+
+    registry = registry.rename(columns=column_map)
+
+    required = ["Project/Program Name", "API URL"]
+    missing = [column for column in required if column not in registry.columns]
+    if missing:
+        raise ValueError(
+            "DANIP Project Registry is missing required column(s): "
+            + ", ".join(missing)
+        )
+
+    if "Country" not in registry.columns:
+        registry["Country"] = ""
+    if "Data Source" not in registry.columns:
+        registry["Data Source"] = "DANIP"
+    if "Type" not in registry.columns:
+        registry["Type"] = ""
+    if "Active" not in registry.columns:
+        registry["Active"] = "Yes"
+
+    registry["Project/Program Name"] = registry["Project/Program Name"].astype(str).str.strip()
+    registry["Country"] = registry["Country"].fillna("").astype(str).str.strip()
+    registry["API URL"] = registry["API URL"].map(_clean_registry_api_url)
+    registry["Data Source"] = registry["Data Source"].fillna("DANIP").astype(str).str.strip()
+    registry["Type"] = registry["Type"].fillna("").astype(str).str.strip()
+    registry["Active"] = registry["Active"].fillna("").astype(str).str.strip()
+
+    registry = registry[
+        (registry["Project/Program Name"] != "")
+        & (registry["API URL"] != "")
+    ].copy()
+
+    if registry.empty:
+        raise ValueError("The DANIP Project Registry contains no usable project/API rows.")
+
+    registry["_active"] = registry["Active"].map(_registry_active)
+    return registry.reset_index(drop=True)
+
+
+def pull_active_danip_projects():
+    """Pull every active project in the registry and create one master dataset."""
+    registry = load_danip_project_registry()
+    active_registry = registry[registry["_active"]].copy()
+
+    if active_registry.empty:
+        raise ValueError("No active projects were found in the DANIP Project Registry.")
+
+    frames = []
+    project_results = []
+    errors = []
+
+    for _, row in active_registry.iterrows():
+        project = str(row["Project/Program Name"]).strip()
+        country = str(row.get("Country", "")).strip()
+        api_url = str(row["API URL"]).strip()
+        data_source = str(row.get("Data Source", "DANIP")).strip() or "DANIP"
+        data_type = str(row.get("Type", "")).strip()
+
+        try:
+            raw = get_direct_api_data(api_url)
+            frame = normalize_dataframe(raw)
+
+            if frame.empty:
+                project_results.append({
+                    "project": project,
+                    "country": country,
+                    "status": "No data",
+                    "rows": 0,
+                })
+                continue
+
+            frame = frame.copy()
+            frame["DANIP Project/Program"] = project
+            frame["DANIP Country"] = country
+            frame["DANIP Data Source"] = data_source
+            frame["DANIP Type"] = data_type
+            frame["DANIP API URL"] = api_url
+            frames.append(frame)
+
+            project_results.append({
+                "project": project,
+                "country": country,
+                "status": "Loaded",
+                "rows": int(len(frame)),
+            })
+        except Exception as exc:
+            errors.append(f"{project}: {exc}")
+            project_results.append({
+                "project": project,
+                "country": country,
+                "status": "Error",
+                "rows": 0,
+                "error": str(exc),
+            })
+
+    if not frames:
+        detail = " | ".join(errors[:5])
+        raise RuntimeError(
+            "No active DANIP project returned data. "
+            + (detail if detail else "Check the registry API URLs and DHIS2 access.")
+        )
+
+    # Union columns because different projects may have different reporting
+    # structures. This is intentional: NEXUS normalizes them into one master dataset.
+    master = pd.concat(frames, ignore_index=True, sort=False)
+    master = normalize_dataframe(master)
+    try:
+        master = master.drop_duplicates().reset_index(drop=True)
+    except Exception:
+        pass
+
+    return master, registry, project_results, errors
+
+
 def get_direct_api_data(url):
+    """
+    Load DHIS2 data using ONLY the currently authenticated user's OAuth token.
+
+    Supported source types:
+      * DHIS2 Analytics API
+      * DHIS2 Data Visualizer links
+      * DHIS2 Visualization API
+      * DHIS2 Events / Tracker / DataValueSets / generic /api/*
+      * JSON / CSV / XLS / XLSX API responses
+
+    The function deliberately does not use DHIS2 username/password credentials.
+    """
+    url = str(url or "").strip()
+    if not url:
+        raise ValueError("Please provide a DHIS2 API or Analytics URL.")
+
+    # Allow users to paste either a full DHIS2 URL or a relative API path.
+    if url.startswith("/api/"):
+        url = f"{DHIS2_URL}{url}"
+    elif url.startswith("api/"):
+        url = f"{DHIS2_URL}/{url}"
+
+    # Every DHIS2 request made by the dashboard must have the user's OAuth session.
+    _require_dhis2_auth()
+
+    lower = url.lower()
     extension = get_extension(url)
 
-    if "/api/analytics" in url.lower():
-        return get_analytics_data(url)
+    # ------------------------------------------------------------
+    # DHIS2 Data Visualizer URL
+    # Example: /dhis-web-data-visualizer/#/<uid>
+    # ------------------------------------------------------------
+    if "dhis-web-data-visualizer" in lower:
+        uid = extract_visualization_uid(url)
+        if not uid:
+            raise ValueError(
+                "The DHIS2 Data Visualizer URL does not contain a valid visualization UID."
+            )
 
+        return get_visualization_data(uid)
+
+    # ------------------------------------------------------------
+    # DHIS2 Visualization API
+    # ------------------------------------------------------------
+    if "/api/visualizations/" in lower:
+        match = re.search(r"/api/visualizations/([A-Za-z0-9]{11})(?:/data)?", url)
+        if match and lower.rstrip("/").endswith("/data"):
+            return get_visualization_data(match.group(1))
+
+        # If the user supplied the metadata endpoint, first try its data endpoint.
+        if match:
+            try:
+                return get_visualization_data(match.group(1))
+            except Exception:
+                # Fall back to the metadata response below.
+                pass
+
+    # ------------------------------------------------------------
+    # File-based API responses
+    # ------------------------------------------------------------
+    # IMPORTANT: DHIS2 Analytics URLs in the project registry may look like
+    # /api/analytics.xls?... . The path still contains /api/analytics, but
+    # the response is an Excel workbook, not JSON. Therefore extension-based
+    # handling MUST happen before the generic Analytics handler.
     if extension == "xlsx":
         return read_xlsx_response(
             dhis2_get(
@@ -2870,8 +3758,24 @@ def get_direct_api_data(url):
             dhis2_get(url, accept="application/csv")
         )
 
-    return read_json_response(
-        dhis2_get(url, accept="application/json")
+    # ------------------------------------------------------------
+    # DHIS2 Analytics API (no explicit file extension)
+    # ------------------------------------------------------------
+    if "/api/analytics" in lower:
+        return get_analytics_data(url)
+
+    # ------------------------------------------------------------
+    # Generic DHIS2 JSON API
+    # ------------------------------------------------------------
+    if "/api/" in lower or _is_dhis2_url(url):
+        return read_json_response(
+            dhis2_get(url, accept="application/json")
+        )
+
+    raise ValueError(
+        "This URL is not a recognized DHIS2 API source. "
+        "Please provide a DHIS2 /api/... URL, Analytics URL, "
+        "Data Visualizer URL, CSV, XLS, XLSX or JSON API URL."
     )
 
 
@@ -6680,6 +7584,22 @@ def ask_ai(
         requested_evidence=requested_evidence,
     )
 
+    # The Project/Program Registry is part of the AI context. This is built
+    # from the same registry used to retrieve the master dataset, so a newly
+    # added active project is automatically visible to the AI after the next
+    # registry refresh/pull. API URLs themselves are intentionally not sent
+    # to the model; project, country and source metadata are sufficient.
+    project_registry_context = []
+    registry_context_df = st.session_state.get("danip_project_registry")
+    if isinstance(registry_context_df, pd.DataFrame) and not registry_context_df.empty:
+        for _, registry_row in registry_context_df.iterrows():
+            project_registry_context.append({
+                "project_program": str(registry_row.get("Project/Program Name", "")).strip(),
+                "country": str(registry_row.get("Country", "")).strip(),
+                "data_source": str(registry_row.get("Data Source", "DANIP")).strip(),
+                "active": _registry_active(registry_row.get("Active", "")),
+            })
+
     prompt = f"""
 You are an expert DHIS2 data analyst, public-health
 monitoring and evaluation specialist, nutrition programme
@@ -6744,6 +7664,19 @@ All applicable rows have been processed locally.
 The first 25 rows are ONLY a schema preview.
 
 Never treat the top-row matrix as the complete dataset.
+
+============================================================
+DANIP PROJECT / PROGRAM REGISTRY
+============================================================
+
+The following registry is the authoritative configuration for the active
+DANIP projects/programmes represented in the current master dataset.
+Whenever a new active project is added to the registry, it must be treated
+as a new programme context automatically after the registry is refreshed.
+Use the project/program and country fields to distinguish reporting results.
+Do not invent projects that are not listed here.
+
+{safe_json_dumps(project_registry_context)}
 
 ============================================================
 EXTERNAL INDICATOR CONTEXT
@@ -8967,10 +9900,1527 @@ If no credible source is found, say so explicitly.
         "error": error_text,
     }
 
+def research_mne_external_context(question, indicators=None, danip_evidence=None, rag_context=None):
+    """Automatically retrieve authoritative external M&E context for every analysis question.
+
+    Dashboard/DHIS2 values remain the numerical source of truth. External web evidence is
+    used only for indicator meaning, programme relevance, standards/guidance and context.
+    """
+    if client is None:
+        return {
+            "status": "DISABLED",
+            "sources": [],
+            "text": "No external source could be queried because OPENAI_API_KEY is not configured.",
+        }
+
+    indicators = indicators or []
+    indicator_text = "\n".join(f"- {str(x)}" for x in indicators[:5]) or "- No specific indicator confidently identified."
+
+    # The external layer receives the actual DANIP evidence and internal KM context.
+    # This is critical for a true comparison: external search must know exactly what
+    # DANIP measured before it decides whether an outside source is comparable.
+    danip_payload = danip_evidence or {}
+    km_payload = rag_context or {}
+
+    prompt = f"""
+You are the THIRD and final evidence layer in a strict three-level DANIP M&E search hierarchy.
+
+SEARCH ORDER:
+1. INTERNAL DANIP / DHIS2 — source of truth for observed programme values.
+2. INTERNAL KM / ISG INDICATOR COMPENDIUM — source of truth for official internal definitions and metadata.
+3. EXTERNAL AUTHORITATIVE SOURCES — UNICEF, WHO, UN, World Bank and similar sources.
+
+The user explicitly requested external evidence or comparison. Use web search.
+Your job is NOT to produce a generic external summary. Your job is to determine whether
+a requested external source contains evidence that can actually be compared with the current DANIP result.
+
+USER QUESTION:
+{question}
+
+DANIP INDICATORS IDENTIFIED:
+{indicator_text}
+
+LEVEL 1 — CURRENT DANIP / DHIS2 EVIDENCE:
+{safe_json_dumps(danip_payload)}
+
+LEVEL 2 — INTERNAL KM / ISG COMPENDIUM:
+{_rag_context_text(km_payload) if km_payload else "No internal KM passage was retrieved."}
+
+EXTERNAL SEARCH PRIORITY:
+1. Explicitly requested organisation/source (for example UNICEF Ethiopia).
+2. Requested country/geography.
+3. Requested year/reporting period (for example 2026 / this year).
+4. WHO / UNICEF / UN / UNFPA / World Bank authoritative sources.
+
+COMPARABILITY TEST — REQUIRED:
+Before reporting an external number, compare all of these:
+- indicator concept/name
+- population
+- geography
+- reporting period/year
+- numerator and denominator, when applicable
+- measurement unit
+- coverage/count/rate definition
+
+Classify the external evidence as:
+- DIRECTLY COMPARABLE: materially aligned on the above dimensions.
+- RELATED BUT NOT DIRECTLY COMPARABLE: relevant, but one or more dimensions differ.
+- NO VERIFIED MATCH: no suitable authoritative evidence found.
+
+IMPORTANT:
+- Never invent an external number.
+- Never estimate an external number from another indicator.
+- Never treat IFA-or-MMS as MMS-only.
+- Never treat a regional value as a national value.
+- Never treat a target as an achieved result.
+- Never change, cap, replace or recalculate the DANIP value.
+- If no directly comparable value exists, explicitly return: NO DIRECTLY COMPARABLE EXTERNAL VALUE FOUND.
+- If a related source exists, report its actual value and explain the mismatch.
+- Include organisation, report/title, publication date/year, geography, value/unit, match status, comparison note and source URL.
+
+Return concise structured evidence suitable for insertion into a DANIP answer.
+"""
+
+    api_errors = []
+
+    # Primary current Responses API web-search tool.
+    try:
+        response = client.responses.create(
+            model=OPENAI_MODEL,
+            tools=[{
+                "type": "web_search",
+                "search_context_size": "high",
+                "filters": {"allowed_domains": EXTERNAL_EVIDENCE_DOMAINS},
+            }],
+            input=prompt,
+        )
+        answer = (response.output_text or "").strip()
+        urls = _extract_response_urls(response)
+        if answer:
+            return {"status":"SUCCESS","sources":urls[:12],"text":answer,"engine":"web_search"}
+        api_errors.append("web_search returned no output text")
+    except Exception as exc:
+        api_errors.append("web_search: " + str(exc)[-1800:])
+
+    # SDK compatibility fallback.
+    try:
+        response = client.responses.create(
+            model=OPENAI_MODEL,
+            tools=[{"type": "web_search_preview"}],
+            input=prompt,
+        )
+        answer = (response.output_text or "").strip()
+        urls = _extract_response_urls(response)
+        if answer:
+            return {"status":"SUCCESS","sources":urls[:12],"text":answer,"engine":"web_search_preview"}
+        api_errors.append("web_search_preview returned no output text")
+    except Exception as exc:
+        api_errors.append("web_search_preview: " + str(exc)[-1800:])
+
+    error_text = "\n\n".join(api_errors)[-5000:]
+    return {
+        "status":"ERROR",
+        "sources":[],
+        "text":"External evidence search could not be completed.\n\n" + error_text,
+        "error":error_text,
+    }
+
+
 # ============================================================
-# DANIP-ONLY ANALYSIS ROUTING
-# The chatbot uses the current DANIP dataset only.
+# INDEPENDENT ISG INDICATOR COMPENDIUM RAG
 # ============================================================
+# RAG is intentionally independent from DHIS2/API loading.
+# It supplies authoritative organizational indicator/M&E knowledge.
+# DHIS2 remains the source of current numerical observations.
+# ============================================================
+
+RAG_SOURCE_NAME = "ISG Indicator Compendium"
+RAG_GOOGLE_DOC_URL = (
+    "https://docs.google.com/document/d/"
+    "159IpWlCdgzCp1GOckjeux93_IrkFx7pf/edit"
+)
+
+# Additional internal RAG source: the shared Google Sheet provided for the
+# NEXUS M&E assistant. The sheet is treated as INTERNAL KNOWLEDGE, not as
+# current DHIS2 observations. The Google Sheet must be shared so the app's
+# runtime can read it without interactive Google authentication.
+RAG_GOOGLE_SHEET_NAME = "DANIP Internal Google Sheet"
+# The PMF indicator data are stored in this worksheet/tab.
+RAG_GOOGLE_SHEET_TAB = "Global_Rollup_Matrix"
+RAG_GOOGLE_SHEET_URL = (
+    "https://docs.google.com/spreadsheets/d/"
+    "1al4woIxwnxaPJzf2gxTohLfGgc56mQDH/edit"
+)
+
+RAG_KNOWLEDGE_FOLDER = os.path.join(BASE_DIR, "rag_knowledge")
+RAG_SOURCES_FILE = os.path.join(RAG_KNOWLEDGE_FOLDER, "rag_sources.txt")
+RAG_TOP_K = 8
+RAG_CHUNK_WORDS = 220
+RAG_CHUNK_OVERLAP = 40
+
+
+def _rag_normalize(text):
+    text = str(text or "")
+    text = text.replace("\u00a0", " ")
+    text = re.sub(r"\r\n?", "\n", text)
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _rag_docx_text(path):
+    """Extract paragraphs AND tables from a local Word compendium."""
+    try:
+        from docx import Document
+        doc = Document(path)
+        parts = []
+        for p in doc.paragraphs:
+            t = _rag_normalize(p.text)
+            if t:
+                parts.append(t)
+        for table in doc.tables:
+            for row in table.rows:
+                cells = [_rag_normalize(c.text) for c in row.cells]
+                cells = [c for c in cells if c]
+                if cells:
+                    parts.append(" | ".join(cells))
+        return _rag_normalize("\n".join(parts))
+    except Exception as exc:
+        return f""
+
+
+def _rag_google_doc_text(url):
+    """Read a public Google Doc through its text export endpoint."""
+    m = re.search(r"/document/d/([A-Za-z0-9_-]+)", str(url or ""))
+    if not m:
+        return ""
+    doc_id = m.group(1)
+    export_url = f"https://docs.google.com/document/d/{doc_id}/export?format=txt"
+    try:
+        r = requests.get(export_url, timeout=30, allow_redirects=True)
+        if r.status_code == 200 and r.text.strip():
+            return _rag_normalize(r.text)
+    except Exception:
+        pass
+    return ""
+
+
+def _rag_google_sheet_text(url, target_sheet=None):
+    """Read the Google workbook for RAG, preserving the PMF matrix structure.
+
+    ``Global_Rollup_Matrix`` has title/instruction rows above the real header.
+    We therefore detect the row containing ``Global PMF code`` instead of
+    letting pandas treat the first spreadsheet row as the header.  Each PMF
+    record is emitted as a named, self-contained row so retrieval can later
+    render the same matrix as a Markdown table rather than exposing raw RAG
+    chunks.
+    """
+    m = re.search(r"/spreadsheets/d/([A-Za-z0-9_-]+)", str(url or ""))
+    if not m:
+        return ""
+
+    spreadsheet_id = m.group(1)
+    target_sheet = str(target_sheet or RAG_GOOGLE_SHEET_TAB).strip()
+    export_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export?format=xlsx"
+
+    try:
+        r = requests.get(export_url, timeout=60, allow_redirects=True)
+        r.raise_for_status()
+        if not r.content:
+            return ""
+
+        workbook = pd.ExcelFile(BytesIO(r.content), engine="openpyxl")
+        available = list(workbook.sheet_names)
+        target_match = next(
+            (name for name in available if str(name).strip().lower() == target_sheet.lower()),
+            None,
+        )
+
+        ordered_sheets = []
+        if target_match:
+            ordered_sheets.append(target_match)
+        ordered_sheets.extend(name for name in available if name != target_match)
+
+        parts = []
+        for sheet_name in ordered_sheets:
+            try:
+                raw = pd.read_excel(
+                    workbook, sheet_name=sheet_name, header=None, dtype=str
+                ).fillna("")
+            except Exception:
+                continue
+
+            if raw.empty:
+                continue
+
+            is_pmf = target_match is not None and sheet_name == target_match
+            if is_pmf:
+                # Locate the actual matrix header row. The screenshot/source has
+                # explanatory rows above this header, so header=0 is incorrect.
+                header_idx = None
+                for idx in range(min(len(raw), 30)):
+                    values = [str(v).strip().lower() for v in raw.iloc[idx].tolist()]
+                    if "global pmf code" in values and "indicator" in values:
+                        header_idx = idx
+                        break
+
+                if header_idx is not None:
+                    headers = [str(v).strip() for v in raw.iloc[header_idx].tolist()]
+                    # Fill any blank header cells with stable names.
+                    clean_headers = []
+                    for i, h in enumerate(headers):
+                        clean_headers.append(h if h and not h.lower().startswith("unnamed") else f"Column_{i+1}")
+
+                    data = raw.iloc[header_idx + 1:].copy()
+                    data.columns = clean_headers
+
+                    # Drop fully blank rows.
+                    data = data.loc[data.apply(lambda row: any(str(v).strip() for v in row), axis=1)]
+
+                    # Only retain the actual matrix columns visible in the PMF
+                    # sheet. Extra blank/unnamed columns are ignored.
+                    desired = [
+                        "Global PMF code", "Level", "Indicator", "GAC?", "TEAM",
+                        "Team Remarks", "Standard field exists in harmonised tool(s)",
+                        "MNHN", "BP", "AWHN", "VAS", "ZINC", "USI", "FF", "NG",
+                    ]
+                    col_lookup = {str(c).strip().lower(): c for c in data.columns}
+                    resolved = []
+                    for name in desired:
+                        key = name.lower()
+                        resolved.append(col_lookup.get(key))
+
+                    # Fallback to the first 15 columns when the source contains
+                    # minor header spelling/spacing differences.
+                    if resolved.count(None) > 2 and len(data.columns) >= 15:
+                        resolved = list(data.columns[:15])
+
+                    row_lines = []
+                    for _, row in data.iterrows():
+                        vals = []
+                        for col in resolved:
+                            vals.append(str(row[col]).strip() if col is not None else "")
+                        if not any(vals):
+                            continue
+                        code = vals[0]
+                        if not code or code.lower() in {"global pmf code", "nan"}:
+                            continue
+                        fields = []
+                        for name, value in zip(desired, vals):
+                            value = re.sub(r"\s+", " ", value).strip()
+                            fields.append(f"{name}: {value}")
+                        row_lines.append("PMF_ROW | " + " | ".join(fields))
+
+                    instruction = "Cell = R countries / countries reportable from current tools. Every applicable indicator has a standard field in the portfolio tool; gaps are current-tool gaps to close. Colour: green all countries R, amber some, red none, grey central/derived, blank not applicable."
+                    parts.append(
+                        f"SHEET: {sheet_name}\n"
+                        "SOURCE ROLE: PRIMARY PMF INDICATOR SOURCE\n"
+                        f"MATRIX INSTRUCTIONS: {instruction}\n"
+                        + "\n".join(row_lines)
+                    )
+                    continue
+
+            # Supplementary worksheets retain their normal row representation.
+            rows = [" | ".join(str(c).strip() for c in raw.iloc[0].tolist())]
+            for _, row in raw.iloc[1:].iterrows():
+                values = [str(v).strip() for v in row.tolist()]
+                if any(values):
+                    rows.append(" | ".join(values))
+            sheet_text = "\n".join(rows).strip()
+            if sheet_text:
+                parts.append(
+                    f"SHEET: {sheet_name}\n"
+                    "SOURCE ROLE: SUPPLEMENTARY INTERNAL SHEET\n"
+                    + sheet_text
+                )
+
+        return _rag_normalize("\n\n".join(parts))
+    except Exception:
+        return ""
+
+
+def _rag_sources():
+    """Return configured local files and direct Google Doc sources."""
+    sources = []
+    if os.path.isdir(RAG_KNOWLEDGE_FOLDER):
+        for name in sorted(os.listdir(RAG_KNOWLEDGE_FOLDER)):
+            if name == "rag_sources.txt":
+                continue
+            path = os.path.join(RAG_KNOWLEDGE_FOLDER, name)
+            if os.path.isfile(path) and name.lower().endswith((
+                ".txt", ".md", ".csv", ".tsv", ".docx", ".pdf"
+            )):
+                sources.append((name, path))
+    # Direct authoritative/internal sources. These are NOT folder scans.
+    sources.append((RAG_SOURCE_NAME, RAG_GOOGLE_DOC_URL))
+    sources.append((f"{RAG_GOOGLE_SHEET_NAME} — {RAG_GOOGLE_SHEET_TAB}", RAG_GOOGLE_SHEET_URL))
+    if os.path.isfile(RAG_SOURCES_FILE):
+        try:
+            for line in Path(RAG_SOURCES_FILE).read_text(encoding="utf-8").splitlines():
+                line=line.strip()
+                if line and not line.startswith("#") and line not in [x[1] for x in sources]:
+                    if line.startswith("http"):
+                        sources.append((RAG_SOURCE_NAME, line))
+        except Exception:
+            pass
+    return sources
+
+
+def _rag_file_text(path):
+    lower = str(path).lower()
+    try:
+        if lower.endswith(".docx"):
+            return _rag_docx_text(path)
+        if lower.endswith(".pdf"):
+            try:
+                import pypdf
+                reader = pypdf.PdfReader(path)
+                return _rag_normalize("\n".join((p.extract_text() or "") for p in reader.pages))
+            except Exception:
+                return ""
+        return _rag_normalize(Path(path).read_text(encoding="utf-8", errors="ignore"))
+    except Exception:
+        return ""
+
+
+def _rag_chunk_text(text, source, chunk_words=RAG_CHUNK_WORDS, overlap=RAG_CHUNK_OVERLAP):
+    words = _rag_normalize(text).split()
+    if not words:
+        return []
+    chunks=[]
+    step=max(1, chunk_words-overlap)
+    for i in range(0, len(words), step):
+        part=" ".join(words[i:i+chunk_words]).strip()
+        if part:
+            chunks.append({"source": source, "text": part})
+        if i+chunk_words >= len(words):
+            break
+    return chunks
+
+
+def _rag_load_knowledge():
+    """Load and cache the indicator compendium and other local knowledge."""
+    signature=[]
+    for source, location in _rag_sources():
+        if str(location).startswith("http"):
+            signature.append((source, location))
+        elif os.path.exists(location):
+            try:
+                signature.append((source, location, os.path.getmtime(location), os.path.getsize(location)))
+            except Exception:
+                signature.append((source, location))
+    key=hashlib.sha256(repr(signature).encode()).hexdigest()
+    cached=st.session_state.get("rag_knowledge_cache")
+    if isinstance(cached, dict) and cached.get("key") == key:
+        return cached.get("chunks", []), cached.get("warnings", [])
+
+    chunks=[]; warnings=[]
+    for source, location in _rag_sources():
+        text=""
+        if str(location).startswith("http"):
+            if "/spreadsheets/d/" in str(location):
+                text=_rag_google_sheet_text(location, RAG_GOOGLE_SHEET_TAB)
+                if not text:
+                    warnings.append(
+                        f"Could not retrieve {source} from the configured Google Sheet URL. "
+                        "Confirm the sheet is shared with access suitable for the app runtime."
+                    )
+            else:
+                text=_rag_google_doc_text(location)
+                if not text:
+                    warnings.append(f"Could not retrieve {source} from the configured Google Doc URL.")
+        else:
+            text=_rag_file_text(location)
+            if not text:
+                warnings.append(f"Could not read local RAG source: {source}")
+        chunks.extend(_rag_chunk_text(text, source))
+
+    st.session_state["rag_knowledge_cache"]={"key":key,"chunks":chunks,"warnings":warnings}
+    return chunks, warnings
+
+
+def _rag_terms(text):
+    return set(re.findall(r"[a-z0-9]{2,}", str(text or "").lower()))
+
+
+
+
+def _chat_requested_concepts(question):
+    """Extract high-value concepts that must be present in an Internal KM match.
+
+    This prevents semantic retrieval from accepting a merely related indicator,
+    such as ANC attendance, when the user explicitly asks about MMS.
+    """
+    q = _chat_normalize_text(question)
+    concepts = set()
+    concept_groups = {
+        "mms": ("mms", "multiple micronutrient", "multiple micronutrient supplementation", "micronutrient supplement"),
+        "wifa": ("wifa", "iron folic", "ifa", "iron-folic"),
+        "vas": ("vas", "vitamin a", "vitamin a supplementation"),
+        "zinc": ("zinc",),
+        "anc": ("anc", "antenatal", "antenatal care", "pregnancy care"),
+        "pregnant": ("pregnant", "pregnancy", "pregnant women", "pw "),
+        "newborn": ("newborn", "neonate", "neonatal"),
+        "children": ("children", "child", "under five", "u5"),
+        "fortified_food": ("fortified food", "fortified products", "fortification"),
+    }
+    for concept, phrases in concept_groups.items():
+        if any(p in q for p in phrases):
+            concepts.add(concept)
+    return concepts
+
+
+def _chat_compendium_concept_match(question, text):
+    """Validate that a retrieved Compendium passage actually represents the
+    requested indicator concept. A related pregnancy/MNHN indicator is not enough
+    for an MMS request.
+    """
+    concepts = _chat_requested_concepts(question)
+    t = _chat_normalize_text(text)
+    if not t:
+        return False
+    if not concepts:
+        return True
+
+    # Strong concepts are mandatory when explicitly requested.
+    if "mms" in concepts and not any(x in t for x in (
+        "mms", "multiple micronutrient", "multiple micronutrient supplementation"
+    )):
+        return False
+    if "wifa" in concepts and not any(x in t for x in ("wifa", "iron folic", "ifa")):
+        return False
+    if "vas" in concepts and not any(x in t for x in ("vas", "vitamin a")):
+        return False
+    if "zinc" in concepts and "zinc" not in t:
+        return False
+    if "fortified_food" in concepts and not any(x in t for x in ("fortified food", "fortified products", "fortification")):
+        return False
+
+    # Pregnancy is a contextual requirement when explicitly requested.
+    if "pregnant" in concepts and not any(x in t for x in ("pregnant", "pregnancy")):
+        return False
+
+    return True
+
+
+def _chat_filter_internal_km_matches(question, rag):
+    """Filter Internal KM retrieval to concept-valid passages only.
+
+    This is deliberately strict: when the question names MMS, a passage about
+    ANC attendance alone must not be accepted as the DANIP definition.
+    """
+    if not isinstance(rag, dict):
+        return rag
+    chunks = rag.get("chunks") or []
+    if not chunks:
+        return rag
+    concepts = _chat_requested_concepts(question)
+    if not concepts:
+        return rag
+
+    valid = [c for c in chunks if _chat_compendium_concept_match(question, c.get("text", ""))]
+    out = dict(rag)
+    out["chunks"] = valid
+    out["concepts"] = sorted(concepts)
+    if not valid:
+        warnings = list(out.get("warnings") or [])
+        warnings.append(
+            "No Internal KM passage passed the requested indicator-concept validation. "
+            "A semantically related indicator was intentionally rejected."
+        )
+        out["warnings"] = warnings
+    return out
+
+def retrieve_rag_context(question, indicators=None, top_k=RAG_TOP_K):
+    chunks, warnings = _rag_load_knowledge()
+    q_terms=_rag_terms(question)
+    extra=_rag_terms(" ".join(str(x) for x in (indicators or [])))
+    q_terms |= extra
+    if not chunks:
+        return {"chunks":[],"warnings":warnings,"source_name":RAG_SOURCE_NAME}
+
+    scored=[]
+    qlow=str(question or "").lower()
+    concept_terms = _chat_requested_concepts(question)
+    for c in chunks:
+        chunk_text = str(c.get("text", ""))
+        source_text = str(c.get("source", ""))
+        terms=_rag_terms(chunk_text)
+        overlap=len(q_terms & terms)
+        exact=0
+        for phrase in re.findall(r"\b[a-z0-9][a-z0-9 #:%()\-/]{3,100}\b", qlow):
+            phrase=phrase.strip()
+            if len(phrase)>5 and phrase in chunk_text.lower():
+                exact += 8
+        score = overlap + exact
+
+        # PMF questions should preferentially retrieve the dedicated worksheet.
+        if "pmf" in qlow or "rollup" in qlow or "readiness" in qlow or "global_rollup_matrix" in qlow:
+            if RAG_GOOGLE_SHEET_TAB.lower() in chunk_text.lower() or RAG_GOOGLE_SHEET_TAB.lower() in source_text.lower():
+                score += 25
+
+        # Concept-aware ranking for Internal KM. Strongly reward the requested
+        # intervention/indicator concept and penalize a missing required concept.
+        if "mms" in concept_terms:
+            if "mms" in chunk_text.lower() or "multiple micronutrient" in chunk_text.lower():
+                score += 80
+            else:
+                score -= 100
+        if "pregnant" in concept_terms:
+            if "pregnant" in chunk_text.lower() or "pregnancy" in chunk_text.lower():
+                score += 25
+
+        if score>0:
+            scored.append((score,c))
+
+    scored.sort(key=lambda x: (-x[0], str(x[1].get("source", ""))))
+    result = {
+        "chunks":[c for _,c in scored[:top_k]],
+        "warnings":warnings,
+        "source_name":RAG_SOURCE_NAME,
+        "concepts":sorted(concept_terms),
+    }
+    return result
+
+
+def _rag_context_text(result):
+    parts=[]
+    for i,c in enumerate((result or {}).get("chunks",[]),1):
+        parts.append(f"[RAG {i} | {c.get('source','unknown')}]\n{c.get('text','')}")
+    return "\n\n".join(parts)
+
+
+# ============================================================
+# STRUCTURED ISG RESULT-AREA RESPONSES
+# ============================================================
+# The compendium contains result-area tables.  For questions asking for the
+# indicators within Impact Result 1000, return the source-defined list as a
+# real table instead of asking the LLM to reconstruct a table from fragmented
+# retrieval chunks.  This mapping is transcribed from the supplied ISG
+# Indicator Compendium source and is only used for the exact result area.
+# ============================================================
+
+ISG_RESULT_AREA_INDICATORS = {
+    "1000": [
+        "# of cases of anaemia averted (sex- and age disaggregated where appropriate)",
+        "# of deaths averted in girls and boys",
+        "# of children born with higher IQ and improved ability to learn",
+        "# of cases of LBW averted in newborn girls and boys",
+        "# of stunting cases averted in girls and boys",
+        "# of NTDs averted in newborn girls and boys",
+        "# disability adjusted life years averted (DALY)",
+        "# of children who receive ~ 1 additional year of schooling",
+        "# of dollars of health care costs saved in countries by preventing disabilities and disease",
+        "# of out-of-pocket expenses saved to individuals and families by preventing disabilities and disease",
+        "# of economic losses averted due to disease prevented and lives saved",
+        "# of health care and out-of-pocket costs saved",
+    ]
+}
+
+
+def _chat_result_area_table(question, rag=None):
+    """Return a source-grounded markdown table for a requested ISG result area."""
+    q = str(question or "").lower()
+    asks_for_indicators = any(term in q for term in (
+        "indicator", "indicators", "within", "under", "listed", "list"
+    ))
+    asks_for_result = any(term in q for term in (
+        "result area", "result statement", "impact result", "result 1000", "1000:"
+    ))
+    if not (asks_for_indicators and asks_for_result and "1000" in q):
+        return ""
+
+    rows = ISG_RESULT_AREA_INDICATORS.get("1000", [])
+    if not rows:
+        return ""
+
+    lines = [
+        "### Impact Result 1000 — Indicators",
+        "",
+        "| Indicator |",
+        "|---|",
+    ]
+    lines.extend(f"| {item} |" for item in rows)
+    lines.extend([
+        "",
+        "**Result statement:** 1000: Improved survival, health and wellbeing of women, newborns, children, and adolescent girls in low-and-middle-income countries.",
+        "",
+        f"*Source: {RAG_SOURCE_NAME}.*"
+    ])
+    return "\n".join(lines)
+
+
+def _chat_internal_km_requested(question):
+    """Return True when the user explicitly asks for internal KM/compendium context.
+
+    When this is true, the ISG Indicator Compendium / internal KM is the required
+    context source. External web research must not be invoked unless the user also
+    explicitly asks for an external source or comparison.
+    """
+    q = str(question or "").lower().strip()
+    if not q:
+        return False
+    phrases = (
+        "indicator compendium",
+        "the compendium",
+        "from compendium",
+        "according to compendium",
+        "use compendium",
+        "using compendium",
+        "compendium source",
+        "compendium reference",
+        "source from compendium",
+        "source from the compendium",
+        "according to the compendium",
+        "use the compendium",
+        "internal km",
+        "internal knowledge",
+        "knowledge management",
+        "official internal definition",
+        "internal indicator definition",
+        "internal reference",
+        "internal source",
+        "internal rag",
+        "compandium",
+        # PMF is part of the same Internal KM layer.
+        "pmf",
+        "global pmf",
+        "global_rollup_matrix",
+        "global rollup matrix",
+        "rollup matrix",
+        "roll-up matrix",
+        "pmf indicator",
+        "pmf indicators",
+        "pmf source",
+        "source from pmf",
+        "according to pmf",
+    )
+    return any(p in q for p in phrases) or "compendium" in q or "compandium" in q or "global_rollup_matrix" in q or "global rollup matrix" in q
+
+
+def _chat_danip_current_analysis_intent(question, df):
+    """Return True when the user question can be answered from the loaded DANIP dataset.
+
+    Matching is deliberately conservative: an explicit indicator code/name in the
+    question, or a strong token overlap with a numeric DANIP indicator column,
+    is enough to treat the request as DANIP analysis.
+    """
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return False
+
+    q = _chat_normalize_text(question)
+    if not q:
+        return False
+
+    # Normalize punctuation so codes such as 1300(iii).02 and 1300 iii 02
+    # can be matched consistently.
+    q_compact = re.sub(r"\s+", "", q)
+    q_tokens = set(q.split())
+
+    for col in df.columns:
+        col_text = str(col)
+        name = _chat_normalize_text(col_text)
+        if not name:
+            continue
+
+        name_compact = re.sub(r"\s+", "", name)
+
+        # Exact indicator-name match.
+        if name in q or q in name:
+            return True
+
+        # Explicit indicator-code match, e.g. 1300(iii).02.
+        code_match = re.search(
+            r"\b\d{3,4}\s*\(?[ivxIVX]{1,5}\)?\s*\.?\s*\d{1,3}\b",
+            col_text,
+        )
+        if code_match:
+            code = _chat_normalize_text(code_match.group(0))
+            if code and (code in q or re.sub(r"\s+", "", code) in q_compact):
+                return True
+
+        # Strong token overlap for numeric indicator columns.
+        if col not in get_numeric_columns(df):
+            continue
+        name_tokens = set(name.split())
+        overlap = q_tokens & name_tokens
+        if len(overlap) >= 3:
+            return True
+        if len(overlap) >= 2 and any(
+            t in overlap for t in (
+                "children", "women", "pregnant", "zinc", "ors", "diarrhoea",
+                "diarrhea", "wifa", "vas", "mms", "received", "consumed",
+                "coverage", "number", "additional",
+            )
+        ):
+            return True
+
+    return False
+
+
+def _chat_requires_current_data(question):
+    q=str(question or "").lower()
+    terms=(
+        "current", "latest", "reported", "value", "values", "performance",
+        "trend", "compare", "comparison", "country", "countries", "period",
+        "actual", "target", "achievement", "coverage rate", "dashboard",
+        "dhis2", "api", "how many", "how much", "increase", "decrease",
+        "highest", "lowest", "below target", "above target", "data quality",
+        "data loaded", "report from the data", "using the data"
+    )
+    return any(t in q for t in terms)
+
+
+def _chat_is_rag_or_me_knowledge(question):
+    q=str(question or "").strip().lower()
+    if not q:
+        return False
+    explicit=(
+        "according to the compendium", "from the compendium", "indicator compendium",
+        "from rag", "rag knowledge", "knowledge base", "official definition",
+        "official indicator", "indicator definition", "indicator definitions",
+        "numerator", "denominator", "formula", "result statement", "results framework",
+        "what is an indicator", "what does this indicator mean", "define indicator",
+        "m&e", "monitoring and evaluation", "monitoring and evaluation means",
+        "data quality", "logframe", "results chain", "theory of change", "indicator framework"
+    )
+    knowledge_verbs=("define ","definition of ","explain ","what is ","what are ","describe ","meaning of ","how is it calculated")
+    source_terms=("indicator","result","measure","vas","mnhn","wifa","usi","mms","nourish","m&e")
+    if _chat_requires_current_data(q):
+        # Current-data questions must never be routed to RAG-only merely because
+        # they contain words such as "indicator" or "what is".
+        current_phrases=("current","latest","reported","value","performance","trend","country","period","dhis2","dashboard","data")
+        if any(x in q for x in current_phrases) and not any(x in q for x in ("according to the compendium","from the compendium","official definition","indicator definition","numerator","denominator","formula")):
+            return False
+    return any(x in q for x in explicit) or (any(v in q for v in knowledge_verbs) and any(t in q for t in source_terms))
+
+
+def _chat_mixed_rag_analysis_intent(question):
+    q=str(question or "").lower()
+    knowledge=("according to the compendium","from the compendium","indicator definition","official definition","numerator","denominator","formula","guidance","target definition")
+    analysis=("current","latest","reported","performance","trend","data","value","coverage","country","organisation","organization","period","dhis2","dashboard","actual")
+    return any(k in q for k in knowledge) and any(a in q for a in analysis)
+
+
+def _chat_compendium_table_request(question):
+    """Detect requests where compendium content should be displayed as a table."""
+    q = str(question or "").lower()
+    return any(x in q for x in (
+        "show the compendium", "show all compendium", "all compendium",
+        "compendium table", "show as a table", "table format", "in table",
+        "list the indicators", "list all indicators", "show the indicators",
+        "indicators within", "indicators under", "indicators in", "indicator list",
+        "result areas", "result area", "results framework", "all indicators",
+    ))
+
+
+def _chat_extract_compendium_indicator_rows(rag):
+    """Extract source-defined coded indicator rows from retrieved compendium text.
+
+    This is deliberately conservative: it only emits text that is visibly present
+    in the retrieved source. It does not invent missing definitions or formulas.
+    """
+    context = _rag_context_text(rag)
+    if not context:
+        return []
+
+    # Codes used in the supplied compendium include 1100, 1130c.(i),
+    # 1210(i).01, 1210(i).15, 1200.(vi), etc.
+    code_pat = re.compile(
+        r"(?<![A-Za-z0-9])(\d{4}(?:[a-z])?(?:\([ivx]+\))?(?:\.(?:\d+|[a-z]+))?(?:\([ivx]+\))?)(?![A-Za-z0-9])",
+        re.I,
+    )
+
+    rows = []
+    seen = set()
+    for block in re.split(r"\n\s*\n", context):
+        clean = re.sub(r"\[RAG\s+\d+\s*\|[^\]]+\]\s*", "", block).strip()
+        if not clean:
+            continue
+        matches = list(code_pat.finditer(clean))
+        if not matches:
+            continue
+        for i, m in enumerate(matches):
+            code = m.group(1)
+            # Ignore dates/years and obvious non-indicator years.
+            if code in {"2025", "2030"}:
+                continue
+            tail_end = matches[i + 1].start() if i + 1 < len(matches) else len(clean)
+            fragment = clean[m.end():tail_end].strip(" :.-")
+            fragment = re.sub(r"\s+", " ", fragment)
+            if not fragment:
+                continue
+            # Remove table/section boilerplate that is not part of the indicator.
+            fragment = re.sub(r"^(?:\(total\)\s*)", "", fragment, flags=re.I)
+            fragment = fragment.strip()
+            key = (code.lower(), fragment.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append((code, fragment))
+
+    return rows
+
+
+def _rag_google_sheet_pmf_rows(url):
+    """Read complete PMF rows directly from Global_Rollup_Matrix.
+
+    The normal RAG pipeline chunks text for semantic retrieval. That is useful
+    for finding a row, but it can split a wide spreadsheet row across chunks.
+    For PMF table answers we therefore re-read the worksheet as structured data
+    and return the complete source row, including every portfolio column.
+    """
+    cache_key = "_pmf_global_rollup_rows_cache"
+    try:
+        cached = st.session_state.get(cache_key)
+        if cached:
+            return cached
+    except Exception:
+        pass
+
+    m = re.search(r"/spreadsheets/d/([A-Za-z0-9_-]+)", str(url or ""))
+    if not m:
+        return []
+
+    export_url = (
+        f"https://docs.google.com/spreadsheets/d/{m.group(1)}"
+        f"/export?format=xlsx"
+    )
+
+    try:
+        response = requests.get(export_url, timeout=60, allow_redirects=True)
+        response.raise_for_status()
+        workbook = pd.ExcelFile(BytesIO(response.content), engine="openpyxl")
+
+        sheet_name = next(
+            (name for name in workbook.sheet_names
+             if str(name).strip().lower() == RAG_GOOGLE_SHEET_TAB.lower()),
+            None,
+        )
+        if not sheet_name:
+            return []
+
+        raw = pd.read_excel(workbook, sheet_name=sheet_name, header=None, dtype=str)
+        raw = raw.fillna("")
+
+        # Locate the real header row. The worksheet contains title/instruction
+        # rows before the PMF matrix header.
+        header_idx = None
+        for idx in range(min(len(raw), 40)):
+            vals = [str(v).strip().lower() for v in raw.iloc[idx].tolist()]
+            if "global pmf code" in vals and "indicator" in vals:
+                header_idx = idx
+                break
+        if header_idx is None:
+            return []
+
+        desired = [
+            "Global PMF code", "Level", "Indicator", "GAC?", "TEAM",
+            "Team Remarks", "Standard field exists in harmonised tool(s)",
+            "MNHN", "BP", "AWHN", "VAS", "ZINC", "USI", "FF", "NG",
+        ]
+
+        raw_headers = [str(v).strip() for v in raw.iloc[header_idx].tolist()]
+        header_map = {}
+        for pos, header in enumerate(raw_headers):
+            if header:
+                header_map[header.lower()] = pos
+
+        # Map the canonical columns to their exact spreadsheet positions.
+        positions = {}
+        for col in desired:
+            pos = header_map.get(col.lower())
+            if pos is not None:
+                positions[col] = pos
+
+        if "Global PMF code" not in positions or "Indicator" not in positions:
+            return []
+
+        records = []
+        for row_idx in range(header_idx + 1, len(raw)):
+            row = raw.iloc[row_idx]
+            code = str(row.iloc[positions["Global PMF code"]]).strip()
+            indicator = str(row.iloc[positions["Indicator"]]).strip()
+
+            # Skip blank rows and repeated headers.
+            if not code or code.lower() in {"nan", "global pmf code"}:
+                continue
+            if not indicator and not str(row.iloc[positions.get("Level", 0)]).strip():
+                continue
+
+            record = {}
+            for col in desired:
+                pos = positions.get(col)
+                value = "" if pos is None else str(row.iloc[pos]).strip()
+                value = re.sub(r"\s+", " ", value)
+                record[col] = value
+            records.append(record)
+
+        try:
+            st.session_state[cache_key] = records
+        except Exception:
+            pass
+        return records
+    except Exception:
+        return []
+
+
+def _chat_pmf_rollup_table(question, rag):
+    """Render complete Global_Rollup_Matrix rows as a real Markdown table.
+
+    PMF answers use the structured worksheet directly so a wide row is never
+    truncated by the semantic RAG chunk size.
+    """
+    columns = [
+        "Global PMF code", "Level", "Indicator", "GAC?", "TEAM", "Team Remarks",
+        "Standard field exists in harmonised tool(s)", "MNHN", "BP", "AWHN", "VAS",
+        "ZINC", "USI", "FF", "NG",
+    ]
+
+    # First choice: complete structured worksheet rows.
+    records = _rag_google_sheet_pmf_rows(RAG_GOOGLE_SHEET_URL)
+
+    # Fallback for environments where the Google export cannot be reached.
+    if not records:
+        chunks = (rag or {}).get("chunks", [])
+        seen = set()
+        for chunk in chunks:
+            source = str(chunk.get("source", ""))
+            text = str(chunk.get("text", ""))
+            if RAG_GOOGLE_SHEET_TAB.lower() not in (source + " " + text).lower():
+                continue
+            for line in text.splitlines():
+                line = line.strip()
+                if not line.startswith("PMF_ROW |"):
+                    continue
+                fields = {}
+                for piece in line.split(" | ")[1:]:
+                    if ":" not in piece:
+                        continue
+                    key, value = piece.split(":", 1)
+                    fields[key.strip()] = value.strip()
+                code = fields.get("Global PMF code", "").strip()
+                if code and code.lower() not in seen:
+                    seen.add(code.lower())
+                    records.append(fields)
+
+    if not records:
+        return ""
+
+    q = str(question or "").strip().lower()
+
+    # Match an explicitly requested PMF code.
+    code_matches = re.findall(
+        r"\b\d{3,4}(?:\s*\([ivx]+\))?(?:\s*\.\s*\d{1,3})?(?:\s+\d{1,2})?\b",
+        q,
+        re.I,
+    )
+    requested_codes = {
+        re.sub(r"\s+", "", x).lower().rstrip(".") for x in code_matches
+    }
+
+    if requested_codes:
+        filtered = []
+        for rec in records:
+            norm = re.sub(
+                r"\s+", "", str(rec.get("Global PMF code", ""))
+            ).lower().rstrip(".")
+            if any(req in norm or norm in req for req in requested_codes):
+                filtered.append(rec)
+        if filtered:
+            records = filtered
+
+    # If the user supplied an indicator name rather than a code, match against
+    # the complete Indicator column, not a truncated RAG chunk.
+    if not requested_codes:
+        q_clean = re.sub(r"[^a-z0-9% ]+", " ", q)
+        q_words = {
+            w for w in q_clean.split()
+            if len(w) >= 4 and w not in {
+                "what", "which", "show", "source", "from", "pmf",
+                "indicator", "indicators", "please", "using", "global",
+                "rollup", "readiness", "matrix", "this", "that",
+            }
+        }
+        if q_words:
+            scored = []
+            for rec in records:
+                indicator = str(rec.get("Indicator", "")).lower()
+                words = set(re.findall(r"[a-z0-9%]+", indicator))
+                overlap = len(q_words & words)
+                if overlap:
+                    scored.append((overlap, len(indicator), rec))
+            if scored:
+                scored.sort(key=lambda x: (x[0], -x[1]), reverse=True)
+                # For a natural-language request naming one indicator, return
+                # the strongest matching row. For a broad list request keep all.
+                if not any(t in q for t in ("list", "all", "indicators", "show pmf")):
+                    records = [scored[0][2]]
+
+    lines = [
+        "### ISG2 Global PMF — Global Rollup Matrix",
+        "",
+        "| " + " | ".join(columns) + " |",
+        "|" + "|".join(["---"] * len(columns)) + "|",
+    ]
+
+    for rec in records:
+        values = []
+        for col in columns:
+            value = str(rec.get(col, "")).strip()
+            value = value.replace("|", "\\|").replace("\n", " ")
+            values.append(value)
+        lines.append("| " + " | ".join(values) + " |")
+
+    lines.extend([
+        "",
+        "**Source:** DANIP Internal Google Sheet — `Global_Rollup_Matrix`.",
+        "**Source role:** Primary PMF indicator source.",
+    ])
+    return "\n".join(lines)
+
+def _chat_compendium_table(question, rag):
+    """Render retrieved ISG compendium material as a readable Markdown table."""
+    # Keep the exact source-defined Impact Result 1000 table.
+    structured = _chat_result_area_table(question, rag)
+    if structured:
+        return structured
+
+    rows = _chat_extract_compendium_indicator_rows(rag)
+    if not rows:
+        return ""
+
+    q = str(question or "").lower()
+    # If a specific result code is requested, keep matching rows plus its parent.
+    result_codes = re.findall(r"\b(\d{4})\b", q)
+    if result_codes:
+        wanted = set(result_codes)
+        filtered = []
+        for code, text in rows:
+            base = re.match(r"(\d{4})", code)
+            if base and base.group(1) in wanted:
+                filtered.append((code, text))
+        if filtered:
+            rows = filtered
+
+    lines = [
+        "### ISG Indicator Compendium — Structured View",
+        "",
+        "| Indicator code | Indicator / compendium content |",
+        "|---|---|",
+    ]
+    for code, text in rows:
+        text = text.replace("|", "\\|")
+        lines.append(f"| {code} | {text} |")
+    lines.extend([
+        "",
+        f"*Source: {RAG_SOURCE_NAME}. The table contains only content retrieved from the compendium; no missing details have been inferred.*",
+    ])
+    return "\n".join(lines)
+
+
+
+def _chat_parameter_table_prompt(question, context):
+    """Return a compact two-column Parameter/Description answer matching the
+    ISG Indicator Compendium layout supplied by the user."""
+    return f"""
+You are the ISG Indicator Compendium assistant.
+Use ONLY the retrieved compendium text below.
+
+OUTPUT FORMAT IS MANDATORY:
+Return ONLY a Markdown table with exactly two columns:
+| Parameter | Description |
+|---|---|
+| Intervention | ... |
+| Indicator name | ... |
+| PMF expected results statement | ... |
+| Indicator code | ... |
+| Rolls into | ... |
+| Akin indicators | ... |
+| Definition | ... |
+| Purpose/ objective | ... |
+| Relevance | ... |
+| Measurement Unit | ... |
+| Data Source | ... |
+| Data Collection Frequency | ... |
+| Baseline | ... |
+| Target | ... |
+| Calculation Method | ... |
+| Interpretation | ... |
+| Use/Application | ... |
+| Data quality considerations | ... |
+| Reporting and Dissemination | ... |
+| References | ... |
+| Version | ... |
+| Date of update | ... |
+
+RULES:
+- Left column MUST contain the parameter/dimension name.
+- Right column MUST contain the answer from the compendium.
+- Do NOT output [RAG 1], [RAG 2], source chunks, citations, or raw retrieval text.
+- Do NOT add a prose introduction or conclusion.
+- Include only parameters supported by the retrieved source.
+- Preserve the compendium terminology; do not invent or correct content.
+- Keep each Description concise while preserving the key source meaning.
+- If the user asks for a short/summary answer, include only the most relevant parameters.
+- If multiple indicators are requested, create a separate two-column table for each indicator and put the indicator name as a Markdown heading above each table.
+- If the user asks for an indicator list/result-area list rather than details, use the indicator-list table instead.
+
+Question:
+{question}
+
+Retrieved compendium text:
+{context}
+"""
+
+
+def _chat_is_indicator_detail_question(question):
+    q = str(question or '').lower()
+    detail_terms = (
+        'definition', 'define', 'details', 'detail', 'parameters',
+        'indicator information', 'indicator profile', 'how is it calculated',
+        'calculation method', 'numerator', 'denominator', 'purpose',
+        'relevance', 'data source', 'measurement unit', 'target',
+        'interpretation', 'use/application', 'data quality', 'indicator code',
+        'explain this indicator', 'about this indicator', 'what is this indicator',
+    )
+    # A pasted indicator name/code should also trigger detail mode.
+    indicator_code = re.search(r'\b\d{4}[a-z]?(?:\([ivx]+\))?(?:\.\d+)?\b', q, re.I)
+    indicator_terms = ('indicator', 'indicator name', 'code', 'result area', 'result')
+    return bool(indicator_code or any(x in q for x in detail_terms)) and (
+        any(x in q for x in indicator_terms) or bool(indicator_code)
+    )
+
+
+def _chat_parameter_table_answer(question, rag):
+    """Format retrieved compendium evidence as the exact two-column layout.
+    The model is used only to map source fields into the table; the UI renders
+    the returned Markdown directly, so retrieval chunks never appear to users.
+    """
+    context = _rag_context_text(rag)
+    if not context:
+        return ''
+    if client is None:
+        return _chat_parameter_table_fallback(context)
+    prompt = _chat_parameter_table_prompt(question, context)
+    try:
+        response = client.responses.create(model=OPENAI_MODEL, input=prompt)
+        answer = (response.output_text or '').strip()
+        # Require an actual two-column Markdown table and strip accidental prose.
+        if '| Parameter | Description |' in answer and '|---|' in answer:
+            lines = answer.splitlines()
+            table_lines = []
+            started = False
+            for line in lines:
+                if line.strip().startswith('| Parameter | Description |'):
+                    started = True
+                if started and line.strip().startswith('|'):
+                    table_lines.append(line.strip())
+            if len(table_lines) >= 2:
+                return '\n'.join(table_lines)
+    except Exception:
+        pass
+    return _chat_parameter_table_fallback(context)
+
+
+def _chat_parameter_table_from_context(question, context):
+    """Render one indicator in the original ISG Parameter / Description format."""
+    context = str(context or "").strip()
+    if not context:
+        return ""
+
+    labels = [
+        "Intervention", "Indicator name", "PMF expected results statement",
+        "Indicator code", "Rolls into", "Akin indicators", "Interventions",
+        "Definition", "Recommended course public sector",
+        "Recommended course private sector", "Purpose/ objective",
+        "Purpose/objective", "Relevance", "Measurement Unit", "Data Source",
+        "Supply chain method", "Data Collection Frequency", "Baseline",
+        "Target", "Routine data/HMIS", "Calculation Method", "Interpretation",
+        "Use/Application", "Data quality considerations",
+        "Reporting and Dissemination", "References", "Version", "Date of update",
+    ]
+
+    clean = re.sub(r"\[RAG\s+\d+\s*\|[^\]]+\]\s*", "\n", context)
+    clean = clean.replace("\r\n", "\n").replace("\r", "\n")
+    clean = re.sub(r"[ \t]+", " ", clean)
+    clean = re.sub(r"\n{3,}", "\n\n", clean).strip()
+
+    code_match = re.search(
+        r"\b(\d{3,4}\s*\(\s*[ivxIVX]+\s*\)\s*\.?\s*\d{1,2})\b",
+        str(question or ""),
+    )
+    if not code_match:
+        code_match = re.search(r"\b(\d{3,4}\s*\.\s*\d{1,2})\b", str(question or ""))
+
+    def norm_code(value):
+        return re.sub(r"[\s.]", "", str(value or "").lower())
+
+    requested_code = norm_code(code_match.group(1)) if code_match else ""
+
+    # Select the most relevant retrieved passage so adjacent indicators
+    # (e.g. .01, .03, .04) are not merged into the requested indicator.
+    passages = [p.strip() for p in re.split(r"\n\s*\n", clean) if p.strip()]
+    selected = clean
+    if requested_code:
+        candidates = []
+        for p in passages:
+            if requested_code not in norm_code(p):
+                continue
+            score = 0
+            if re.search(r"Parameter\s+Description", p, re.I): score += 6
+            if re.search(r"\bIndicator name\b", p, re.I): score += 3
+            if re.search(r"\bDefinition\b", p, re.I): score += 3
+            candidates.append((score, len(p), p))
+        if candidates:
+            candidates.sort(key=lambda x: (x[0], x[1]), reverse=True)
+            selected = candidates[0][2]
+
+    pd_pos = re.search(r"Parameter\s+Description", selected, re.I)
+    if pd_pos:
+        selected = selected[pd_pos.end():].strip()
+
+    # Detect labels even when the Word table was flattened onto one line.
+    label_pattern = "|".join(
+        re.escape(x) for x in sorted(set(labels), key=len, reverse=True)
+    )
+    marker = re.compile(
+        rf"(?<![A-Za-z])(?P<label>{label_pattern})(?=(?:\s*:?\s+|$))",
+        re.I,
+    )
+    matches = list(marker.finditer(selected))
+    if not matches:
+        return ""
+
+    data = {}
+    for i, m in enumerate(matches):
+        raw_label = m.group("label")
+        canonical = next(
+            x for x in labels if x.lower() == raw_label.lower()
+        )
+        value_start = m.end()
+        if value_start < len(selected) and selected[value_start] == ":":
+            value_start += 1
+        value_end = matches[i + 1].start() if i + 1 < len(matches) else len(selected)
+        value = re.sub(r"\s+", " ", selected[value_start:value_end]).strip(" :;-")
+        if not value:
+            continue
+        if canonical == "Purpose/objective":
+            canonical = "Purpose/ objective"
+        if canonical not in data:
+            data[canonical] = value
+
+    # The code may be represented with spaces in the compendium.
+    if requested_code:
+        if not any(requested_code in norm_code(v) for v in data.values()):
+            # Accept a strong indicator-name match if the flattened source
+            # separated the code from its Indicator name field.
+            q = str(question or "").lower()
+            q_words = set(re.findall(r"[a-z]{4,}", q))
+            i_words = set(re.findall(r"[a-z]{4,}", data.get("Indicator name", "").lower()))
+            if len(q_words & i_words) < 4:
+                return ""
+
+    ordered = [x for x in labels if x in data and data[x]]
+    if not ordered:
+        return ""
+
+    out = ["| Parameter | Description |", "|---|---|"]
+    for label in ordered:
+        out.append(f"| {label} | {data[label].replace('|', r'\\|')} |")
+    return "\n".join(out)
+
+
+def _chat_parameter_table_answer(question, rag):
+    """Original ISG compendium breakdown: one parameter per row."""
+    context = _rag_context_text(rag)
+    if not context:
+        return ""
+    return _chat_parameter_table_from_context(question, context)
+
+
+def _chat_add_danip_interpretation(result, question, current_df, chart_plan=None, quality_issues=None):
+    """Add ONLY the DANIP interpretation below the original compendium table."""
+    if not result or not isinstance(current_df, pd.DataFrame) or current_df.empty:
+        return result
+    if not _chat_is_indicator_detail_question(question):
+        return result
+
+    indicators = _chat_indicator_candidates(question, current_df, chart_plan=chart_plan, limit=3)
+    if not indicators and isinstance(chart_plan, dict):
+        indicators = [c for c in (chart_plan.get("y_columns") or []) if c in current_df.columns][:3]
+    if not indicators:
+        return result
+
+    try:
+        interpretation = _chat_local_mne_answer(
+            question=question,
+            df=current_df,
+            indicators=indicators,
+            chart_plan=chart_plan,
+            quality_issues=quality_issues,
+        )
+    except Exception:
+        interpretation = ""
+
+    if not interpretation:
+        return result
+
+    # Keep the compendium exactly as returned; append only a separate DANIP section.
+    result["text"] = (
+        result.get("text", "").rstrip()
+        + "\n\n---\n\n## DANIP Interpretation\n\n"
+        + str(interpretation).strip()
+    )
+    result["danip_interpretation"] = True
+    return result
+
+
+def _chat_rag_knowledge_answer(question, rag):
+    # Never answer an explicitly concept-specific Internal KM request from a
+    # merely related passage. This prevents, for example, ANC attendance (1300c.03)
+    # from being presented as the DANIP counterpart to an MMS indicator.
+    if _chat_requested_concepts(question) and not (rag or {}).get("chunks"):
+        return {
+            "status": "INTERNAL_KM_NO_VALID_MATCH",
+            "source": "ISG_INDICATOR_COMPENDIUM",
+            "text": (
+                "| Result | Internal KM finding |\n|---|---|\n"
+                "| Match status | No validated Compendium indicator matched the requested concept. |\n"
+                "| Action | The semantically related indicator was rejected rather than presented as a match. |"
+            ),
+        }
+
+    # PMF / roll-up / readiness questions use the actual Global_Rollup_Matrix
+    # column structure rather than exposing raw retrieval chunks.
+    qlow = str(question or "").lower()
+    if any(term in qlow for term in ("pmf", "rollup", "roll-up", "readiness", "global_rollup_matrix")):
+        pmf_table = _chat_pmf_rollup_table(question, rag)
+        if pmf_table:
+            return {
+                "status": "RAG_PMF_ROLLUP_TABLE",
+                "source": "DANIP_INTERNAL_GOOGLE_SHEET",
+                "text": pmf_table,
+            }
+
+    # Indicator-detail questions use the same Parameter / Description structure
+    # used by the ISG Indicator Compendium.
+    if _chat_is_indicator_detail_question(question):
+        parameter_table = _chat_parameter_table_answer(question, rag)
+        if parameter_table:
+            return {
+                "status": "RAG_PARAMETER_TABLE",
+                "source": "ISG_INDICATOR_COMPENDIUM",
+                "text": parameter_table,
+            }
+
+    # For list/show/table requests, use deterministic source-grounded tables.
+    # This prevents the LLM from turning the compendium back into prose.
+    if _chat_compendium_table_request(question):
+        table = _chat_compendium_table(question, rag)
+        if table:
+            return {
+                "status": "RAG_TABLE",
+                "source": "ISG_INDICATOR_COMPENDIUM",
+                "text": table,
+            }
+
+    # Prefer a deterministic structured table for result-area questions.
+    structured = _chat_result_area_table(question, rag)
+    if structured:
+        return {
+            "status": "RAG_STRUCTURED",
+            "source": "ISG_INDICATOR_COMPENDIUM",
+            "text": structured,
+        }
+
+    context=_rag_context_text(rag)
+    if not context:
+        return {
+            "status":"RAG_NOT_FOUND","source":"ISG_INDICATOR_COMPENDIUM",
+            "text":f"I could not find supporting content in the **{RAG_SOURCE_NAME}** knowledge base for this question. I will not invent an official definition or formula."
+        }
+    if client is None:
+        return {
+            "status":"RAG_RETRIEVED","source":"ISG_INDICATOR_COMPENDIUM",
+            "text":f"### Indicator / M&E knowledge\n\nBased on the **{RAG_SOURCE_NAME}**:\n\n{context}"
+        }
+    prompt=f"""
+You are the authoritative ISG Indicator Compendium assistant.
+Answer ONLY from the retrieved compendium passages below.
+Do not use DHIS2 values, general model knowledge, web knowledge, or invented definitions.
+Preserve official terminology. If the passages do not support a requested detail, say it was not found.
+If the question asks to list, show, summarize, compare, or present multiple compendium items, ALWAYS use a Markdown table with clear column headers.
+If the question asks for an indicator definition/details/profile, ALWAYS use the compendium's Parameter / Description structure, with one parameter per row. If multiple indicators are requested, use a separate Parameter / Description table for each indicator.
+Question: {question}
+Retrieved compendium passages:
+{context}
+"""
+    try:
+        response=client.responses.create(model=OPENAI_MODEL,input=prompt)
+        answer=(response.output_text or "").strip()
+        if answer:
+            return {"status":"SUCCESS","source":"ISG_INDICATOR_COMPENDIUM","text":answer}
+    except Exception:
+        pass
+    return {"status":"RAG_RETRIEVED","source":"ISG_INDICATOR_COMPENDIUM","text":f"### Indicator / M&E knowledge\n\n{context}"}
+
+
+def _chat_external_status_block(external_context, explicit_external_request=False):
+    """Build a visible, deterministic Level-3 external-RAG status block."""
+    if not explicit_external_request:
+        return "", "NOT_REQUESTED"
+
+    ctx = external_context or {}
+    status = str(ctx.get("status", "UNKNOWN")).upper()
+    text = str(ctx.get("text", "") or "").strip()
+    sources = ctx.get("sources", []) or []
+
+    lower = text.lower()
+    if status == "SUCCESS":
+        if "no directly comparable external value found" in lower or "no verified match" in lower:
+            label = "NOT FOUND — NO DIRECTLY COMPARABLE EXTERNAL DATA"
+        elif "related but not directly comparable" in lower or "not directly comparable" in lower:
+            label = "FOUND — RELATED BUT NOT DIRECTLY COMPARABLE"
+        elif "directly comparable" in lower:
+            label = "FOUND — DIRECTLY COMPARABLE"
+        else:
+            label = "FOUND — EXTERNAL EVIDENCE RETURNED"
+    elif status == "DISABLED":
+        label = "NOT AVAILABLE — EXTERNAL SEARCH DISABLED"
+    elif status == "ERROR":
+        label = "SEARCH ERROR — EXTERNAL SOURCE COULD NOT BE QUERIED"
+    else:
+        label = "NOT FOUND — NO VERIFIED EXTERNAL EVIDENCE"
+
+    lines = [
+        "## 🌐 External RAG Analysis",
+        "",
+        f"**Status: {label}**",
+        "",
+    ]
+
+    if text:
+        lines.append(text)
+        lines.append("")
+    else:
+        if "NOT FOUND" in label:
+            lines.append("No directly comparable external value was verified from the searched authoritative sources.")
+        elif "SEARCH ERROR" in label:
+            lines.append("The external search could not be completed. DANIP results were not replaced or altered.")
+        else:
+            lines.append("No external evidence was returned.")
+        lines.append("")
+
+    if sources:
+        lines.append("**External sources:**")
+        for url in sources[:12]:
+            lines.append(f"- {url}")
+        lines.append("")
+
+    lines.append("External evidence is contextual only and never replaces DANIP/DHIS2 observed values.")
+    return "\n".join(lines), label
+
 
 def ask_analysis_chatbot(
     user_question,
@@ -9126,7 +11576,7 @@ def render_analysis_chatbot(
     quality_matrix=None,
     quality_summary=None,
 ):
-    """Render the DANIP-only analysis chatbot; current data is required."""
+    """Render the chatbot independently of DHIS2/API availability."""
     if isinstance(df,pd.DataFrame) and not df.empty:
         st.session_state["nexus_chat_df"]=df
         st.session_state["nexus_chat_source_url"]=str(source_url or "")
@@ -9142,28 +11592,127 @@ def render_analysis_chatbot(
     if "analysis_chat_messages" not in st.session_state:
         st.session_state["analysis_chat_messages"]=[]
 
+    # Chat-only controls: the clear control is deliberately placed directly
+    # beside the chat input so it is always visible. It clears ONLY the chatbot
+    # conversation/state and never clears the loaded DHIS2/API data, dashboard
+    # analysis, M&E Hub data, or application source URL.
+    if "analysis_chat_messages" not in st.session_state:
+        st.session_state["analysis_chat_messages"] = []
+
+    clear_chat_clicked = False
+
     st.markdown("""
     <div class="danip-analysis-chat">
       <div class="chat-kicker">NEXUS AI · INDEPENDENT M&E ASSISTANT</div>
-      <div class="chat-title">💬 Ask About DANIP Data</div>
+      <div class="chat-title">💬 Ask an Indicator or M&E Question</div>
       <div class="chat-help">
-        This assistant interprets the loaded <b>DANIP/DHIS2 data only</b>, including observed results, trends, reporting completeness, consistency and data-quality issues. Load data before asking for interpretation.
+        Indicator definitions, ISG Indicator Compendium questions and general M&E questions work
+        <b>without a DHIS2/API link</b>. Current values, trends and performance use the loaded DHIS2 data.
       </div>
     </div>
     """,unsafe_allow_html=True)
 
     if chat_source:
-        st.markdown(f'<span class="danip-chat-source">🔗 Current data source: {html.escape(chat_source)}</span>',unsafe_allow_html=True)
+        st.markdown(
+            f'<span class="danip-chat-source">🔗 Current data source: {html.escape(chat_source)} · 📚 Internal RAG: ISG Indicator Compendium + DANIP Internal Google Sheet</span>',
+            unsafe_allow_html=True,
+        )
     else:
-        st.markdown('<span class="danip-chat-source">ℹ️ DANIP interpretation only · No DANIP/DHIS2 data loaded</span>',unsafe_allow_html=True)
+        st.markdown(
+            '<span class="danip-chat-source">📚 Internal RAG: ISG Indicator Compendium + DANIP Internal Google Sheet · No DHIS2 data loaded</span>',
+            unsafe_allow_html=True,
+        )
 
     for message in st.session_state["analysis_chat_messages"]:
         with st.chat_message("user" if message.get("role")=="user" else "assistant"):
-            # Render the DANIP analysis as native Streamlit Markdown so tables
-            # and structured evidence remain readable.
+            # Render assistant content as native Streamlit Markdown.  This is
+            # important because the ISG compendium responses intentionally use
+            # Markdown tables (Parameter | Description). Wrapping the answer in
+            # an HTML div would display the table syntax as plain text.
             st.markdown(message.get("content", ""))
 
-    question=st.chat_input("Ask about the loaded DANIP data: trends, completeness, discrepancies, or programme implications…",key="analysis_chat_input")
+    # Keep the clear control visually attached to the SAME chat composer.
+    # st.chat_input is rendered in Streamlit's fixed bottom layer, so putting
+    # the button in a normal second column makes it jump to the far right.
+    # We keep the widget in the same main content area and pull the clear
+    # control back to the right edge of the chat composer with responsive CSS.
+    question=st.chat_input(
+        "Ask: What is VAS coverage? What is Impact Result 1000? What is the numerator?",
+        key="analysis_chat_input",
+    )
+
+    def _clear_analysis_chat():
+        # IMPORTANT: clear ONLY chatbot state. Do not rerun from inside the
+        # chatbot. The button click itself triggers Streamlit's normal rerun,
+        # allowing the dashboard to continue and reuse its cached dataset.
+        st.session_state["analysis_chat_messages"] = []
+        st.session_state["analysis_chat_last_result"] = None
+        st.session_state["analysis_chat_external_status"] = None
+        st.session_state["analysis_chat_new_question_mode"] = True
+
+    st.button(
+        "🧹 Clear Chat",
+        key="analysis_chat_clear_icon",
+        help="Clear only chatbot conversation. DHIS2/API data and dashboard analysis will remain unchanged.",
+        on_click=_clear_analysis_chat,
+    )
+
+    st.markdown("""
+    <style>
+      /* Move ONLY this clear button into the chat-composer zone. */
+      div.st-key-analysis_chat_clear_icon {
+        position: fixed !important;
+        z-index: 1002 !important;
+        bottom: 17px !important;
+        left: calc(50% + 10px) !important;
+        width: 38px !important;
+        height: 38px !important;
+        margin: 0 !important;
+        padding: 0 !important;
+      }
+
+      div.st-key-analysis_chat_clear_icon button {
+        width: 110px !important;
+        height: 38px !important;
+        min-width: 110px !important;
+        min-height: 38px !important;
+        padding: 0 10px !important;
+        border-radius: 9px !important;
+        border: 1px solid #cbd5e1 !important;
+        background: #ffffff !important;
+        color: #334155 !important;
+        box-shadow: 0 2px 8px rgba(15,23,42,.08) !important;
+      }
+
+      div.st-key-analysis_chat_clear_icon button:hover {
+        background: #f8fafc !important;
+        border-color: #94a3b8 !important;
+      }
+
+      @media (max-width: 1000px) {
+        div.st-key-analysis_chat_clear_icon {
+          left: auto !important;
+          right: 58px !important;
+          bottom: 16px !important;
+        }
+      }
+
+      @media (max-width: 640px) {
+        div.st-key-analysis_chat_clear_icon {
+          right: 52px !important;
+          bottom: 15px !important;
+        }
+        div.st-key-analysis_chat_clear_icon button {
+          width: 96px !important;
+          height: 34px !important;
+          min-width: 96px !important;
+          min-height: 34px !important;
+          border-radius: 8px !important;
+        }
+      }
+    </style>
+    """, unsafe_allow_html=True)
+
     if not question:
         return
     question=question.strip()
@@ -9173,19 +11722,27 @@ def render_analysis_chatbot(
     with st.chat_message("user"):
         st.markdown(question)
     with st.chat_message("assistant"):
-        with st.spinner("📊 Analysing current DANIP/DHIS2 data..."):
+        with st.spinner("🧠 Checking the indicator compendium and M&E evidence..."):
             try:
                 result=ask_analysis_chatbot(user_question=question,df=df,source_url=chat_source,chart_plan=chart_plan,quality_issues=quality_issues,quality_matrix=quality_matrix,quality_summary=quality_summary)
             except Exception as exc:
                 result={"status":"ERROR","source":"CHAT","text":f"The chatbot encountered an error: {str(exc)[-1200:]}"}
         answer=(result or {}).get("text","")
         st.markdown(answer)
-        if (result or {}).get("source") == "DANIP_DHIS2":
-            st.caption("📊 Interpretation grounded in the loaded DANIP/DHIS2 data only")
-        elif (result or {}).get("source") == "NO_DANIP_DATA":
-            st.caption("ℹ️ Load DANIP/DHIS2 data to enable data interpretation.")
+        if (result or {}).get("source")=="ISG_INDICATOR_COMPENDIUM":
+            st.caption("📚 Source: ISG Indicator Compendium (RAG)")
+        elif (result or {}).get("source") in ("LOCAL_M_AND_E","OPENAI_M_AND_E"):
+            base_caption = "📊 Current numerical evidence: DHIS2/API when loaded · 📚 Indicator knowledge: ISG Indicator Compendium when relevant"
+            external_label = (result or {}).get("external_label", "")
+            if external_label:
+                base_caption += f" · 🌐 External RAG: {external_label}"
+            st.caption(base_caption)
+        elif (result or {}).get("source")=="NO_DHIS2_DATA":
+            st.caption("ℹ️ No DHIS2/API data is loaded; this response is limited to knowledge/M&E content.")
 
     st.session_state["analysis_chat_messages"].append({"role":"assistant","content":answer})
+    st.session_state["analysis_chat_last_result"] = result
+    st.session_state["analysis_chat_new_question_mode"] = False
 
 
 # ============================================================
@@ -11590,65 +14147,430 @@ def render_existing_danip_ai_app():
 
 
     # ============================================================
-    # USER INPUT
+    # DHIS2 AUTOMATIC CONNECTION
     # ============================================================
+    # The OAuth gateway has already authenticated the user.  The dashboard
+    # now uses that same per-user OAuth token to pull DHIS2 Analytics data.
+    # A manual API URL remains available only as an optional fallback.
 
     st.markdown(
         """
         <div class="section-card">
-            <div class="section-kicker">Step 1</div>
-            <div class="section-title">📡 Connect your data</div>
+            <div class="section-kicker">STEP 1</div>
+            <div class="section-title">📡 DHIS2 Data Connection</div>
             <div class="section-help">
-                Paste a DHIS2 Analytics, CSV, XLS, XLSX or JSON API URL.
-                Every row returned by the source is loaded and processed.
+                NEXUS automatically connects to the authenticated DHIS2 account,
+                discovers available indicators, and retrieves the selected reporting period.
+                No API URL is required.
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    user_url = st.text_area(
-        "Data URL",
-        placeholder="Paste your data/API URL here...",
-        height=90,
-        label_visibility="collapsed",
-        key="data_url_input",
+    auto_dhis2_col, registry_col, refresh_col = st.columns([6, 2, 1.5])
+
+    with auto_dhis2_col:
+        st.success(
+            "🔐 Authenticated DHIS2 session detected — DANIP Project Registry retrieval is ready."
+        )
+
+    with registry_col:
+        registry_reload = st.button(
+            "📋 Reload Projects",
+            use_container_width=True,
+            key="danip_registry_reload_button",
+        )
+
+    with refresh_col:
+        pull_now = st.button(
+            "🔄 Pull Selected",
+            type="primary",
+            use_container_width=True,
+            key="auto_dhis2_pull_button",
+        )
+
+    st.caption(
+        "Select Project / Program → Country → Type → API. NEXUS filters each list from the "
+        "live registry, then retrieves only the API matching all four selections."
     )
+
+    # ------------------------------------------------------------
+    # READ PROJECT REGISTRY
+    # ------------------------------------------------------------
+    # The registry is the configuration source. A new project/API row added
+    # to the workbook becomes available after Reload Projects without changing
+    # Python code.
+    if registry_reload or "danip_project_registry" not in st.session_state:
+        try:
+            registry_now = load_danip_project_registry()
+            st.session_state["danip_project_registry"] = registry_now
+            st.session_state["danip_project_registry_error"] = ""
+            st.session_state["danip_project_registry_last_loaded"] = datetime.now().strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+        except Exception as exc:
+            st.session_state["danip_project_registry_error"] = str(exc)
+
+    registry_now = st.session_state.get("danip_project_registry")
+    registry_error = st.session_state.get("danip_project_registry_error", "")
+
+    selected_project = ""
+    selected_api = ""
+    selected_registry_row = None
+
+    if isinstance(registry_now, pd.DataFrame) and not registry_now.empty:
+        active_now = registry_now[registry_now["_active"]].copy()
+
+        if active_now.empty:
+            st.warning("No active Project/Program records were found in the DANIP registry.")
+        else:
+            # --------------------------------------------------------
+            # CASCADING REGISTRY FILTERS
+            # Project / Program -> Country -> Type -> API
+            # --------------------------------------------------------
+            project_options = sorted(
+                [
+                    str(value).strip()
+                    for value in active_now["Project/Program Name"].dropna().unique()
+                    if str(value).strip()
+                ],
+                key=lambda value: value.lower(),
+            )
+
+            # Streamlit cascading selectboxes need independent widget keys.
+            # Using one permanent key for Country/Type/API can leave a previous
+            # selection in widget state after the parent selection changes.
+            # The keys below are derived from the current parent selection so
+            # every downstream dropdown is rebuilt cleanly when its parent changes.
+            selected_project = st.selectbox(
+                "📁 1. Project / Program",
+                project_options,
+                index=0 if project_options else None,
+                key="danip_project_selector",
+                help="Choose the project/program first. Country, Type and API are then filtered from this selection.",
+            )
+            st.session_state["danip_selected_project"] = selected_project
+
+            # --------------------------------------------------------
+            # COUNTRY FILTER
+            # A registry row may contain multiple countries such as
+            # 'Ethiopia,Rwanda'. Treat each country as an individual
+            # selectable value while retaining the original registry
+            # value in the loaded dataset metadata.
+            # --------------------------------------------------------
+            project_rows = active_now[
+                active_now["Project/Program Name"].astype(str).str.strip()
+                == str(selected_project).strip()
+            ].copy()
+
+            country_values = []
+            for value in project_rows.get("Country", pd.Series(dtype=str)).fillna("").astype(str):
+                for country in re.split(r"[,;|]", value):
+                    country = country.strip()
+                    if country and country not in country_values:
+                        country_values.append(country)
+            country_values = sorted(country_values, key=lambda value: value.lower())
+            if not country_values:
+                country_values = ["All locations"]
+
+            country_widget_key = "danip_country_selector__" + re.sub(
+                r"[^A-Za-z0-9_-]+", "_", str(selected_project)
+            )
+            selected_country = st.selectbox(
+                "🌍 2. Country",
+                country_values,
+                index=0,
+                key=country_widget_key,
+                help="Choose the country. Only registry APIs covering this country are shown.",
+            )
+            st.session_state["danip_selected_country"] = selected_country
+
+            # Keep rows whose country field contains the selected country.
+            # 'All locations' means rows without a specific country.
+            if selected_country == "All locations":
+                country_rows = project_rows.copy()
+            else:
+                country_mask = project_rows["Country"].fillna("").astype(str).apply(
+                    lambda value: selected_country.lower() in {
+                        part.strip().lower() for part in re.split(r"[,;|]", value) if part.strip()
+                    }
+                )
+                country_rows = project_rows[country_mask].copy()
+
+            # --------------------------------------------------------
+            # TYPE FILTER
+            # --------------------------------------------------------
+            type_values = sorted(
+                [
+                    str(value).strip()
+                    for value in country_rows.get("Type", pd.Series(dtype=str)).dropna().unique()
+                    if str(value).strip()
+                ],
+                key=lambda value: value.lower(),
+            )
+            if not type_values:
+                type_values = ["All types"]
+
+            type_widget_key = "danip_type_selector__" + re.sub(
+                r"[^A-Za-z0-9_-]+", "_", f"{selected_project}__{selected_country}"
+            )
+            selected_type = st.selectbox(
+                "🗂️ 3. Type",
+                type_values,
+                index=0,
+                key=type_widget_key,
+                help="Choose the activity/report type. Only matching APIs are shown.",
+            )
+            st.session_state["danip_selected_type"] = selected_type
+
+            if selected_type == "All types":
+                filtered_rows = country_rows.copy()
+            else:
+                filtered_rows = country_rows[
+                    country_rows["Type"].fillna("").astype(str).str.strip()
+                    == str(selected_type).strip()
+                ].copy()
+
+            filtered_rows = filtered_rows.reset_index(drop=False).rename(
+                columns={"index": "_registry_index"}
+            )
+
+            # --------------------------------------------------------
+            # API DROPDOWN FILTERED BY PROJECT + COUNTRY + TYPE
+            # --------------------------------------------------------
+            api_options = []
+            api_lookup = {}
+            for _, api_row in filtered_rows.iterrows():
+                api_value = str(api_row.get("API URL", "")).strip()
+                if not api_value:
+                    continue
+                source_label = str(api_row.get("Data Source", "DANIP")).strip() or "DANIP"
+                type_label = str(api_row.get("Type", "")).strip()
+                api_number = len(api_options) + 1
+                label_parts = [f"API {api_number}"]
+                if type_label:
+                    label_parts.append(type_label)
+                label_parts.append(source_label)
+                label = " — ".join(label_parts)
+                api_options.append(label)
+                api_lookup[label] = (api_value, api_row)
+
+            if api_options:
+                api_widget_key = "danip_api_selector__" + re.sub(
+                    r"[^A-Za-z0-9_-]+", "_", f"{selected_project}__{selected_country}__{selected_type}"
+                )
+                selected_api_label = st.selectbox(
+                    "🔗 4. API",
+                    api_options,
+                    index=0,
+                    key=api_widget_key,
+                    help="Only APIs matching the selected Project/Program, Country and Type are shown.",
+                )
+                selected_api, selected_registry_row = api_lookup[selected_api_label]
+
+                # Keep the currently selected API available to the rest of the
+                # application without using the same widget key across cascades.
+                st.session_state["danip_selected_api_label"] = selected_api_label
+
+                # ----------------------------------------------------
+                # AUTO-GENERATED API METADATA
+                # ----------------------------------------------------
+                meta_col1, meta_col2, meta_col3, meta_col4 = st.columns(4)
+                with meta_col1:
+                    st.metric(
+                        "Project / Program",
+                        str(selected_registry_row.get("Project/Program Name", "")),
+                    )
+                with meta_col2:
+                    st.metric(
+                        "Country",
+                        str(selected_registry_row.get("Country", "")) or "Not specified",
+                    )
+                with meta_col3:
+                    st.metric(
+                        "Data Source",
+                        str(selected_registry_row.get("Data Source", "DANIP")) or "DANIP",
+                    )
+                with meta_col4:
+                    st.metric(
+                        "Type",
+                        str(selected_registry_row.get("Type", "")) or "Not specified",
+                    )
+
+                with st.expander("🔎 Selected API details", expanded=False):
+                    st.code(selected_api, language="text")
+            else:
+                st.warning(
+                    f"No active API URL is registered for **{selected_project}**. "
+                    "Add an API row to the registry and click Reload Projects."
+                )
+
+            st.success(
+                f"📋 Project Registry loaded: {len(active_now):,} active project/program(s) "
+                f"across {len(registry_now):,} configured row(s)."
+            )
+
+            # Show the registry in a compact form so users can verify that a
+            # newly added project/API is visible to NEXUS.
+            display_columns = [
+                column for column in [
+                    "Project/Program Name", "Country", "Data Source", "Type", "Active"
+                ] if column in registry_now.columns
+            ]
+            if display_columns:
+                with st.expander("📋 Project/API Registry", expanded=False):
+                    st.dataframe(
+                        registry_now[display_columns],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+            if st.session_state.get("danip_project_registry_last_loaded"):
+                st.caption(
+                    "Registry last read: "
+                    + str(st.session_state["danip_project_registry_last_loaded"])
+                )
+
+    elif registry_error:
+        st.warning(f"Project Registry is not currently available: {registry_error}")
+
+    # Optional manual endpoint. It is deliberately secondary to the
+    # authenticated DANIP Project Registry workflow.
+    with st.expander("Advanced: use a specific DHIS2 API URL", expanded=False):
+        manual_api_url = st.text_area(
+            "DHIS2 API URL",
+            placeholder="https://dhis2.nutritionintl.org/api/analytics?...",
+            height=80,
+            key="data_url_input",
+        ).strip()
+
+    # The selected API is the normal source. Manual URL is used only when the
+    # user explicitly enters one in the Advanced section.
+    user_url = manual_api_url or selected_api
+
+    # Automatically pull the first registered API once after authentication.
+    # After that, changing the Project or API and clicking Pull Selected loads
+    # the newly selected source.
+    should_auto_pull = (
+        bool(DANIP_ACCESS_TOKEN)
+        and bool(selected_api)
+        and not st.session_state.get("data_loaded", False)
+        and not st.session_state.get("auto_dhis2_attempted", False)
+    )
+
+    if pull_now or should_auto_pull:
+        st.session_state["auto_dhis2_attempted"] = True
+        try:
+            with st.spinner(
+                f"📡 Retrieving {selected_project or 'selected project'} data from DHIS2..."
+            ):
+                retrieval_url = user_url
+                raw_data = get_direct_api_data(retrieval_url)
+                auto_df = normalize_dataframe(raw_data)
+
+                if selected_registry_row is not None and not auto_df.empty:
+                    auto_df = auto_df.copy()
+                    auto_df["DANIP Project/Program"] = str(
+                        selected_registry_row.get("Project/Program Name", selected_project)
+                    ).strip()
+                    auto_df["DANIP Country"] = str(
+                        selected_registry_row.get("Country", "")
+                    ).strip()
+                    auto_df["DANIP Data Source"] = str(
+                        selected_registry_row.get("Data Source", "DANIP")
+                    ).strip() or "DANIP"
+                    auto_df["DANIP Type"] = str(
+                        selected_registry_row.get("Type", "")
+                    ).strip()
+                    auto_df["DANIP API URL"] = retrieval_url
+                    auto_df = normalize_dataframe(auto_df)
+
+            if auto_df.empty:
+                st.warning(
+                    "The selected DANIP API returned no data. Check the selected API, "
+                    "reporting period, organisation-unit access, and DHIS2 permissions."
+                )
+            else:
+                st.session_state["loaded_df"] = auto_df.copy()
+                st.session_state["loaded_source_url"] = retrieval_url
+                st.session_state["last_analyzed_url"] = retrieval_url
+                st.session_state["data_loaded"] = True
+                st.session_state["danip_selected_api_url"] = retrieval_url
+                st.session_state["danip_selected_project_loaded"] = selected_project
+                st.session_state["danip_project_results"] = [{
+                    "project": selected_project,
+                    "country": str(selected_registry_row.get("Country", "")) if selected_registry_row is not None else "",
+                    "status": "Loaded",
+                    "rows": int(len(auto_df)),
+                }]
+                st.session_state["danip_project_registry_errors"] = []
+                st.session_state["auto_dhis2_period"] = "Registry-defined"
+                st.session_state["auto_dhis2_last_success"] = datetime.now().strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+                st.success(
+                    f"✅ {selected_project or 'Selected project'} loaded: "
+                    f"{len(auto_df):,} rows × {len(auto_df.columns):,} columns."
+                )
+                st.rerun()
+
+        except PermissionError as exc:
+            st.error("🔐 DHIS2 authorization failed or expired.")
+            st.code(str(exc))
+        except Exception as exc:
+            st.error("❌ DANIP Project/API retrieval failed.")
+            st.code(str(exc))
+            st.info(
+                "Authentication is working. The selected Project/Program and API are now the "
+                "source of the retrieval. Check the API response/query error above."
+            )
+
+    # Show the current loaded connection when available.
+    if st.session_state.get("data_loaded", False):
+        loaded_source = st.session_state.get("loaded_source_url", "")
+        loaded_df_now = st.session_state.get("loaded_df")
+        if isinstance(loaded_df_now, pd.DataFrame):
+            loaded_project_name = st.session_state.get("danip_selected_project_loaded", "")
+            st.info(
+                f"📊 Current dataset: **{len(loaded_df_now):,} rows × "
+                f"{len(loaded_df_now.columns):,} columns**"
+                + (f" — **{loaded_project_name}**" if loaded_project_name else "")
+            )
 
     st.markdown(
         """
         <div class="section-card auto-analysis-card">
             <div class="section-kicker">AUTOMATIC ANALYSIS</div>
-            <div class="section-title">🤖 NEXUS AI will analyze the complete dataset automatically</div>
+            <div class="section-title">🤖 NEXUS AI will analyze the selected DANIP dataset automatically</div>
             <div class="section-help">
-                NEXUS AI automatically generates the baseline report and data-quality assessment.
-                You can optionally select indicators, dimensions, graph type, analysis type and
-                aggregation below to run a focused user-requested analysis.
+                Once the selected project API is retrieved, NEXUS AI automatically generates the baseline report,
+                data-quality assessment, dashboard, trends and M&amp;E intelligence.
             </div>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    # Automatic mode: entering a data URL is the only trigger required.
-    automatic_analysis = bool(user_url.strip())
+    # Automatic analysis now starts from the authenticated DHIS2 dataset.
+    automatic_analysis = bool(
+        user_url.strip()
+        or st.session_state.get("data_loaded", False)
+    )
 
-
-    if not user_url.strip():
+    if not user_url.strip() and not st.session_state.get("data_loaded", False):
         st.markdown(
             """
             <div class="empty-state">
                 <div style="font-size:2rem;">📡</div>
-                <strong>Ready to analyze your data</strong>
+                <strong>Select a Project/Program and API</strong>
                 <div style="margin-top:.35rem;">
-                    Paste your data URL and NEXUS AI will automatically build the analysis,
-                    data-quality assessment, dashboard and intelligence report.
+                    NEXUS will use the selected registered API to retrieve the data automatically.
                 </div>
             </div>
             """,
             unsafe_allow_html=True,
         )
-
 
     # ============================================================
     # FRESH URL
@@ -14264,13 +17186,14 @@ def render_existing_danip_ai_app():
 
     if automatic_analysis or st.session_state.get("data_loaded", False):
 
-        if not user_url.strip():
-            st.warning(
-                "Please paste a DHIS2 URL."
-            )
-            st.stop()
+        if not user_url.strip() and st.session_state.get("data_loaded", False):
+            source_url = st.session_state.get("loaded_source_url", "")
+        else:
+            source_url = user_url.strip()
 
-        source_url = user_url.strip()
+        if not source_url:
+            st.info("Click **📡 Pull DHIS2 2026 Data Automatically** or paste a specific DHIS2 API URL.")
+            st.stop()
 
         previous_url = st.session_state.get(
             "last_analyzed_url"
@@ -14322,12 +17245,10 @@ def render_existing_danip_ai_app():
             )
             with st.spinner("📥 Retrieving the complete dataset..."):
                 try:
-                    request_url = refresh_data_url(source_url)
-                    raw_data = get_direct_api_data(request_url)
-                except Exception:
-                    try:
-                        raw_data = get_direct_api_data(source_url)
-                    except Exception as retry_error:
+                    # Keep the user's exact DHIS2 query intact. Do not append
+                    # arbitrary cache-busting query parameters to DHIS2 APIs.
+                    raw_data = get_direct_api_data(source_url)
+                except Exception as retry_error:
                         st.error("Unable to retrieve DHIS2 data.")
                         st.code(str(retry_error))
                         st.stop()
