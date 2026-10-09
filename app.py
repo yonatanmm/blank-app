@@ -11422,6 +11422,23 @@ def _chat_external_status_block(external_context, explicit_external_request=Fals
     return "\n".join(lines), label
 
 
+def _chat_is_stock_inventory_analysis_question(question):
+    """Identify stock-card questions that must be answered from DANIP rows first."""
+    q = str(question or "").lower()
+    stock_terms = (
+        "stock", "closing stock", "opening stock", "damaged", "bottles",
+        "received this month", "receipts", "stock management", "mms",
+        "inventory", "reconciliation", "facility store", "stock monitoring",
+    )
+    analysis_terms = (
+        "facility", "facilities", "issue", "issues", "discrepancy",
+        "discrepancies", "unusually high", "follow-up", "follow up",
+        "based on the data", "based on data", "which", "highlight",
+        "compare", "analysis", "analyse", "analyze", "why",
+    )
+    return any(term in q for term in stock_terms) and any(term in q for term in analysis_terms)
+
+
 def ask_analysis_chatbot(
     user_question,
     df=None,
@@ -11457,6 +11474,7 @@ def ask_analysis_chatbot(
     current_intent=_chat_requires_current_data(question)
     explicit_external_request = _chat_external_research_requested(question)
     internal_km_requested = _chat_internal_km_requested(question)
+    stock_inventory_analysis = _chat_is_stock_inventory_analysis_question(question)
 
     # HARD SOURCE LOCK: when the user names the Indicator Compendium/internal KM,
     # the requested source of context is internal. External RAG/web research is
@@ -11556,7 +11574,9 @@ def ask_analysis_chatbot(
     # LEVEL 2 — INTERNAL KM / ISG INDICATOR COMPENDIUM
     # Search KM only after the DANIP indicator candidates have been identified,
     # so retrieval is anchored to the actual DANIP question/indicator.
-    if danip_analysis_question or mixed_intent or report_intent:
+    if (danip_analysis_question or mixed_intent or report_intent) and (
+        not stock_inventory_analysis or internal_km_requested or report_intent
+    ):
         rag_context=retrieve_rag_context(
             question,
             indicators=indicators,
@@ -11680,6 +11700,8 @@ RULES:
 7. The answer should follow: DANIP RESULT -> OBSERVATION -> M&E INTERPRETATION -> DATA QUALITY -> PROGRAMME IMPLICATION.
 8. If the indicator is absent from the compendium, continue using the exact DANIP indicator and general M&E expertise; clearly distinguish that from official compendium metadata.
 9. If asked for a report, generate it from the DANIP evidence first and use KM/external research only to contextualize the interpretation.
+10. For facility stock/inventory questions (including MMS bottle stock), analyse the actual DANIP rows and columns first. Name a facility only when its name and supporting values are present in the current dataset/evidence. Show opening stock, receipts, damaged bottles, issues/dispensing (if present), and closing stock where available. Calculate reconciliation only when the required fields exist; state the formula and any missing fields. Flag high closing stock or damaged stock as a follow-up signal, not proof of mismanagement. Never use an unrelated compendium passage as evidence about a facility's stock.
+11. If evidence does not contain the facility-level values needed, state which columns or records are missing and do not invent facility names, values, discrepancies, or causes.
 
 REQUEST TYPE:
 {"DETAILED NARRATIVE REPORT" if report_intent else "NORMAL CHAT QUESTION"}
@@ -11721,6 +11743,14 @@ Use this format:
 | Period | ... | ... | ... |
 | Value | ... | ... | DIRECTLY COMPARABLE / RELATED BUT NOT DIRECTLY COMPARABLE / NO VERIFIED MATCH |
 Then explain the comparison in 1-3 sentences. If the external layer returned no directly comparable value, say exactly: **NO DIRECTLY COMPARABLE EXTERNAL VALUE FOUND.** Do not invent one.
+
+STOCK / INVENTORY ANALYSIS OVERRIDE:
+When the question concerns MMS, bottles, opening/closing stock, receipts, damaged stock,
+or facility stock-management issues, the current DANIP dataset is the primary evidence.
+Do not answer by summarising RAG chunks. Use facility names and values from LEVEL 1
+and CURRENT DHIS2 / DETERMINISTIC EVIDENCE. Distinguish observed facts, calculations,
+follow-up signals, and unknowns. If a stock-movement column is absent, do not claim the
+balance is wrong; explain that reconciliation is incomplete and name the missing field(s).
 
 USER-FACING ANSWER REQUIREMENT:
 For ordinary DANIP analytical questions, present the current DANIP/DHIS2 findings and their M&E interpretation.
