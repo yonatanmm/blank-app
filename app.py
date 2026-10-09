@@ -11540,6 +11540,83 @@ def _chat_stock_reconciliation_evidence(df, question):
     }
 
 
+
+def _chat_format_stock_reconciliation_answer(stock_evidence, cmp_context=""):
+    """Format stock-reconciliation findings directly from calculated row evidence."""
+    if not isinstance(stock_evidence, dict):
+        return "I could not calculate a facility-level reconciliation from the loaded data."
+    if stock_evidence.get("status") != "CALCULATED":
+        missing = stock_evidence.get("missing_required_columns", [])
+        identified = stock_evidence.get("identified_columns", {})
+        lines = ["## MMS stock reconciliation", "", "I could not safely complete the facility-level calculation because required columns were not identified.", ""]
+        if missing:
+            lines.append("**Missing required columns:** " + ", ".join(missing) + ".")
+        lines += ["", "**Columns identified:**"]
+        for label, col in identified.items():
+            lines.append(f"- {label.replace('_', ' ').title()}: {col if col else 'Not found'}")
+        lines += ["", "Please confirm the column names or load the dataset containing these fields."]
+        return "\n".join(lines)
+
+    rows = stock_evidence.get("rows", [])
+    discrepancies = [r for r in rows if r.get("status") == "DISCREPANCY"]
+    incomplete = [r for r in rows if r.get("status") in ("INCOMPLETE_REQUIRED_DATA", "DAMAGED_STOCK_UNREPORTED")]
+    reconciled = [r for r in rows if r.get("status") == "RECONCILED"]
+    def fmt(v):
+        if v is None:
+            return "Not reported"
+        try:
+            return f"{float(v):,.0f}" if abs(float(v) - round(float(v))) < 0.005 else f"{float(v):,.2f}"
+        except Exception:
+            return str(v)
+    lines = [
+        "## MMS stock reconciliation by organisation unit",
+        "",
+        f"I checked **{stock_evidence.get('rows_checked', len(rows))} facility-period records** in the loaded DANIP data. The list below is based on the stock fields in those records, not on the average of a single indicator.",
+        "",
+        "**Calculation:** Expected closing stock = opening stock + MMS received − LHS issues − dispensary/HCP issues − damaged bottles, where damaged bottles are recorded separately. **Difference = reported closing stock − expected closing stock.** A non-zero difference indicates a potential discrepancy, subject to the source form's accounting rules.",
+        "",
+    ]
+    if discrepancies:
+        lines += [f"### Confirmed numerical discrepancies ({len(discrepancies)})", ""]
+        for r in discrepancies:
+            lines.append(f"**{r.get('organisation_unit', 'Unknown organisation unit')} — {r.get('period', 'Period not available')}**")
+            if r.get('damaged') is not None:
+                calc = f"{fmt(r.get('opening'))} + {fmt(r.get('received'))} − {fmt(r.get('lhs_issues'))} − {fmt(r.get('hcp_issues'))} − {fmt(r.get('damaged'))} = {fmt(r.get('expected_closing_after_damage'))}"
+                expected = r.get('expected_closing_after_damage')
+            else:
+                calc = f"{fmt(r.get('opening'))} + {fmt(r.get('received'))} − {fmt(r.get('lhs_issues'))} − {fmt(r.get('hcp_issues'))} = {fmt(r.get('expected_closing_before_damage'))} before damaged-stock adjustment"
+                expected = r.get('expected_closing_before_damage')
+            lines.append(f"- Calculation: {calc}")
+            lines.append(f"- Reported closing stock: **{fmt(r.get('reported_closing'))}**; calculated expected closing stock: **{fmt(expected)}**; reported minus expected: **{fmt(r.get('difference_reported_minus_expected', r.get('difference_before_damage_adjustment'))) }** bottles.")
+            lines.append("")
+    else:
+        lines += ["### Confirmed numerical discrepancies", "", "No confirmed numerical discrepancies were calculated from rows with all required stock fields available.", ""]
+
+    if incomplete:
+        lines += [f"### Records requiring verification ({len(incomplete)})", ""]
+        for r in incomplete:
+            lines.append(f"**{r.get('organisation_unit', 'Unknown organisation unit')} — {r.get('period', 'Period not available')}**")
+            if r.get('status') == 'DAMAGED_STOCK_UNREPORTED':
+                lines.append(f"- Missing: damaged stock. Before the damaged-stock adjustment, opening + receipts − LHS issues − dispensary/HCP issues = **{fmt(r.get('expected_closing_before_damage'))}**; reported closing stock is **{fmt(r.get('reported_closing'))}**; provisional reported-minus-calculated difference is **{fmt(r.get('difference_before_damage_adjustment'))}** bottles. This is not a final reconciliation because damaged stock is unknown.")
+            else:
+                lines.append("- Missing required field(s): " + ", ".join(r.get('missing_fields', [])) + ". No complete calculation is possible for this row.")
+            lines.append("")
+
+    lines += [f"### Records that reconcile ({len(reconciled)})", ""]
+    if reconciled:
+        lines.append("These records have a calculated difference of zero:")
+        for r in reconciled:
+            lines.append(f"- {r.get('organisation_unit', 'Unknown organisation unit')} — {r.get('period', 'Period not available')}: expected closing {fmt(r.get('expected_closing_after_damage', r.get('expected_closing_before_damage')))}, reported closing {fmt(r.get('reported_closing'))}, difference {fmt(r.get('difference_reported_minus_expected', 0))} bottles.")
+    else:
+        lines.append("No fully reconciled records were identified.")
+
+    lines += ["", "### M&E interpretation and follow-up", "- Verify each discrepancy against the facility stock register, dispensing records, goods-received notes and damage/adjustment records.", "- Treat blank fields as **unknown**, not zero. Records with missing damaged-stock or issue values remain incomplete/provisional.", "- This calculation assumes damaged bottles are deducted separately from usable stock. Confirm this matches the form's official stock-accounting instructions before classifying a discrepancy."]
+    if cmp_context:
+        clean_context = str(cmp_context).strip()
+        if clean_context:
+            lines += ["", "### DANIP CMP / Indicator Compendium context", clean_context[:1800]]
+    return "\n".join(lines)
+
 def ask_analysis_chatbot(
     user_question,
     df=None,
@@ -11721,6 +11798,22 @@ def ask_analysis_chatbot(
             evidence['stock_reconciliation'] = stock_evidence
         else:
             evidence = {'general_evidence': evidence, 'stock_reconciliation': stock_evidence}
+
+    # HARD ROUTE: stock-reconciliation questions must be answered from the actual
+    # row-level arithmetic, not from a generic indicator summary generated later.
+    # CMP retrieval can add contextual guidance, but never supplies facility values.
+    if stock_inventory_analysis and stock_evidence is not None:
+        _report_progress("I’ve calculated the stock balance for each organisation unit and period. I’m separating confirmed differences from records with missing fields.")
+        cmp_context = _rag_context_text(rag_context) if isinstance(rag_context, dict) else ""
+        stock_answer = _chat_format_stock_reconciliation_answer(stock_evidence, cmp_context=cmp_context)
+        return {
+            "status": "STOCK_RECONCILIATION_ANALYSIS",
+            "source": "DANIP_DHIS2",
+            "text": stock_answer,
+            "stock_reconciliation": stock_evidence,
+            "external_status": "NOT_REQUESTED" if not explicit_external_request else "REQUESTED",
+            "external_sources": [],
+        }
 
     # LEVEL 3 — EXTERNAL AUTHORITATIVE EVIDENCE
     # External research is performed after DANIP + KM. It can validate/contextualize
