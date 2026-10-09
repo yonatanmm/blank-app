@@ -11532,6 +11532,93 @@ def _chat_closing_stock_extremes_answer(df):
         "closing_stock_extremes": {"rows": rows_out, "missing": missing_out, "columns_used": {"organisation_unit": org_col, "period": period_col, "reported_closing_stock": closing_col}, "loaded_rows": len(df)},
     }
 
+
+def _chat_is_monthly_closing_stock_change_question(question):
+    """Detect month-to-month closing-stock change requests, separate from ranking/reconciliation."""
+    q = str(question or "").lower()
+    stock = any(x in q for x in ("closing stock", "closing-stock", "mms stock", "stock level", "stock change"))
+    change = any(x in q for x in ("month-to-month", "month to month", "month on month", "month-on-month", "change", "changed", "trend", "increase", "decrease", "largest increases", "largest decreases", "compare months", "compared with previous month"))
+    reconciliation = _chat_is_explicit_stock_reconciliation_question(q)
+    return stock and change and not reconciliation
+
+
+def _chat_is_explicit_stock_reconciliation_question(question):
+    q = str(question or "").lower()
+    if any(x in q for x in ("do not perform stock reconciliation", "don't perform stock reconciliation", "do not reconcile", "don't reconcile", "without reconciliation", "no reconciliation")):
+        return False
+    return any(x in q for x in (
+        "stock reconciliation", "reconcile the stock", "reconcile stock", "reconciliation of stock",
+        "calculate expected stock", "expected closing stock", "stock balance reconciliation",
+        "reconcile opening", "reconcile closing", "stock balance calculation"
+    ))
+
+
+def _chat_monthly_closing_stock_change_answer(df):
+    """Compare only observed closing stock across adjacent months for each facility."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return {"status":"NO_DHIS2_DATA", "source":"NO_DHIS2_DATA", "text":"The Complete Loaded Dataset is empty. Load the actual DANIP Form A data first."}
+    import re as _re
+    def norm(value):
+        return _re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
+    cols={c:norm(c) for c in df.columns}
+    def first_col(pred):
+        return next((c for c,n in cols.items() if pred(n)), None)
+    org_col=first_col(lambda n: n in ("organisationunitname","organizationunitname","organisation unit name","organization unit name","facility name","health facility name") or "organisation unit" in n or "organization unit" in n or "facility name" in n)
+    period_col=first_col(lambda n: n in ("periodname","period name","period","reporting period","reporting month","month") or "reporting month" in n)
+    closing_col=first_col(lambda n: "closing" in n and "stock" in n and not any(x in n for x in ("opening","expected","variance","difference")))
+    missing_cols=[name for name,col in (("facility/organisation name",org_col),("reporting month/period",period_col),("reported closing stock",closing_col)) if not col]
+    if missing_cols:
+        return {"status":"INCOMPLETE_SCHEMA","source":"DANIP_COMPLETE_LOADED_DATASET","text":"Cannot compare monthly closing stock because these columns were not identified in Complete Loaded Dataset: "+", ".join(missing_cols)+". No reconciliation was attempted."}
+    work=df[[org_col,period_col,closing_col]].copy()
+    work["_org"]=work[org_col].astype("string").str.strip()
+    work["_period"]=work[period_col].astype("string").str.strip()
+    work["_closing"]=pd.to_numeric(work[closing_col],errors="coerce")
+    work=work[~work["_org"].isin(["","<NA>","nan","None"]) & ~work["_period"].isin(["","<NA>","nan","None"])].copy()
+    def period_key(value):
+        v=str(value).strip()
+        m=_re.search(r"(20\d{2})\D?(0?[1-9]|1[0-2])",v)
+        if m: return (int(m.group(1)),int(m.group(2)),v.lower())
+        try:
+            ts=pd.to_datetime(v,errors="raise")
+            return (int(ts.year),int(ts.month),v.lower())
+        except Exception: return (9999,99,v.lower())
+    periods=sorted(work["_period"].unique().tolist(),key=period_key)
+    # One value per facility/month is expected. If duplicates exist, don't silently aggregate them.
+    duplicate=work.duplicated(["_org","_period"],keep=False)
+    if duplicate.any():
+        dup=work.loc[duplicate,["_org","_period"]].drop_duplicates().to_dict("records")
+        return {"status":"DUPLICATE_FACILITY_PERIOD","source":"DANIP_COMPLETE_LOADED_DATASET","text":"Monthly change was not calculated because Complete Loaded Dataset contains duplicate facility-month rows. Resolve these duplicate records first: "+"; ".join(f"{x['_org']} — {x['_period']}" for x in dup[:30])+". No stock reconciliation was attempted."}
+    period_pos={p:i for i,p in enumerate(periods)}
+    changes=[]
+    by_facility={name:part.set_index("_period") for name,part in work.groupby("_org",sort=False)}
+    for facility,part in by_facility.items():
+        for i in range(1,len(periods)):
+            prev,cur=periods[i-1],periods[i]
+            prevval=part.at[prev,"_closing"] if prev in part.index else float("nan")
+            curval=part.at[cur,"_closing"] if cur in part.index else float("nan")
+            if pd.isna(prevval) or pd.isna(curval):
+                changes.append({"facility":facility,"previous_month":prev,"previous_stock":None if pd.isna(prevval) else float(prevval),"current_month":cur,"current_stock":None if pd.isna(curval) else float(curval),"change":None,"status":"Not calculable due to missing data"})
+            else:
+                delta=float(curval)-float(prevval)
+                changes.append({"facility":facility,"previous_month":prev,"previous_stock":float(prevval),"current_month":cur,"current_stock":float(curval),"change":delta,"status":"Increase" if delta>0 else "Decrease" if delta<0 else "No change"})
+    calculable=[r for r in changes if r["change"] is not None]
+    inc=sorted([r for r in calculable if r["change"]>0],key=lambda r:(-r["change"],period_key(r["current_month"]),r["facility"]))[:5]
+    dec=sorted([r for r in calculable if r["change"]<0],key=lambda r:(r["change"],period_key(r["current_month"]),r["facility"]))[:5]
+    missing=[r for r in changes if r["change"] is None]
+    def fmt(v): return "Missing" if v is None else (f"{v:,.0f}" if abs(v-round(v))<1e-7 else f"{v:,.2f}")
+    def table(title,rows):
+        lines=[f"### {title}","","| Facility | Previous month | Previous closing stock | Current month | Current closing stock | Change (bottles) | Status |","|---|---|---:|---|---:|---:|---|"]
+        if not rows: lines.append("| — | — | — | — | — | — | No qualifying records |")
+        for r in rows: lines.append(f"| {r['facility']} | {r['previous_month']} | {fmt(r['previous_stock'])} | {r['current_month']} | {fmt(r['current_stock'])} | {fmt(r['change'])} | {r['status']} |")
+        return lines
+    lines=["## Month-to-month reported MMS closing-stock changes","",f"Source: **Complete Loaded Dataset** ({len(df):,} loaded rows). Only **{closing_col}** was used; no expected stock or reconciliation was calculated.","","**Calculation:** Current month reported closing stock − previous month reported closing stock.",""]
+    lines+=table("Five largest increases",inc)+[""]+table("Five largest decreases",dec)+[""]
+    lines += [f"### Not calculable due to missing data ({len(missing)} facility-month comparisons)",""]
+    if missing: lines+=table("Missing comparison details",missing)
+    else: lines.append("No adjacent-month comparisons had missing closing-stock values.")
+    lines += ["","A comparison is made between consecutive reporting months in the ordered dataset. If either month is absent or its closing-stock value is missing, the change is not calculated."]
+    return {"status":"CLOSING_STOCK_MONTHLY_CHANGE","source":"DANIP_COMPLETE_LOADED_DATASET","text":"\n".join(lines),"monthly_closing_stock_changes":{"changes":changes,"largest_increases":inc,"largest_decreases":dec,"not_calculable":missing,"columns_used":{"facility":org_col,"period":period_col,"closing_stock":closing_col}}}
+
 def _chat_is_stock_inventory_analysis_question(question):
     """Identify stock-card questions that must be answered from DANIP rows first."""
     q = str(question or "").lower()
@@ -11765,9 +11852,17 @@ def ask_analysis_chatbot(
     current_source = str(source_url or st.session_state.get("nexus_chat_source_url", "") or "").strip()
 
     # The Complete Loaded Dataset section is the underlying source of truth for
-    # data interpretation. Specific monthly closing-stock ranking requests are
-    # answered directly from its current dataframe and must never be routed into
-    # the separate stock-reconciliation calculation.
+    # data interpretation. Route the requested operation BEFORE any generic stock
+    # evidence is built, so one stock question cannot hijack another.
+    if _chat_is_monthly_closing_stock_change_question(question):
+        _report_progress("I’m comparing only reported closing stock between consecutive months for each facility.")
+        if current_df is None or current_df.empty:
+            return {"status":"NO_DHIS2_DATA", "source":"NO_DHIS2_DATA", "text":"The Complete Loaded Dataset is not loaded. Load the actual DANIP Form A data before requesting monthly stock changes."}
+        result = _chat_monthly_closing_stock_change_answer(current_df)
+        st.session_state["nexus_chat_df"] = current_df
+        st.session_state["nexus_chat_source_url"] = current_source
+        return result
+
     if _chat_is_closing_stock_extremes_question(question):
         _report_progress("I’m reading the Complete Loaded Dataset and ranking only the reported closing-stock values by reporting month.")
         if current_df is None or current_df.empty:
@@ -11785,7 +11880,7 @@ def ask_analysis_chatbot(
     current_intent=_chat_requires_current_data(question)
     explicit_external_request = _chat_external_research_requested(question)
     internal_km_requested = _chat_internal_km_requested(question)
-    stock_inventory_analysis = _chat_is_stock_inventory_analysis_question(question)
+    stock_inventory_analysis = _chat_is_explicit_stock_reconciliation_question(question)
 
     # HARD SOURCE LOCK: when the user names the Indicator Compendium/internal KM,
     # the requested source of context is internal. External RAG/web research is
@@ -11914,7 +12009,7 @@ def ask_analysis_chatbot(
     # to the LLM together with relevant DANIP CMP/Compendium context. This avoids
     # generic indicator summaries and ensures answers name the actual OU/period.
     if stock_inventory_analysis:
-        _report_progress("This is a stock-reconciliation question. I’m comparing opening stock, receipts, issues, damaged bottles, and closing stock by organisation unit and period.")
+        _report_progress("You explicitly requested stock reconciliation. I’m comparing the available stock fields by facility and period.")
     stock_evidence = _chat_stock_reconciliation_evidence(current_df, question) if stock_inventory_analysis else None
     if stock_evidence is not None:
         if isinstance(evidence, dict):
@@ -11922,8 +12017,8 @@ def ask_analysis_chatbot(
         else:
             evidence = {'general_evidence': evidence, 'stock_reconciliation': stock_evidence}
 
-    # HARD ROUTE: stock-reconciliation questions must be answered from the actual
-    # row-level arithmetic, not from a generic indicator summary generated later.
+    # HARD ROUTE: only explicitly requested stock-reconciliation questions use
+    # row-level stock arithmetic. Other stock questions use their own route.
     # CMP retrieval can add contextual guidance, but never supplies facility values.
     if stock_inventory_analysis and stock_evidence is not None:
         _report_progress("I’ve calculated the stock balance for each organisation unit and period. I’m separating confirmed differences from records with missing fields.")
