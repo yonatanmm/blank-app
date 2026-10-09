@@ -11702,6 +11702,137 @@ def _chat_dataset_inventory_answer(df, dataset_id=None):
             "analysis_plan":{"intent":["dataset_inventory"],"requires_schema_discovery":True,"requires_calculation":False,"requires_rag":False,"missing_value_policy":"preserve_and_report"}}
 
 
+
+def _chat_is_dataset_dimension_discovery_question(question):
+    """Recognize requests for available dimensions/categories and their live values.
+
+    This intent is deliberately schema-first and field-name agnostic. It must run
+    before indicator matching so words like country, facility, period, or indicator
+    are not mistaken for a request to analyze one numeric indicator.
+    """
+    q = re.sub(r"\s+", " ", str(question or "").strip().lower())
+    if not q:
+        return False
+    asks_dimensions = any(term in q for term in (
+        "dimension", "dimensions", "categorical field", "categorical fields",
+        "category values", "categories available", "distinct values",
+        "unique values", "possible values", "available values", "dimension values",
+        "what values are available", "which values are available",
+        "list values", "show values", "distinct categories", "unique categories",
+        "what countries are in", "which countries are in", "what facilities are in",
+        "which facilities are in", "available organisation units", "available organization units",
+        "available reporting periods", "what periods are available", "which periods are available",
+        "what groups are available", "what locations are available",
+    ))
+    # Generic request pattern: discover/list/show the dataset's dimensions or values.
+    asks_discovery = any(v in q for v in (
+        "list", "show", "display", "discover", "identify", "find", "what are", "which are", "available"
+    )) and any(n in q for n in (
+        "dimension", "dimensions", "distinct", "unique", "categories", "category",
+        "values", "fields", "columns", "periods", "locations", "groups"
+    ))
+    if not (asks_dimensions or asks_discovery):
+        return False
+    # If an explicit calculation is requested, let analytics routing handle it.
+    explicit_analysis = any(term in q for term in (
+        "average", "mean", "median", "sum", "total", "highest", "lowest", "rank", "ranking",
+        "trend", "over time", "increase", "decrease", "correlation", "outlier", "percentage",
+        "calculate", "compare the values", "performance against", "target achievement"
+    ))
+    return not explicit_analysis
+
+
+def _chat_dataset_dimension_discovery_answer(df, dataset_id=None):
+    """Return actual distinct values for discovered dimensions from the active dataframe."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return {"status": "NO_DHIS2_DATA", "source": "NO_DHIS2_DATA",
+                "text": "The active dataset is not loaded or contains no rows. Load a dataset before requesting dimension values."}
+
+    # Use all fields dynamically. A field is treated as a dimension when it is
+    # non-numeric/categorical or looks like a date/period/identifier field; no names
+    # are required. Numeric measures remain in the schema inventory but are not
+    # flooded into the dimension value listing unless they have low cardinality.
+    field_rows = []
+    value_sections = []
+    for col in df.columns:
+        series = df[col]
+        blank = series.isna()
+        if pd.api.types.is_object_dtype(series.dtype) or pd.api.types.is_string_dtype(series.dtype):
+            blank = blank | series.astype("string").str.strip().eq("").fillna(False)
+        clean = series[~blank]
+        distinct = clean.drop_duplicates()
+        numeric = pd.to_numeric(clean, errors="coerce")
+        numeric_ratio = float(numeric.notna().mean()) if len(clean) else 0.0
+        # Categorical dimensions include text/category/boolean/date fields and
+        # low-cardinality numeric fields; this adapts to arbitrary dataset schemas.
+        is_dimension = (
+            pd.api.types.is_object_dtype(series.dtype)
+            or pd.api.types.is_string_dtype(series.dtype)
+            or pd.api.types.is_categorical_dtype(series.dtype)
+            or pd.api.types.is_bool_dtype(series.dtype)
+            or pd.api.types.is_datetime64_any_dtype(series.dtype)
+            or (len(distinct) <= max(30, int(len(df) * 0.10)) and len(distinct) > 0)
+            or (len(distinct) > 0 and numeric_ratio < 0.80)
+        )
+        examples = []
+        if is_dimension:
+            for value in distinct.tolist():
+                try:
+                    if pd.isna(value):
+                        continue
+                except (TypeError, ValueError):
+                    pass
+                examples.append(str(value).replace("\n", " ").strip())
+            field_rows.append({
+                "field": str(col), "dtype": str(series.dtype),
+                "distinct_count": int(len(distinct)),
+                "missing_count": int(blank.sum()),
+                "values": examples,
+            })
+            value_sections.append((str(col), examples))
+
+    lines = [
+        "## Dataset dimension discovery", "",
+        f"**Active dataset:** `{str(dataset_id or 'Active loaded dataset')}`  ",
+        f"**Rows inspected:** {len(df):,}  ",
+        f"**Columns inspected:** {len(df.columns):,}  ",
+        f"**Discovered dimension fields:** {len(field_rows):,}", "",
+        "Distinct values below are read directly from the active DataFrame. Missing values are counted separately and are not presented as categories.", "",
+    ]
+    for item in field_rows:
+        lines.extend([
+            f"### {item['field']}",
+            f"- Data type: `{item['dtype']}`",
+            f"- Distinct non-missing values: {item['distinct_count']:,}",
+            f"- Missing values: {item['missing_count']:,}",
+        ])
+        values = item["values"]
+        if values:
+            # Show all actual distinct values, with no invented examples. Very high
+            # cardinality fields are labelled and bounded to keep chat usable.
+            if len(values) <= 100:
+                lines.append("- Values: " + ", ".join(f"`{v}`" for v in values))
+            else:
+                lines.append("- Values (first 100 of " + f"{len(values):,}" + "): " + ", ".join(f"`{v}`" for v in values[:100]))
+        else:
+            lines.append("- Values: none (all values are missing or blank)")
+        lines.append("")
+
+    if not field_rows:
+        lines.append("No categorical or low-cardinality dimension fields were detected. The complete schema remains available in the dataset inventory.")
+    lines += ["", "No previous indicator, cached analysis result, ranking, trend, or stock reconciliation was used."]
+    return {
+        "status": "DATASET_DIMENSION_DISCOVERY",
+        "source": "DANIP_ACTIVE_DATASET_DISTINCT_VALUES",
+        "text": "\n".join(lines),
+        "dataset_dimensions": {"dataset_id": str(dataset_id or "Active loaded dataset"), "rows": int(len(df)), "fields": field_rows},
+        "analysis_plan": {"intent": ["dataset_dimension_discovery"], "requires_schema_discovery": True,
+                          "requires_calculation": False, "requires_rag": False,
+                          "dimensions": [x["field"] for x in field_rows],
+                          "missing_value_policy": "preserve_and_report"},
+    }
+
+
 def _chat_dataset_fingerprint(df, dataset_id=None):
     """Stable identity for the active dataframe schema and content shape.
 
@@ -12761,6 +12892,24 @@ def ask_analysis_chatbot(
         st.session_state.pop("nexus_chat_last_analysis_plan", None)
     st.session_state["nexus_chat_df"] = current_df
     st.session_state["nexus_chat_source_url"] = current_source
+
+    # Dimension/value discovery takes precedence over indicator matching and all
+    # cached or previous-turn analytical context. Values come only from current_df.
+    if _chat_is_dataset_dimension_discovery_question(question):
+        if not isinstance(current_df, pd.DataFrame) or current_df.empty:
+            return {"status":"NO_DHIS2_DATA", "source":"NO_DHIS2_DATA", "text":"The active dataset is not loaded or contains no rows. Load a dataset before requesting dimension values."}
+        dimension_result = _chat_dataset_dimension_discovery_answer(
+            current_df, current_source or st.session_state.get("active_dataset_name")
+        )
+        dimension_result["analysis_plan"] = _chat_build_generic_analysis_plan(question, current_df)
+        dimension_result["analysis_plan"]["intent"] = ["dataset_dimension_discovery"]
+        dimension_result["analysis_plan"]["requires_calculation"] = False
+        dimension_result["analysis_plan"]["requires_schema_discovery"] = True
+        dimension_result["analysis_plan"]["dimensions"] = [x["field"] for x in dimension_result.get("dataset_dimensions", {}).get("fields", [])]
+        # Do not carry a previous indicator/result into this discovery response.
+        st.session_state.pop("nexus_chat_last_analysis_result", None)
+        st.session_state.pop("nexus_chat_last_analysis_plan", None)
+        return dimension_result
 
     # Schema discovery is a distinct task: never send inventory questions into
     # indicator ranking, descriptive statistics, or subject-specific workflows.
