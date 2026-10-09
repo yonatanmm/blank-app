@@ -11553,16 +11553,21 @@ def _chat_is_explicit_stock_reconciliation_question(question):
     ))
 
 
-def _chat_monthly_closing_stock_change_answer(df):
-    """Compare only observed closing stock across adjacent months for each facility."""
+def _chat_is_percentage_stock_change_question(question):
+    q = str(question or "").lower()
+    asks_stock = any(x in q for x in ("closing stock", "closing-stock", "mms stock", "stock level", "bottles"))
+    asks_percent = any(x in q for x in ("percentage change", "percent change", "% change", "percentage increase", "percentage decrease", "percent increase", "percent decrease", "percentage changes", "percentage-change"))
+    return asks_stock and asks_percent and not _chat_is_explicit_stock_reconciliation_question(q)
+
+
+def _chat_monthly_closing_stock_change_answer(df, percentage=False):
+    """Deterministically compare actual reported closing stock for consecutive calendar months."""
     if not isinstance(df, pd.DataFrame) or df.empty:
         return {"status":"NO_DHIS2_DATA", "source":"NO_DHIS2_DATA", "text":"The Complete Loaded Dataset is empty. Load the actual DANIP Form A data first."}
     import re as _re
-    def norm(value):
-        return _re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
+    def norm(value): return _re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
     cols={c:norm(c) for c in df.columns}
-    def first_col(pred):
-        return next((c for c,n in cols.items() if pred(n)), None)
+    def first_col(pred): return next((c for c,n in cols.items() if pred(n)), None)
     org_col=first_col(lambda n: n in ("organisationunitname","organizationunitname","organisation unit name","organization unit name","facility name","health facility name") or "organisation unit" in n or "organization unit" in n or "facility name" in n)
     period_col=first_col(lambda n: n in ("periodname","period name","period","reporting period","reporting month","month") or "reporting month" in n)
     closing_col=first_col(lambda n: "closing" in n and "stock" in n and not any(x in n for x in ("opening","expected","variance","difference")))
@@ -11577,47 +11582,69 @@ def _chat_monthly_closing_stock_change_answer(df):
     def period_key(value):
         v=str(value).strip()
         m=_re.search(r"(20\d{2})\D?(0?[1-9]|1[0-2])",v)
-        if m: return (int(m.group(1)),int(m.group(2)),v.lower())
+        if m:
+            y,mo=int(m.group(1)),int(m.group(2)); return (y,mo,v.lower())
         try:
-            ts=pd.to_datetime(v,errors="raise")
-            return (int(ts.year),int(ts.month),v.lower())
+            ts=pd.to_datetime(v,errors="raise"); return (int(ts.year),int(ts.month),v.lower())
         except Exception: return (9999,99,v.lower())
+    def serial(period):
+        y,mo,_=period_key(period)
+        return y*12+mo if y < 9999 and 1 <= mo <= 12 else None
+    dup=work.duplicated(["_org","_period"],keep=False)
+    if dup.any():
+        items=work.loc[dup,["_org","_period"]].drop_duplicates().to_dict("records")
+        return {"status":"DUPLICATE_FACILITY_PERIOD","source":"DANIP_COMPLETE_LOADED_DATASET","text":"Monthly comparison was not calculated because duplicate facility-month rows exist: "+"; ".join(f"{x['_org']} — {x['_period']}" for x in items[:30])+". Resolve duplicates first; no stock reconciliation was attempted."}
     periods=sorted(work["_period"].unique().tolist(),key=period_key)
-    # One value per facility/month is expected. If duplicates exist, don't silently aggregate them.
-    duplicate=work.duplicated(["_org","_period"],keep=False)
-    if duplicate.any():
-        dup=work.loc[duplicate,["_org","_period"]].drop_duplicates().to_dict("records")
-        return {"status":"DUPLICATE_FACILITY_PERIOD","source":"DANIP_COMPLETE_LOADED_DATASET","text":"Monthly change was not calculated because Complete Loaded Dataset contains duplicate facility-month rows. Resolve these duplicate records first: "+"; ".join(f"{x['_org']} — {x['_period']}" for x in dup[:30])+". No stock reconciliation was attempted."}
-    period_pos={p:i for i,p in enumerate(periods)}
+    period_serials={p:serial(p) for p in periods}
     changes=[]
-    by_facility={name:part.set_index("_period") for name,part in work.groupby("_org",sort=False)}
-    for facility,part in by_facility.items():
+    for facility,part in work.groupby("_org",sort=False):
+        part=part.set_index("_period")
         for i in range(1,len(periods)):
             prev,cur=periods[i-1],periods[i]
-            prevval=part.at[prev,"_closing"] if prev in part.index else float("nan")
-            curval=part.at[cur,"_closing"] if cur in part.index else float("nan")
-            if pd.isna(prevval) or pd.isna(curval):
-                changes.append({"facility":facility,"previous_month":prev,"previous_stock":None if pd.isna(prevval) else float(prevval),"current_month":cur,"current_stock":None if pd.isna(curval) else float(curval),"change":None,"status":"Not calculable due to missing data"})
-            else:
-                delta=float(curval)-float(prevval)
-                changes.append({"facility":facility,"previous_month":prev,"previous_stock":float(prevval),"current_month":cur,"current_stock":float(curval),"change":delta,"status":"Increase" if delta>0 else "Decrease" if delta<0 else "No change"})
-    calculable=[r for r in changes if r["change"] is not None]
-    inc=sorted([r for r in calculable if r["change"]>0],key=lambda r:(-r["change"],period_key(r["current_month"]),r["facility"]))[:5]
-    dec=sorted([r for r in calculable if r["change"]<0],key=lambda r:(r["change"],period_key(r["current_month"]),r["facility"]))[:5]
-    missing=[r for r in changes if r["change"] is None]
-    def fmt(v): return "Missing" if v is None else (f"{v:,.0f}" if abs(v-round(v))<1e-7 else f"{v:,.2f}")
+            ps,cs=period_serials[prev],period_serials[cur]
+            # Never treat a missing calendar month as a consecutive comparison.
+            if ps is None or cs is None or cs-ps != 1:
+                if prev in part.index:
+                    changes.append({"facility":facility,"previous_month":prev,"previous_stock":None if pd.isna(part.at[prev,"_closing"]) else float(part.at[prev,"_closing"]),"current_month":cur,"current_stock":None if cur not in part.index or pd.isna(part.at[cur,"_closing"]) else float(part.at[cur,"_closing"]),"change":None,"percentage_change":None,"status":"Not calculable due to missing reporting month"})
+                continue
+            if prev not in part.index or cur not in part.index:
+                pv = part.at[prev,"_closing"] if prev in part.index else float("nan")
+                cv = part.at[cur,"_closing"] if cur in part.index else float("nan")
+                changes.append({"facility":facility,"previous_month":prev,"previous_stock":None if pd.isna(pv) else float(pv),"current_month":cur,"current_stock":None if pd.isna(cv) else float(cv),"change":None,"percentage_change":None,"status":"Not calculable due to missing reporting month"})
+                continue
+            pv,cv=part.at[prev,"_closing"],part.at[cur,"_closing"]
+            if pd.isna(pv) or pd.isna(cv):
+                changes.append({"facility":facility,"previous_month":prev,"previous_stock":None if pd.isna(pv) else float(pv),"current_month":cur,"current_stock":None if pd.isna(cv) else float(cv),"change":None,"percentage_change":None,"status":"Not calculable due to missing data"})
+                continue
+            delta=float(cv)-float(pv)
+            pct=(delta/float(pv)*100) if float(pv)!=0 else None
+            status="Increase" if delta>0 else "Decrease" if delta<0 else "No Change"
+            changes.append({"facility":facility,"previous_month":prev,"previous_stock":float(pv),"current_month":cur,"current_stock":float(cv),"change":delta,"percentage_change":pct,"status":status if not (percentage and pct is None) else status+"; percentage not calculable because previous stock is zero"})
+    valid=[r for r in changes if r["change"] is not None]
+    metric="percentage_change" if percentage else "change"
+    ranked=[r for r in valid if r[metric] is not None]
+    increases=sorted([r for r in ranked if r[metric]>0],key=lambda r:(-r[metric],period_key(r["current_month"]),r["facility"]))[:5]
+    decreases=sorted([r for r in ranked if r[metric]<0],key=lambda r:(r[metric],period_key(r["current_month"]),r["facility"]))[:5]
+    missing=[r for r in changes if r["change"] is None or (percentage and r["percentage_change"] is None)]
+    def fmt(v, pct=False):
+        if v is None: return "Not calculable due to missing data" if pct else "Missing"
+        return f"{v:,.2f}%" if pct else (f"{v:,.0f}" if abs(v-round(v))<1e-7 else f"{v:,.2f}")
     def table(title,rows):
-        lines=[f"### {title}","","| Facility | Previous month | Previous closing stock | Current month | Current closing stock | Change (bottles) | Status |","|---|---|---:|---|---:|---:|---|"]
-        if not rows: lines.append("| — | — | — | — | — | — | No qualifying records |")
-        for r in rows: lines.append(f"| {r['facility']} | {r['previous_month']} | {fmt(r['previous_stock'])} | {r['current_month']} | {fmt(r['current_stock'])} | {fmt(r['change'])} | {r['status']} |")
+        head="| Facility | Previous Month | Previous Stock | Current Month | Current Stock | Change (bottles) | Percentage Change (%) | Status |"
+        lines=[f"### {title}","",head,"|---|---|---:|---|---:|---:|---:|---|"]
+        if not rows: lines.append("| — | — | — | — | — | — | — | No qualifying records |")
+        for r in rows:
+            lines.append(f"| {r['facility']} | {r['previous_month']} | {fmt(r['previous_stock'])} | {r['current_month']} | {fmt(r['current_stock'])} | {fmt(r['change'])} | {fmt(r['percentage_change'],True)} | {r['status']} |")
         return lines
-    lines=["## Month-to-month reported MMS closing-stock changes","",f"Source: **Complete Loaded Dataset** ({len(df):,} loaded rows). Only **{closing_col}** was used; no expected stock or reconciliation was calculated.","","**Calculation:** Current month reported closing stock − previous month reported closing stock.",""]
-    lines+=table("Five largest increases",inc)+[""]+table("Five largest decreases",dec)+[""]
-    lines += [f"### Not calculable due to missing data ({len(missing)} facility-month comparisons)",""]
-    if missing: lines+=table("Missing comparison details",missing)
-    else: lines.append("No adjacent-month comparisons had missing closing-stock values.")
-    lines += ["","A comparison is made between consecutive reporting months in the ordered dataset. If either month is absent or its closing-stock value is missing, the change is not calculated."]
-    return {"status":"CLOSING_STOCK_MONTHLY_CHANGE","source":"DANIP_COMPLETE_LOADED_DATASET","text":"\n".join(lines),"monthly_closing_stock_changes":{"changes":changes,"largest_increases":inc,"largest_decreases":dec,"not_calculable":missing,"columns_used":{"facility":org_col,"period":period_col,"closing_stock":closing_col}}}
+    title="Month-to-month reported MMS closing-stock percentage changes" if percentage else "Month-to-month reported MMS closing-stock changes"
+    formula="((Current Stock − Previous Stock) / Previous Stock) × 100" if percentage else "Current Stock − Previous Stock"
+    lines=[f"## {title}","",f"Source: **Complete Loaded Dataset** ({len(df):,} loaded rows). Only **{closing_col}** was used for values; no expected stock or reconciliation was calculated.","",f"**Calculation:** {formula}.","","Comparisons are limited to genuinely consecutive calendar months within each facility. Missing months are not bridged.",""]
+    lines+=table("Five largest percentage increases" if percentage else "Five largest increases",increases)+[""]
+    lines+=table("Five largest percentage decreases" if percentage else "Five largest decreases",decreases)+[""]
+    lines+=table("All valid consecutive-month comparisons",valid)+[""]
+    lines+=table("Not calculable / missing reporting periods",missing)
+    return {"status":"CLOSING_STOCK_MONTHLY_PERCENTAGE_CHANGE" if percentage else "CLOSING_STOCK_MONTHLY_CHANGE","source":"DANIP_COMPLETE_LOADED_DATASET","text":"\n".join(lines),"monthly_closing_stock_changes":{"changes":changes,"largest_increases":increases,"largest_decreases":decreases,"not_calculable":missing,"percentage_mode":percentage,"columns_used":{"facility":org_col,"period":period_col,"closing_stock":closing_col}}}
+
 
 def _chat_is_stock_inventory_analysis_question(question):
     """Identify stock-card questions that must be answered from DANIP rows first."""
@@ -11854,11 +11881,20 @@ def ask_analysis_chatbot(
     # The Complete Loaded Dataset section is the underlying source of truth for
     # data interpretation. Route the requested operation BEFORE any generic stock
     # evidence is built, so one stock question cannot hijack another.
+    if _chat_is_percentage_stock_change_question(question):
+        _report_progress("I’m calculating percentage changes from actual closing-stock values in Complete Loaded Dataset, checking consecutive months and missing values.")
+        if current_df is None or current_df.empty:
+            return {"status":"NO_DHIS2_DATA", "source":"NO_DHIS2_DATA", "text":"The Complete Loaded Dataset is not loaded. Load the actual DANIP Form A data before requesting percentage changes."}
+        result = _chat_monthly_closing_stock_change_answer(current_df, percentage=True)
+        st.session_state["nexus_chat_df"] = current_df
+        st.session_state["nexus_chat_source_url"] = current_source
+        return result
+
     if _chat_is_monthly_closing_stock_change_question(question):
         _report_progress("I’m comparing only reported closing stock between consecutive months for each facility.")
         if current_df is None or current_df.empty:
             return {"status":"NO_DHIS2_DATA", "source":"NO_DHIS2_DATA", "text":"The Complete Loaded Dataset is not loaded. Load the actual DANIP Form A data before requesting monthly stock changes."}
-        result = _chat_monthly_closing_stock_change_answer(current_df)
+        result = _chat_monthly_closing_stock_change_answer(current_df, percentage=False)
         st.session_state["nexus_chat_df"] = current_df
         st.session_state["nexus_chat_source_url"] = current_source
         return result
