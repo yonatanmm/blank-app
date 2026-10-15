@@ -13363,6 +13363,12 @@ def render_analysis_chatbot(
     if not question:
         return
     st.session_state["analysis_chat_messages"].append({"role":"user","content":question})
+    _nexus_sidebar_status(
+        "AI Analyst started a question",
+        "running",
+        "AI ANALYSIS",
+        "Checking the question against loaded output data and indicator references.",
+    )
     with st.chat_message("user"):
         st.markdown(question)
     with st.chat_message("assistant"):
@@ -13377,6 +13383,12 @@ def render_analysis_chatbot(
                     progress_lines.append(f"- {message}")
                     progress_area.markdown("\n".join(progress_lines))
                     agent_status.update(label=f"🤖 {message}", state="running", expanded=True)
+                    _nexus_sidebar_status(
+                        str(message),
+                        "running",
+                        "AI ANALYSIS",
+                        "DANIP AI is working through the current question.",
+                    )
 
                 try:
                     result=ask_analysis_chatbot(
@@ -13391,7 +13403,12 @@ def render_analysis_chatbot(
                     )
                 except Exception as exc:
                     result={"status":"ERROR","source":"CHAT","text":f"The chatbot encountered an error: {str(exc)[-1200:]}"}
-                agent_status.update(label="✅ Analysis complete", state="complete", expanded=False)
+                _chat_failed = (result or {}).get("status") == "ERROR"
+                agent_status.update(
+                    label="⚠️ Analysis needs attention" if _chat_failed else "✅ Analysis complete",
+                    state="error" if _chat_failed else "complete",
+                    expanded=False,
+                )
         else:
             # Compatibility fallback for older Streamlit versions.
             with st.spinner("🤖 DANIP AI is analysing your question and the available evidence..."):
@@ -13399,6 +13416,13 @@ def render_analysis_chatbot(
                     result=ask_analysis_chatbot(user_question=question,df=df,source_url=chat_source,chart_plan=chart_plan,quality_issues=quality_issues,quality_matrix=quality_matrix,quality_summary=quality_summary)
                 except Exception as exc:
                     result={"status":"ERROR","source":"CHAT","text":f"The chatbot encountered an error: {str(exc)[-1200:]}"}
+        _chat_failed = (result or {}).get("status") == "ERROR"
+        _nexus_sidebar_status(
+            "AI analysis failed" if _chat_failed else "AI analysis completed",
+            "error" if _chat_failed else "success",
+            "AI ANALYSIS",
+            "Review the response for details." if _chat_failed else "The answer is ready in the AI Analyst workspace.",
+        )
         answer=(result or {}).get("text","")
         st.markdown(answer)
         if (result or {}).get("source")=="ISG_INDICATOR_COMPENDIUM":
@@ -13846,7 +13870,7 @@ def _me_hub_responsive_css():
     <style>
     :root{--mh-navy:#101827;--mh-navy2:#182235;--mh-blue:#2563eb;--mh-red:#a51e31;--mh-border:#e5e7eb;--mh-text:#172033;--mh-muted:#64748b;--mh-bg:#f4f7fb}
     /* Common Streamlit sidebar is shared by both top-level workspaces. */
-    [data-testid="stSidebar"]{display:block!important}
+    [data-testid="stSidebar"]{background:#17374b!important;background-color:#17374b!important;border-right:1px solid rgba(255,255,255,.10)!important}
     section[data-testid="stMain"]{width:100%!important}
     .block-container{max-width:none!important;width:100%!important;padding-top:.65rem!important;padding-bottom:2rem!important;padding-left:1.25rem!important;padding-right:1.25rem!important}
     .app-hero{width:100%!important;max-width:none!important;box-sizing:border-box!important}
@@ -13870,7 +13894,7 @@ def _me_hub_responsive_css():
     @media(max-width:680px){.block-container{padding-left:.6rem!important;padding-right:.6rem!important}.mh-admin-top{height:46px}.mh-logo{height:64px}.mh-logo-placeholder{height:38px;width:92%}.mehub-statusbar{padding:8px 10px}}
     @media(max-width:520px){[data-testid="stHorizontalBlock"]{flex-wrap:wrap!important;gap:.4rem!important}[data-testid="stHorizontalBlock"]>[data-testid="column"]{min-width:100%!important;flex-basis:100%!important}}
     /* ---------- COMMON SIDEBAR SHARED BY AI + M&E ---------- */
-    [data-testid="stSidebar"]{display:block!important;background:#17374b!important;background-color:#17374b!important;border-right:1px solid rgba(255,255,255,.10)!important}
+    [data-testid="stSidebar"]{background:#17374b!important;background-color:#17374b!important;border-right:1px solid rgba(255,255,255,.10)!important}
     [data-testid="stSidebar"] [data-testid="stMarkdownContainer"], [data-testid="stSidebar"] label, [data-testid="stSidebar"] p, [data-testid="stSidebar"] span{color:#e5e7eb!important;-webkit-text-fill-color:#e5e7eb!important}
     [data-testid="stSidebar"] .stCaption, [data-testid="stSidebar"] small{color:#94a3b8!important;-webkit-text-fill-color:#94a3b8!important}
     .common-sidebar-brand{display:flex;align-items:center;gap:10px;padding:4px 2px 14px;border-bottom:1px solid rgba(255,255,255,.10);margin-bottom:12px;font-weight:800;color:#fff!important;-webkit-text-fill-color:#fff!important}
@@ -15009,7 +15033,20 @@ def _nexus_sidebar_status(message, state="running", stage=None, detail=None):
     st.session_state["nexus_operation_time"] = now
 
     history = st.session_state.setdefault("nexus_system_history", [])
-    history.append({"time": now, "message": str(message), "state": state})
+    event = {
+        "time": now,
+        "message": str(message),
+        "state": state,
+        "stage": str(stage or ""),
+        "workspace": str(st.session_state.get("danip_workspace_selector", "🤖 DANIP AI Data Analyst")),
+    }
+    # Streamlit reruns the script for widget interactions. Avoid filling the
+    # activity feed with the same status on each rerun; record only transitions.
+    if not history or any(
+        history[-1].get(key) != event[key]
+        for key in ("message", "state", "stage", "workspace")
+    ):
+        history.append(event)
     st.session_state["nexus_system_history"] = history[-10:]
 
     placeholder = st.session_state.get("nexus_sidebar_live_placeholder")
@@ -15019,12 +15056,6 @@ def _nexus_sidebar_status(message, state="running", stage=None, detail=None):
     loaded = st.session_state.get("loaded_df")
     has_data = isinstance(loaded, pd.DataFrame) and not loaded.empty
     records = len(loaded) if has_data else 0
-
-    try:
-        dq = st.session_state.get("danip_api_quality_summary") or {}
-        dq_score = dq.get("score", dq.get("Overall Score", None))
-    except Exception:
-        dq_score = None
 
     ai_ready = bool(OPENAI_API_KEY)
     dhis_ready = bool(DANIP_ACCESS_TOKEN)
@@ -15036,11 +15067,12 @@ def _nexus_sidebar_status(message, state="running", stage=None, detail=None):
             return "🔵"
         return "🟢" if ok else "⚪"
 
+    analysis_ready = has_data
     pipeline = [
         (dot(True), "Application", "READY"),
         (dot(dhis_ready, active=(state == "running" and "DHIS2" in str(message))), "DHIS2 / API", "READY" if dhis_ready else "CONFIG"),
         (dot(has_data, active=(state == "running" and "data" in str(message).lower())), "Dataset", "LOADED" if has_data else "WAITING"),
-        (dot(bool(dq_score is not None), active=(state == "running" and "quality" in str(message).lower())), "Data Quality", "ASSESSED" if dq_score is not None else "PENDING"),
+        (dot(analysis_ready, active=(state == "running" and any(term in str(message).lower() for term in ("analysis", "normaliz", "indicator")))), "Analysis", "READY" if analysis_ready else "WAITING"),
         (dot(ai_ready, active=(state == "running" and ("AI" in str(message) or "interpret" in str(message).lower()))), "DANIP AI", "READY" if ai_ready else "OPTIONAL"),
     ]
 
@@ -15082,6 +15114,11 @@ def _nexus_sidebar_status(message, state="running", stage=None, detail=None):
             """,
             unsafe_allow_html=True,
         )
+
+
+def _select_workspace_from_sidebar(workspace):
+    """Route the shared sidebar buttons through the existing workspace selector."""
+    st.session_state["danip_workspace_selector"] = workspace
 
 
 def render_common_sidebar():
@@ -15149,16 +15186,40 @@ def render_common_sidebar():
         # -----------------------------------------------------
         # NAVIGATION
         # -----------------------------------------------------
-        st.markdown('<div class="common-sidebar-section">WORKSPACES</div>', unsafe_allow_html=True)
-        st.markdown(
-            '<div class="sidebar-nav-card">'
-            '<div class="sidebar-nav-item"><span class="sidebar-nav-icon">🤖</span>'
-            '<div><b>DANIP AI Data Analyst</b><small>Analysis · DQ · charts · AI interpretation</small></div></div>'
-            '<div class="sidebar-nav-item"><span class="sidebar-nav-icon">🧭</span>'
-            '<div><b>DANIP M&amp;E Management Hub</b><small>Indicators · performance · trends · management</small></div></div>'
-            '</div>',
-            unsafe_allow_html=True,
+        current_workspace = st.session_state.get(
+            "danip_workspace_selector", "🤖 DANIP AI Data Analyst"
         )
+        previous_workspace = st.session_state.get("nexus_sidebar_last_workspace")
+        if previous_workspace and previous_workspace != current_workspace:
+            workspace_name = str(current_workspace).replace("🤖 ", "").replace("🧭 ", "").replace("📊 ", "").replace("🌐 ", "").replace("📅 ", "")
+            _nexus_sidebar_status(
+                f"Opened {workspace_name}",
+                "online",
+                "WORKSPACE NAVIGATION",
+                "Workspace changed from the sidebar or the top navigation.",
+            )
+        st.session_state["nexus_sidebar_last_workspace"] = current_workspace
+
+        st.markdown('<div class="common-sidebar-section">WORKSPACES</div>', unsafe_allow_html=True)
+        sidebar_workspaces = [
+            ("🤖 DANIP AI Data Analyst", "🤖 DANIP AI Data Analyst", "Ask indicator questions, load data, and run AI analysis.", "sidebar_workspace_ai"),
+            ("🧭 DANIP M&E Management Hub", "M&E Hub", "Review output indicators, performance, and reporting trends.", "sidebar_workspace_me"),
+            ("📊 Universal Power BI Analytics", "Power BI Analytics", "Explore data prepared for Power BI analysis.", "sidebar_workspace_powerbi"),
+            ("🌐 AI Public Website Builder", "Website Builder", "Build a public-facing site from approved analysis.", "sidebar_workspace_builder"),
+            ("📅 My Reports & Monitoring", "Reports & Monitoring", "Review saved reports and monitoring activity.", "sidebar_workspace_reports"),
+        ]
+        with st.container(key="common_sidebar_navigation"):
+            for workspace_value, label, description, widget_key in sidebar_workspaces:
+                is_active = current_workspace == workspace_value
+                st.button(
+                    label,
+                    key=widget_key,
+                    help=description,
+                    type="primary" if is_active else "secondary",
+                    use_container_width=True,
+                    on_click=_select_workspace_from_sidebar,
+                    args=(workspace_value,),
+                )
 
         # -----------------------------------------------------
         # DATASET STATUS
@@ -15171,16 +15232,16 @@ def render_common_sidebar():
                 periods = int(loaded[period_col].nunique(dropna=True)) if period_col else 0
                 ous = int(loaded[ou_col].nunique(dropna=True)) if ou_col else 0
 
-                st.markdown('<div class="common-sidebar-section">DATASET INTELLIGENCE</div>', unsafe_allow_html=True)
-                st.markdown(
-                    f'<div class="sidebar-metric-grid">'
-                    f'<div class="sidebar-metric"><span>Records</span><b>{len(loaded):,}</b></div>'
-                    f'<div class="sidebar-metric"><span>Indicators</span><b>{len(indicator_cols):,}</b></div>'
-                    f'<div class="sidebar-metric"><span>Org units</span><b>{ous:,}</b></div>'
-                    f'<div class="sidebar-metric"><span>Periods</span><b>{periods:,}</b></div>'
-                    f'</div>',
-                    unsafe_allow_html=True,
-                )
+                with st.expander("Dataset summary", expanded=False):
+                    st.markdown(
+                        f'<div class="sidebar-metric-grid">'
+                        f'<div class="sidebar-metric"><span>Records</span><b>{len(loaded):,}</b></div>'
+                        f'<div class="sidebar-metric"><span>Indicators</span><b>{len(indicator_cols):,}</b></div>'
+                        f'<div class="sidebar-metric"><span>Org units</span><b>{ous:,}</b></div>'
+                        f'<div class="sidebar-metric"><span>Periods</span><b>{periods:,}</b></div>'
+                        f'</div>',
+                        unsafe_allow_html=True,
+                    )
             except Exception:
                 pass
 
@@ -15188,37 +15249,37 @@ def render_common_sidebar():
         # RECENT ACTIVITY
         # -----------------------------------------------------
         history = st.session_state.get("nexus_system_history", [])[-5:]
-        st.markdown('<div class="common-sidebar-section">RECENT ACTIVITY</div>', unsafe_allow_html=True)
-
-        if history:
-            rows = []
-            for item in reversed(history):
-                state = str(item.get("state", "online")).lower()
-                icon = {
-                    "running": "🔵",
-                    "success": "🟢",
-                    "warning": "🟠",
-                    "error": "🔴",
-                    "online": "🟢",
-                    "idle": "⚪",
-                }.get(state, "⚪")
-                rows.append(
-                    '<div class="nexus-history-row">'
-                    f'<span class="nexus-history-icon">{icon}</span>'
-                    '<div class="nexus-history-content">'
-                    f'<div class="nexus-history-message">{html.escape(str(item.get("message", "")))}</div>'
-                    f'<div class="nexus-history-time">{html.escape(str(item.get("time", "")))}</div>'
-                    '</div></div>'
-                )
-            st.markdown('<div class="nexus-history">' + "".join(rows) + '</div>', unsafe_allow_html=True)
-        else:
-            st.markdown('<div class="sidebar-empty-activity">No activity yet; DANIP is ready.</div>', unsafe_allow_html=True)
+        with st.expander(f"Recent activity · {len(history)}", expanded=True):
+            if history:
+                rows = []
+                for item in reversed(history):
+                    state = str(item.get("state", "online")).lower()
+                    icon = {
+                        "running": "🔵",
+                        "success": "🟢",
+                        "warning": "🟠",
+                        "error": "🔴",
+                        "online": "🟢",
+                        "idle": "⚪",
+                    }.get(state, "⚪")
+                    context = item.get("stage") or str(item.get("workspace", "")).replace("🤖 ", "").replace("🧭 ", "")
+                    context_html = f'<div class="nexus-history-context">{html.escape(str(context))}</div>' if context else ""
+                    rows.append(
+                        '<div class="nexus-history-row">'
+                        f'<span class="nexus-history-icon">{icon}</span>'
+                        '<div class="nexus-history-content">'
+                        f'{context_html}'
+                        f'<div class="nexus-history-message">{html.escape(str(item.get("message", "")))}</div>'
+                        f'<div class="nexus-history-time">{html.escape(str(item.get("time", "")))}</div>'
+                        '</div></div>'
+                    )
+                st.markdown('<div class="nexus-history">' + "".join(rows) + '</div>', unsafe_allow_html=True)
+            else:
+                st.markdown('<div class="sidebar-empty-activity">No activity yet; DANIP is ready.</div>', unsafe_allow_html=True)
 
         # -----------------------------------------------------
         # WORKSPACE STATUS
         # -----------------------------------------------------
-        st.markdown('<div class="common-sidebar-section">WORKSPACE STATUS</div>', unsafe_allow_html=True)
-        current_workspace = st.session_state.get("danip_workspace_selector", "DANIP AI Data Analyst")
         short_workspace = str(current_workspace).replace("🤖 ", "").replace("🧭 ", "")
         st.markdown(
             f'<div class="sidebar-workspace-card">'
@@ -15230,24 +15291,24 @@ def render_common_sidebar():
         # -----------------------------------------------------
         # SYSTEM CONTROL
         # -----------------------------------------------------
-        st.markdown('<div class="common-sidebar-section">SYSTEM CONTROL</div>', unsafe_allow_html=True)
-        st.markdown(
-            '<div class="nexus-reset-card">'
-            '<div class="nexus-reset-title">🔄 Start from the beginning</div>'
-            '<div class="nexus-reset-text">'
-            'Clear the current session, dataset selections, analysis state and temporary settings. '
-            'Your persistent M&amp;E records remain stored in the application database.'
-            '</div></div>',
-            unsafe_allow_html=True,
-        )
+        with st.expander("Session controls", expanded=False):
+            st.markdown(
+                '<div class="nexus-reset-card">'
+                '<div class="nexus-reset-title">🔄 Start from the beginning</div>'
+                '<div class="nexus-reset-text">'
+                'Clear the current session, dataset selections, analysis state and temporary settings. '
+                'Your persistent M&amp;E records remain stored in the application database.'
+                '</div></div>',
+                unsafe_allow_html=True,
+            )
 
-        st.markdown('<div class="nexus-reset-button">', unsafe_allow_html=True)
-        reset_clicked = st.button(
-            '🔄 Refresh & Start from Beginning',
-            use_container_width=True,
-            key='nexus_reset_application',
-        )
-        st.markdown('</div>', unsafe_allow_html=True)
+            st.markdown('<div class="nexus-reset-button">', unsafe_allow_html=True)
+            reset_clicked = st.button(
+                '🔄 Refresh & Start from Beginning',
+                use_container_width=True,
+                key='nexus_reset_application',
+            )
+            st.markdown('</div>', unsafe_allow_html=True)
 
         if reset_clicked:
             # Full application reset: clear the current workspace, dataset,
@@ -18921,6 +18982,12 @@ def render_existing_danip_ai_app():
                     # arbitrary cache-busting query parameters to DHIS2 APIs.
                     raw_data = get_direct_api_data(source_url)
                 except Exception as retry_error:
+                        _nexus_sidebar_status(
+                            "Data source connection failed",
+                            "error",
+                            "DHIS2 / API CONNECTION",
+                            "The request did not complete. Review the error shown in the main workspace.",
+                        )
                         st.error("Unable to retrieve DHIS2 data.")
                         st.code(str(retry_error))
                         st.stop()
@@ -18934,6 +19001,12 @@ def render_existing_danip_ai_app():
             df = normalize_dataframe(raw_data)
 
             if df.empty:
+                _nexus_sidebar_status(
+                    "No tabular data was found",
+                    "warning",
+                    "DATA NORMALIZATION",
+                    "The source responded, but DANIP could not identify a usable table.",
+                )
                 st.error("DHIS2 returned data, but no tabular data could be identified.")
                 if isinstance(raw_data, dict):
                     st.json(raw_data)
@@ -19343,6 +19416,66 @@ section[data-testid="stSidebar"] > div:first-child {
     line-height:1.35 !important;
 }
 
+/* Native, keyboard-accessible workspace navigation in the shared sidebar. */
+[data-testid="stSidebar"] .st-key-common_sidebar_navigation {
+    display:flex !important;
+    flex-direction:column !important;
+    gap:5px !important;
+    min-width:0 !important;
+}
+[data-testid="stSidebar"] .st-key-common_sidebar_navigation button {
+    box-sizing:border-box !important;
+    width:100% !important;
+    min-width:0 !important;
+    min-height:40px !important;
+    justify-content:flex-start !important;
+    text-align:left !important;
+    white-space:normal !important;
+    overflow-wrap:anywhere !important;
+    border-radius:8px !important;
+    font-size:.72rem !important;
+    line-height:1.25 !important;
+    font-weight:750 !important;
+    padding:7px 10px !important;
+    transition:background .15s ease,border-color .15s ease,transform .15s ease !important;
+}
+[data-testid="stSidebar"] .st-key-common_sidebar_navigation [data-testid="stBaseButton-secondary"] {
+    color:#e8eef6 !important;
+    -webkit-text-fill-color:#e8eef6 !important;
+    background:rgba(255,255,255,.055) !important;
+    border:1px solid rgba(255,255,255,.10) !important;
+}
+[data-testid="stSidebar"] .st-key-common_sidebar_navigation [data-testid="stBaseButton-secondary"]:hover {
+    color:#fff !important;
+    -webkit-text-fill-color:#fff !important;
+    background:rgba(255,255,255,.12) !important;
+    border-color:rgba(255,255,255,.22) !important;
+}
+[data-testid="stSidebar"] .st-key-common_sidebar_navigation [data-testid="stBaseButton-primary"] {
+    color:#fff !important;
+    -webkit-text-fill-color:#fff !important;
+    background:#2563eb !important;
+    border:1px solid #60a5fa !important;
+    box-shadow:0 3px 10px rgba(0,0,0,.16) !important;
+}
+[data-testid="stSidebar"] .st-key-common_sidebar_navigation [data-testid="stBaseButton-primary"]:hover {
+    background:#1d4ed8 !important;
+    border-color:#93c5fd !important;
+}
+[data-testid="stSidebar"] [data-testid="stExpander"] {
+    margin-top:5px !important;
+    border-color:rgba(255,255,255,.12) !important;
+    border-radius:9px !important;
+    background:rgba(255,255,255,.035) !important;
+}
+[data-testid="stSidebar"] [data-testid="stExpander"] summary,
+[data-testid="stSidebar"] [data-testid="stExpander"] summary p {
+    color:#e8eef6 !important;
+    -webkit-text-fill-color:#e8eef6 !important;
+    font-size:.72rem !important;
+    font-weight:750 !important;
+}
+
 /* Dataset metrics */
 .sidebar-metric-grid {
     display:grid !important;
@@ -19397,6 +19530,17 @@ section[data-testid="stSidebar"] > div:first-child {
     font-size:.66rem !important;
     line-height:1.35 !important;
     font-weight:650 !important;
+    overflow-wrap:anywhere !important;
+}
+.nexus-history-context {
+    margin-bottom:2px !important;
+    color:#91a6bd !important;
+    -webkit-text-fill-color:#91a6bd !important;
+    font-size:.52rem !important;
+    line-height:1.2 !important;
+    font-weight:850 !important;
+    letter-spacing:.06em !important;
+    text-transform:uppercase !important;
     overflow-wrap:anywhere !important;
 }
 .nexus-history-time {
@@ -19587,21 +19731,26 @@ section[data-testid="stSidebar"] > div:first-child {
     -webkit-text-fill-color:initial !important;
 }
 
-/* Responsive sidebar sizes */
-@media (max-width: 1100px) {
-    section[data-testid="stSidebar"] { width:300px !important; min-width:300px !important; }
-    section[data-testid="stSidebar"] > div:first-child { padding-left:.75rem !important; padding-right:.75rem !important; }
+/* Sidebar adapts to available width while preserving Streamlit's collapse control. */
+section[data-testid="stSidebar"] {
+    width:clamp(280px,23vw,340px) !important;
+    min-width:clamp(280px,23vw,340px) !important;
+    max-width:340px !important;
 }
-@media (max-width: 760px) {
-    section[data-testid="stSidebar"] { width:285px !important; min-width:285px !important; }
+@media (max-width:760px) {
+    section[data-testid="stSidebar"] {
+        width:min(88vw,320px) !important;
+        min-width:min(88vw,320px) !important;
+        max-width:min(88vw,320px) !important;
+    }
+    section[data-testid="stSidebar"] > div:first-child { padding-left:.75rem !important; padding-right:.75rem !important; }
     .nexus-live-monitor { padding:10px !important; }
     .nexus-live-title { font-size:.84rem !important; }
-    .sidebar-nav-item b { font-size:.69rem !important; }
 }
-@media (max-width: 480px) {
-    section[data-testid="stSidebar"] { width:275px !important; min-width:275px !important; }
-    section[data-testid="stSidebar"] > div:first-child { padding:.75rem .65rem 1rem .65rem !important; }
-    .common-sidebar-section { margin-top:12px !important; }
+@media (max-width:380px) {
+    section[data-testid="stSidebar"] > div:first-child { padding:.65rem !important; }
+    .common-sidebar-section { margin-top:11px !important; }
+    [data-testid="stSidebar"] .st-key-common_sidebar_navigation button { min-height:38px !important; font-size:.68rem !important; }
 }
 </style>
     """,
