@@ -14857,31 +14857,92 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
             st.dataframe(summary[["Output indicator", "Value completeness"]], use_container_width=True, hide_index=True)
 
     with right:
-        st.markdown("### Output trend")
-        trend_indicator = st.selectbox(
-            "Select output to trend", indicator_cols,
-            format_func=_me_hub_indicator_label,
-            key="mehub_output_trend_indicator",
-        )
-        trend = pd.DataFrame({
+        st.markdown("### Reported output values by period")
+        activity = pd.DataFrame({
             "period": work["__ME_PERIOD_LABEL__"],
             "period_date": work["__ME_PERIOD_DATE__"],
-            "organisation": work["__ME_OU_LABEL__"],
-            "value": values[trend_indicator],
-        }).dropna(subset=["value"])
-        if trend.empty:
-            st.info("No reported values for this output in the current selection.")
-        elif px:
-            if trend["period_date"].notna().any():
-                trend_plot = trend.dropna(subset=["period_date"]).groupby(["period_date", "organisation"], as_index=False)["value"].mean().sort_values("period_date")
-                fig = px.line(trend_plot, x="period_date", y="value", color="organisation", markers=True, labels={"period_date": "Reporting period", "value": "Mean reported value", "organisation": "Reporting unit"})
-            else:
-                trend_plot = trend.groupby(["period", "organisation"], as_index=False)["value"].mean()
-                fig = px.line(trend_plot, x="period", y="value", color="organisation", markers=True, labels={"value": "Mean reported value", "organisation": "Reporting unit"})
-            fig.update_layout(height=360, margin=dict(l=8, r=8, t=12, b=8), legend_title_text="Reporting unit")
-            st.plotly_chart(fig, use_container_width=True)
+            "reported_values": pd.concat(values.values(), axis=1).notna().sum(axis=1),
+        })
+        if activity["period_date"].notna().any():
+            activity_summary = activity.dropna(subset=["period_date"]).groupby(
+                ["period", "period_date"], as_index=False
+            )["reported_values"].sum().sort_values("period_date")
         else:
-            st.dataframe(trend, use_container_width=True, hide_index=True)
+            activity_summary = activity.groupby("period", as_index=False)["reported_values"].sum()
+        if px:
+            activity_fig = px.bar(
+                activity_summary, x="period_date" if "period_date" in activity_summary else "period",
+                y="reported_values", labels={"period_date": "Reporting period", "period": "Reporting period", "reported_values": "Non-missing output values"},
+            )
+            activity_fig.update_layout(height=300, margin=dict(l=8, r=8, t=12, b=8), showlegend=False)
+            st.plotly_chart(activity_fig, use_container_width=True)
+        else:
+            st.dataframe(activity_summary, use_container_width=True, hide_index=True)
+
+    st.markdown("### Indicator reporting cards")
+    st.caption("Each card reports one output indicator, its latest period value, dataset completeness and its own trend. No data-quality findings are shown here.")
+    for start_idx in range(0, len(indicator_cols), 2):
+        card_columns = st.columns(2)
+        for card, indicator in zip(card_columns, indicator_cols[start_idx:start_idx + 2]):
+            series = values[indicator]
+            observed = int(series.notna().sum())
+            completeness = (observed / len(work) * 100) if len(work) else 0
+            card_data = pd.DataFrame({
+                "period": work["__ME_PERIOD_LABEL__"],
+                "period_date": work["__ME_PERIOD_DATE__"],
+                "organisation": work["__ME_OU_LABEL__"],
+                "value": series,
+            }).dropna(subset=["value"])
+            with card:
+                with st.container(border=True):
+                    st.markdown(f"#### {_me_hub_indicator_label(indicator)}")
+                    if card_data.empty:
+                        st.info("No reported values in this selection.")
+                        continue
+
+                    if card_data["period_date"].notna().any():
+                        period_values = card_data.dropna(subset=["period_date"]).groupby(
+                            ["period", "period_date"], as_index=False
+                        )["value"].mean().sort_values("period_date")
+                    else:
+                        period_values = card_data.groupby("period", as_index=False)["value"].mean()
+                    latest_value = float(period_values.iloc[-1]["value"])
+                    latest_period = str(period_values.iloc[-1]["period"])
+
+                    card_metrics = st.columns(3)
+                    card_metrics[0].metric("Latest period value", f"{latest_value:,.2f}", help=f"Mean across selected reporting units for {latest_period}.")
+                    card_metrics[1].metric("Mean reported", f"{series.mean():,.2f}" if observed else "—")
+                    card_metrics[2].metric("Values reported", f"{observed:,} / {len(work):,}")
+                    st.progress(min(max(completeness / 100, 0.0), 1.0), text=f"Value completeness · {completeness:.1f}%")
+
+                    if px:
+                        trend_col, unit_col = st.columns(2)
+                        with trend_col:
+                            if "period_date" in period_values.columns:
+                                trend_fig = px.line(
+                                    period_values, x="period_date", y="value", markers=True,
+                                    labels={"period_date": "Period", "value": "Mean value"},
+                                )
+                            else:
+                                trend_fig = px.line(
+                                    period_values, x="period", y="value", markers=True,
+                                    labels={"period": "Period", "value": "Mean value"},
+                                )
+                            trend_fig.update_layout(height=230, margin=dict(l=4, r=4, t=8, b=4), showlegend=False)
+                            st.plotly_chart(trend_fig, use_container_width=True, key=f"mehub_output_trend_{start_idx}_{indicator}")
+                        with unit_col:
+                            latest_units = card_data[card_data["period"] == latest_period].groupby(
+                                "organisation", as_index=False
+                            )["value"].mean().sort_values("value", ascending=False).head(10)
+                            unit_fig = px.bar(
+                                latest_units.sort_values("value", ascending=True),
+                                x="value", y="organisation", orientation="h",
+                                labels={"value": "Mean value", "organisation": "Reporting unit"},
+                            )
+                            unit_fig.update_layout(height=230, margin=dict(l=4, r=4, t=8, b=4), showlegend=False)
+                            st.plotly_chart(unit_fig, use_container_width=True, key=f"mehub_output_units_{start_idx}_{indicator}")
+                    else:
+                        st.dataframe(period_values, use_container_width=True, hide_index=True)
 
     st.markdown("### Output indicator register")
     display = summary.rename(columns={
