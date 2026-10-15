@@ -1106,7 +1106,7 @@ def handle_callback():
     except requests.HTTPError as exc:
 
         st.error(
-            "DANIP AI could not complete "
+            "NEXUS DANIP could not complete "
             "DHIS2 authentication."
         )
 
@@ -1131,7 +1131,7 @@ def handle_callback():
     except requests.RequestException:
 
         st.error(
-            "DANIP AI could not connect "
+            "NEXUS DANIP could not connect "
             "to the DHIS2 authentication service."
         )
 
@@ -1196,7 +1196,7 @@ def handle_callback():
     except Exception:
 
         st.error(
-            "DANIP AI could not complete "
+            "NEXUS DANIP could not complete "
             "DHIS2 authentication."
         )
 
@@ -1252,7 +1252,7 @@ def login_page():
     st.markdown(
         """
 <div class="danip-title">
-DANIP AI
+NEXUS DANIP
 </div>
 """,
         unsafe_allow_html=True,
@@ -1286,7 +1286,7 @@ Data + M&amp;E Intelligence Platform
 </div>
 
 <div class="danip-security-text">
-Sign in using your existing DHIS2 account. Your DHIS2 username and password are entered on the official DHIS2 authentication page and are not collected by DANIP AI.
+Sign in using your existing DHIS2 account. Your DHIS2 username and password are entered on the official DHIS2 authentication page and are not collected by NEXUS DANIP.
 </div>
 
 </div>
@@ -1375,7 +1375,7 @@ dhis2.nutritionintl.org
     st.markdown(
         """
 <div class="danip-footer">
-Protected DANIP AI workspace
+Protected NEXUS DANIP workspace
 </div>
 """,
         unsafe_allow_html=True,
