@@ -581,9 +581,10 @@ with st.sidebar:
     if ENABLE_DHIS2_AUTHENTICATION:
         st.markdown(
             f"""
-            <div class="danip-auth-status danip-auth-status--authenticated">
-                🔓 DHIS2 authenticated<br>
-                User: {html.escape(str(DANIP_AUTHENTICATED_USERNAME))}
+            <div class="danip-auth-status danip-auth-status--authenticated"
+                 style="background:#ecfdf5!important;color:#173b2d!important;-webkit-text-fill-color:#173b2d!important;opacity:1!important">
+                <span style="color:#173b2d!important;-webkit-text-fill-color:#173b2d!important;opacity:1!important">🔓 DHIS2 authenticated</span><br>
+                <span style="color:#173b2d!important;-webkit-text-fill-color:#173b2d!important;opacity:1!important">User: {html.escape(str(DANIP_AUTHENTICATED_USERNAME))}</span>
             </div>
             """,
             unsafe_allow_html=True,
