@@ -90,7 +90,7 @@ except Exception:
 # ============================================================
 
 st.set_page_config(
-    page_title="NEXUS DANIP AI Data Intelligence",
+    page_title="DANIP AI Data Analyst",
     page_icon="🧠",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -385,7 +385,7 @@ def _process_dhis2_oauth_callback():
 
     except requests.RequestException:
         st.error(
-            "NEXUS DANIP could not connect to the DHIS2 "
+            "DANIP could not connect to the DHIS2 "
             "authentication service."
         )
         st.caption(
@@ -402,7 +402,7 @@ def _process_dhis2_oauth_callback():
 
     except Exception:
         st.error(
-            "NEXUS DANIP could not complete DHIS2 authentication."
+            "DANIP could not complete DHIS2 authentication."
         )
         st.caption("Check the OAuth configuration and application logs.")
         _clear_oauth_query_params()
@@ -481,7 +481,7 @@ def _render_dhis2_login():
 
         <div class="nexus-auth-shell">
             <div class="nexus-auth-card">
-                <div class="nexus-auth-title">NEXUS DANIP</div>
+                <div class="nexus-auth-title">DANIP AI</div>
                 <div class="nexus-auth-subtitle">
                     Data + M&amp;E Intelligence Platform
                 </div>
@@ -491,7 +491,7 @@ def _render_dhis2_login():
                     Sign in using your existing DHIS2 account.
                     Your DHIS2 username and password are entered on
                     the official DHIS2 authentication page and are not
-                    collected by NEXUS DANIP.
+                    collected by DANIP.
                 </div>
 
                 <div class="nexus-auth-provider">
@@ -581,15 +581,7 @@ with st.sidebar:
     if ENABLE_DHIS2_AUTHENTICATION:
         st.markdown(
             f"""
-            <div style="
-                background:#eef6f2;
-                border:1px solid #b9d8c8;
-                border-radius:10px;
-                padding:10px;
-                color:#174b34;
-                font-size:11px;
-                font-weight:700;
-                margin-bottom:10px;">
+            <div class="danip-auth-status danip-auth-status--authenticated">
                 🔓 DHIS2 authenticated<br>
                 User: {html.escape(str(DANIP_AUTHENTICATED_USERNAME))}
             </div>
@@ -607,15 +599,7 @@ with st.sidebar:
     else:
         st.markdown(
             """
-            <div style="
-                background:#fff7ed;
-                border:1px solid #fed7aa;
-                border-radius:10px;
-                padding:10px;
-                color:#9a3412;
-                font-size:11px;
-                font-weight:700;
-                margin-bottom:10px;">
+            <div class="danip-auth-status danip-auth-status--disabled">
                 ⚠️ DHIS2 authentication disabled<br>
                 Development mode
             </div>
@@ -632,9 +616,20 @@ with st.sidebar:
 st.markdown(
     """
     <style>
+    :root {
+        --danip-navy: #17374b;
+        --danip-navy-deep: #102b3d;
+        --danip-canvas: #f4f7fb;
+        --danip-surface: #ffffff;
+        --danip-text: #172b3a;
+        --danip-muted: #64748b;
+        --danip-border: #dbe4ef;
+        --danip-accent: #2563eb;
+    }
+
     html, body, [data-testid="stAppViewContainer"], [data-testid="stApp"] {
-        background: #ffffff !important;
-        color: #1f2937 !important;
+        background: var(--danip-canvas) !important;
+        color: var(--danip-text) !important;
     }
 
     [data-testid="stHeader"] {
@@ -642,7 +637,7 @@ st.markdown(
     }
 
     .block-container {
-        max-width: 1500px;
+        max-width: 1600px;
         padding: 1.1rem 2rem 3rem 2rem;
     }
 
@@ -734,8 +729,8 @@ st.markdown(
     }
 
     [data-testid="stSidebar"] {
-        background: #ffffff !important;
-        border-right: 1px solid #e5e7eb;
+        background: var(--danip-navy) !important;
+        border-right: 1px solid rgba(255,255,255,.12);
     }
 
     [data-testid="stDataFrame"] {
@@ -2052,429 +2047,25 @@ st.markdown(
     unsafe_allow_html=True,
 )
 # =========================================================
-# GLOBAL TEXT HOVER COLOR
-# Hover text color: #9d2130
-#
-# UI ONLY
-# Does not change:
-# - Data
-# - AI
-# - DHIS2
-# - API
-# - Charts
-# - Calculations
+# CONTROL HOVER STATES
 # =========================================================
 
 st.markdown(
     """
     <style>
-
-    /* =====================================================
-       GLOBAL TEXT HOVER COLOR
-       ===================================================== */
-
-    /* Headings */
-    h1:hover,
-    h2:hover,
-    h3:hover,
-    h4:hover,
-    h5:hover,
-    h6:hover {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    /* Paragraph text */
-    p:hover {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    /* Strong / bold text */
-    strong:hover,
-    b:hover {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    /* Italic text */
-    em:hover,
-    i:hover {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    /* Labels */
-    label:hover {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    /* Markdown text */
-    [data-testid="stMarkdownContainer"] p:hover,
-    [data-testid="stMarkdownContainer"] span:hover,
-    [data-testid="stMarkdownContainer"] strong:hover,
-    [data-testid="stMarkdownContainer"] em:hover {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    /* =====================================================
-       LINKS
-       ===================================================== */
-
-    a:hover {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    [data-testid="stMarkdownContainer"] a:hover {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-
-        text-decoration-color: #9d2130 !important;
-    }
-
-
-    /* =====================================================
-       SIDEBAR TEXT
-       ===================================================== */
-
-    [data-testid="stSidebar"] p:hover,
-    [data-testid="stSidebar"] span:hover,
-    [data-testid="stSidebar"] label:hover,
-    [data-testid="stSidebar"] strong:hover,
-    [data-testid="stSidebar"] b:hover {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    /* Sidebar markdown */
-    [data-testid="stSidebar"]
-    [data-testid="stMarkdownContainer"]
-    p:hover {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    /* =====================================================
-       TABS
-       ===================================================== */
-
-    [data-baseweb="tab"]:hover {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    [data-baseweb="tab"] p:hover,
-    [data-baseweb="tab"] span:hover {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    /* =====================================================
-       EXPANDERS
-       ===================================================== */
-
-    [data-testid="stExpander"] summary:hover,
-    [data-testid="stExpander"] summary:hover span,
-    [data-testid="stExpander"] summary:hover p {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    /* =====================================================
-       SELECTBOX / MULTISELECT
-       ===================================================== */
-
-    [data-testid="stSelectbox"] label:hover,
-    [data-testid="stMultiSelect"] label:hover {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    [data-testid="stSelectbox"] [data-baseweb="select"]:hover,
-    [data-testid="stMultiSelect"] [data-baseweb="select"]:hover {
-        color: #9d2130 !important;
-    }
-
-
-    /* Dropdown options */
-    [role="option"]:hover,
-    [role="option"]:hover span,
-    [role="option"]:hover div {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    /* =====================================================
-       RADIO BUTTONS
-       ===================================================== */
-
-    [data-testid="stRadio"] label:hover,
-    [data-testid="stRadio"] label:hover span,
-    [data-testid="stRadio"] label:hover p {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    /* =====================================================
-       CHECKBOXES
-       ===================================================== */
-
-    [data-testid="stCheckbox"] label:hover,
-    [data-testid="stCheckbox"] label:hover span,
-    [data-testid="stCheckbox"] label:hover p {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    /* =====================================================
-       SLIDER LABELS
-       ===================================================== */
-
-    [data-testid="stSlider"] label:hover,
-    [data-testid="stSlider"] span:hover {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    /* =====================================================
-       METRIC TEXT
-       ===================================================== */
-
-    [data-testid="stMetricLabel"]:hover,
-    [data-testid="stMetricValue"]:hover,
-    [data-testid="stMetricDelta"]:hover {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    [data-testid="stMetric"] label:hover,
-    [data-testid="stMetric"] div:hover {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    /* =====================================================
-       BUTTON TEXT
-       ===================================================== */
-
+    /* Keep hover feedback on controls; never recolor body copy or chart labels. */
     .stButton > button:hover,
     .stDownloadButton > button:hover {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
+        filter: brightness(.97) !important;
+        border-color: #9fb3c8 !important;
     }
-
-
-    .stButton > button:hover *,
-    .stDownloadButton > button:hover * {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
+    [data-testid="stTabs"] [data-baseweb="tab"]:hover {
+        background: #eef3f8 !important;
     }
-
-
-    /* =====================================================
-       CAPTION / SMALL TEXT
-       ===================================================== */
-
-    [data-testid="stCaptionContainer"]:hover,
-    [data-testid="stCaptionContainer"] p:hover,
-    .stCaption:hover {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
+    a:hover {
+        text-decoration: underline !important;
+        text-decoration-color: #2563eb !important;
     }
-
-
-    /* =====================================================
-       ALERT TEXT
-       ===================================================== */
-
-    [data-testid="stAlert"] p:hover,
-    [data-testid="stAlert"] span:hover,
-    [data-testid="stAlert"] strong:hover {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    /* =====================================================
-       CHAT TEXT
-       Included so chatbot follows same global hover color
-       ===================================================== */
-
-    .danip-chat-answer p:hover,
-    .danip-chat-answer span:hover,
-    .danip-chat-answer strong:hover,
-    .danip-chat-answer a:hover {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    /* =====================================================
-       CUSTOM DASHBOARD TEXT CLASSES
-       ===================================================== */
-
-    .app-title:hover,
-    .app-subtitle:hover,
-    .section-kicker:hover,
-    .section-title:hover,
-    .section-help:hover,
-    .comparison-note:hover,
-    .empty-state:hover,
-    .viz-notes:hover {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    /* Children inside custom text elements */
-    .app-title:hover *,
-    .app-subtitle:hover *,
-    .section-kicker:hover *,
-    .section-title:hover *,
-    .section-help:hover *,
-    .comparison-note:hover *,
-    .empty-state:hover *,
-    .viz-notes:hover * {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    /* =====================================================
-       DQ DASHBOARD
-       ===================================================== */
-
-    .dq-audit-title:hover,
-    .dq-audit-subtitle:hover,
-    .dq-domain:hover,
-    .dq-metric:hover,
-    .dq-result:hover,
-    .dq-action:hover {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    .dq-table td:hover,
-    .dq-table td:hover * {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    /* =====================================================
-       M&E PROGRAMME MANAGER
-       ===================================================== */
-
-    .me-programme-kicker:hover,
-    .me-programme-title:hover,
-    .me-programme-meta:hover,
-    .me-programme-result:hover {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    .me-programme-result:hover * {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    /* =====================================================
-       REQUESTED VISUALIZATION
-       ===================================================== */
-
-    .requested-viz-card:hover,
-    .requested-viz-card:hover * {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    /* =====================================================
-       DATA TABLE TEXT
-       ===================================================== */
-
-    .viz-data-table td:hover,
-    .viz-data-table td:hover *,
-    .viz-data-table th:hover,
-    .viz-data-table th:hover * {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    /* =====================================================
-       STATUS PILLS
-       ===================================================== */
-
-    .status-pill:hover,
-    .status-pill:hover * {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    /* =====================================================
-       GENERAL MARKDOWN LINKS / TEXT
-       ===================================================== */
-
-    [data-testid="stMarkdownContainer"] li:hover,
-    [data-testid="stMarkdownContainer"] li:hover *,
-    [data-testid="stMarkdownContainer"] blockquote:hover,
-    [data-testid="stMarkdownContainer"] blockquote:hover * {
-        color: #9d2130 !important;
-        -webkit-text-fill-color: #9d2130 !important;
-    }
-
-
-    /* =====================================================
-       DO NOT CHANGE INPUT TEXT WHILE TYPING
-       ===================================================== */
-
-    textarea:hover,
-    input:hover,
-    textarea:focus,
-    input:focus {
-        color: #111827 !important;
-        -webkit-text-fill-color: #111827 !important;
-    }
-
-
-    /* =====================================================
-       DO NOT CHANGE CHAT INPUT WHILE TYPING
-       ===================================================== */
-
-    [data-testid="stChatInput"] textarea:hover,
-    [data-testid="stChatInput"] textarea:focus {
-        color: #111827 !important;
-        -webkit-text-fill-color: #111827 !important;
-    }
-
-
     </style>
     """,
     unsafe_allow_html=True,
@@ -2482,9 +2073,8 @@ st.markdown(
 # ============================================================
 # TOP-LEVEL DANIP WORKSPACE NAVIGATION
 # ============================================================
-# Use a horizontal Streamlit radio as the workspace switcher rather than
-# st.tabs. The refresh control is placed beside the workspace selector so
-# users can restart the application without using the browser refresh icon.
+# Keep the existing workspace values and session key while using a segmented
+# control for a compact, native header switcher. Refresh remains beside it.
 
 workspace_options = [
     "🤖 DANIP AI Data Analyst",
@@ -2510,8 +2100,8 @@ brand_col, page_col, nav_col, refresh_col = st.columns(
 with brand_col:
     st.markdown(
         '<div class="nexus-top-brand">'
-        '<span class="nexus-top-brand-mark">N</span>'
-        '<span class="nexus-top-brand-copy"><span class="nexus-top-brand-name">NEXUS DANIP</span>'
+        '<span class="nexus-top-brand-mark">D</span>'
+        '<span class="nexus-top-brand-copy"><span class="nexus-top-brand-name">DANIP</span>'
         '<span class="nexus-top-brand-subtitle">DATA INTELLIGENCE</span></span></div>',
         unsafe_allow_html=True,
     )
@@ -2524,13 +2114,16 @@ with page_col:
     )
 
 with nav_col:
-    workspace = st.radio(
+    workspace = st.segmented_control(
         "DANIP workspace",
         workspace_options,
-        horizontal=True,
+        selection_mode="single",
+        default=active_workspace,
+        required=True,
         format_func=lambda option: workspace_short_labels.get(option, option),
         label_visibility="collapsed",
         key="danip_workspace_selector",
+        width="stretch",
     )
 
 with refresh_col:
@@ -2572,7 +2165,7 @@ with refresh_col:
 st.markdown(
     """
     <div class="app-hero">
-        <div class="app-title">NEXUS DANIP AI Data Analyst</div>
+        <div class="app-title">DANIP AI Data Analyst</div>
         <div class="app-subtitle">
             A premium evidence-first workspace for DHIS2, tabular and API data.
             Ask questions in natural language, explore performance, compare indicators,
@@ -2747,7 +2340,7 @@ def _require_dhis2_auth():
     if not authenticated or not token:
         raise PermissionError(
             "No authenticated DHIS2 user session is available. "
-            "Please sign in through the NEXUS DANIP authentication gateway."
+            "Please sign in through the DANIP authentication gateway."
         )
 
     return token
@@ -3063,7 +2656,7 @@ def _handle_dhis2_response_error(response, url):
         st.session_state["danip_refresh_token"] = ""
         raise PermissionError(
             "The authenticated DHIS2 session has expired or is no longer authorized. "
-            "Please sign in again through the NEXUS DANIP authentication gateway."
+            "Please sign in again through the DANIP authentication gateway."
         )
 
     if response.status_code != 200:
@@ -8099,8 +7692,8 @@ Trusted domains: {", ".join(EXTERNAL_EVIDENCE_DOMAINS)}
 def render_ai_methodology_and_external_context(df, quality_summary, quality_issues, external_context):
     st.markdown("""
     <div class="section-card auto-analysis-card">
-      <div class="section-kicker">NEXUS INTELLIGENCE LAYER</div>
-      <div class="section-title">🧠 How NEXUS AI is working with your data</div>
+      <div class="section-kicker">DANIP AI INTELLIGENCE</div>
+      <div class="section-title">🧠 How DANIP AI is working with your data</div>
       <div class="section-help">Python calculates deterministic evidence from the complete dataset. AI interprets that evidence, while verified UN/INGO/public-health sources provide indicator context without changing the user's calculations.</div>
     </div>
     """, unsafe_allow_html=True)
@@ -13642,7 +13235,7 @@ def render_analysis_chatbot(
 
     st.markdown("""
     <div class="danip-analysis-chat">
-      <div class="chat-kicker">NEXUS AI · INDEPENDENT M&E ASSISTANT</div>
+      <div class="chat-kicker">DANIP AI · INDEPENDENT M&E ASSISTANT</div>
       <div class="chat-title">💬 Ask an Indicator or M&E Question</div>
       <div class="chat-help">
         Indicator definitions, ISG Indicator Compendium questions and general M&E questions work
@@ -14268,97 +13861,7 @@ def _me_hub_responsive_css():
     /* Dashboard cards */
     div[data-testid="stMetric"]{background:#fff!important;border:1px solid var(--mh-border)!important;border-radius:9px!important;box-shadow:0 2px 7px rgba(15,23,42,.035)!important;padding:.75rem .8rem!important;min-height:78px}.mh-main [data-testid="stMetricLabel"]{font-size:.67rem!important;color:#64748b!important}.mh-main [data-testid="stMetricValue"]{font-size:1.3rem!important;color:#172033!important;font-weight:800!important}
     [data-testid="stDataFrame"]{border-radius:8px;overflow:hidden}
-    /* ============================================================
-       TOP-LEVEL DANIP WORKSPACE NAVIGATION
-       Admin-style full-width two-option bar.
-       ============================================================ */
-    [data-testid="stRadio"]{
-        width:100%!important;
-        margin:0 0 14px 0!important;
-        padding:0!important;
-        background:#17374b!important;
-        border-bottom:3px solid #b03a2e!important;
-        border-radius:0!important;
-        overflow:hidden!important;
-    }
-    [data-testid="stRadio"] > label{display:none!important}
-    [data-testid="stRadio"] > div{
-        width:100%!important;
-        display:flex!important;
-        flex-direction:row!important;
-        flex-wrap:nowrap!important;
-        gap:0!important;
-        margin:0!important;
-        padding:0!important;
-    }
-    [data-testid="stRadio"] [role="radiogroup"]{
-        width:100%!important;
-        display:flex!important;
-        flex-direction:row!important;
-        gap:0!important;
-        margin:0!important;
-        padding:0!important;
-    }
-    [data-testid="stRadio"] [role="radio"]{
-        flex:1 1 50%!important;
-        min-width:0!important;
-        min-height:48px!important;
-        margin:0!important;
-        padding:0!important;
-        border:0!important;
-        border-radius:0!important;
-        background:#17374b!important;
-        color:#ffffff!important;
-        cursor:pointer!important;
-        display:flex!important;
-        align-items:center!important;
-        justify-content:center!important;
-        text-align:center!important;
-        font-size:.78rem!important;
-        font-weight:800!important;
-        white-space:nowrap!important;
-        transition:background .18s ease!important;
-    }
-    [data-testid="stRadio"] [role="radio"]:hover{background:#244e63!important}
-    [data-testid="stRadio"] [role="radio"][aria-checked="true"]{
-        background:#a51e31!important;
-        color:#ffffff!important;
-    }
-    [data-testid="stRadio"] [role="radio"] > div:first-child{
-        display:none!important;
-    }
-    [data-testid="stRadio"] [role="radio"] p,
-    [data-testid="stRadio"] [role="radio"] span{
-        color:#ffffff!important;
-        -webkit-text-fill-color:#ffffff!important;
-        font-weight:800!important;
-        margin:0!important;
-    }
-    [data-testid="stRadio"] [role="radio"] [data-testid="stMarkdownContainer"]{
-        display:flex!important;
-        align-items:center!important;
-        justify-content:center!important;
-    }
-    /* Force workspace selector text to white across Streamlit DOM variants. */
-    [data-testid="stRadio"] [role="radio"] *,
-    [data-testid="stRadio"] [role="radio"] label,
-    [data-testid="stRadio"] [role="radio"] label *,
-    [data-testid="stRadio"] [role="radio"] [data-testid="stMarkdownContainer"] *,
-    [data-testid="stRadio"] [role="radio"] [data-testid="stMarkdownContainer"] p,
-    [data-testid="stRadio"] [role="radio"] [data-testid="stMarkdownContainer"] span{
-        color:#ffffff!important;
-        -webkit-text-fill-color:#ffffff!important;
-        opacity:1!important;
-        text-shadow:none!important;
-    }
-    [data-testid="stRadio"] [role="radio"][aria-checked="true"] *,
-    [data-testid="stRadio"] [role="radio"][aria-checked="true"] label,
-    [data-testid="stRadio"] [role="radio"][aria-checked="true"] label *{
-        color:#ffffff!important;
-        -webkit-text-fill-color:#ffffff!important;
-        opacity:1!important;
-    }
-    /* Keep internal M&E tabs responsive without inheriting the top-level bar style. */
+    /* Keep internal M&E tabs compact and horizontally scrollable on small screens. */
     [data-testid="stTabs"] [data-baseweb="tab-list"]{overflow-x:auto;flex-wrap:nowrap;gap:2px;scrollbar-width:thin}
     [data-testid="stTabs"] [data-baseweb="tab"]{white-space:nowrap;min-width:max-content;font-size:.73rem}
     @media(max-width:900px){.block-container{padding-left:.9rem!important;padding-right:.9rem!important}.mh-top-right{display:none}.mehub-statusbar{font-size:.68rem}}
@@ -15510,7 +15013,7 @@ def _nexus_sidebar_status(message, state="running", stage=None, detail=None):
         (dot(dhis_ready, active=(state == "running" and "DHIS2" in str(message))), "DHIS2 / API", "READY" if dhis_ready else "CONFIG"),
         (dot(has_data, active=(state == "running" and "data" in str(message).lower())), "Dataset", "LOADED" if has_data else "WAITING"),
         (dot(bool(dq_score is not None), active=(state == "running" and "quality" in str(message).lower())), "Data Quality", "ASSESSED" if dq_score is not None else "PENDING"),
-        (dot(ai_ready, active=(state == "running" and ("AI" in str(message) or "interpret" in str(message).lower()))), "NEXUS AI", "READY" if ai_ready else "OPTIONAL"),
+        (dot(ai_ready, active=(state == "running" and ("AI" in str(message) or "interpret" in str(message).lower()))), "DANIP AI", "READY" if ai_ready else "OPTIONAL"),
     ]
 
     pipeline_html = "".join(
@@ -15564,7 +15067,7 @@ def render_common_sidebar():
             "nexus_system_activity": "Waiting for user action",
             "nexus_system_state": "online",
             "nexus_system_stage": "System ready",
-            "nexus_system_detail": "NEXUS is ready for the next operation.",
+            "nexus_system_detail": "DANIP is ready for the next operation.",
             "nexus_last_operation": "System initialized",
             "nexus_operation_time": datetime.now().strftime("%H:%M:%S"),
         }
@@ -15586,7 +15089,7 @@ def render_common_sidebar():
             '<div class="common-sidebar-brand">'
             '<div class="common-sidebar-mark">D</div>'
             '<div class="common-sidebar-brand-text">'
-            '<div class="common-sidebar-name">NEXUS DANIP</div>'
+            '<div class="common-sidebar-name">DANIP</div>'
             '<div class="common-sidebar-subtitle">Data + M&amp;E Intelligence</div>'
             '</div></div>',
             unsafe_allow_html=True,
@@ -15681,7 +15184,7 @@ def render_common_sidebar():
                 )
             st.markdown('<div class="nexus-history">' + "".join(rows) + '</div>', unsafe_allow_html=True)
         else:
-            st.markdown('<div class="sidebar-empty-activity">No activity yet — NEXUS is ready.</div>', unsafe_allow_html=True)
+            st.markdown('<div class="sidebar-empty-activity">No activity yet; DANIP is ready.</div>', unsafe_allow_html=True)
 
         # -----------------------------------------------------
         # WORKSPACE STATUS
@@ -16280,7 +15783,7 @@ def render_existing_danip_ai_app():
         status_items.append("🟠 DHIS2 authentication required")
 
     if OPENAI_API_KEY:
-        status_items.append("🟢 NEXUS automatic intelligence ready")
+        status_items.append("🟢 DANIP automatic intelligence ready")
     else:
         status_items.append("🟠 AI narrative disabled until OPENAI_API_KEY is added")
 
@@ -16300,7 +15803,7 @@ def render_existing_danip_ai_app():
             <div class="section-kicker">STEP 1</div>
             <div class="section-title">📡 DHIS2 Data Connection</div>
             <div class="section-help">
-                NEXUS automatically connects to the authenticated DHIS2 account,
+                DANIP automatically connects to the authenticated DHIS2 account,
                 discovers available indicators, and retrieves the selected reporting period.
                 No API URL is required.
             </div>
@@ -16332,7 +15835,7 @@ def render_existing_danip_ai_app():
         )
 
     st.caption(
-        "Select Project / Program → Country → Type → API. NEXUS filters each list from the "
+        "Select Project / Program → Country → Type → API. DANIP filters each list from the "
         "live registry, then retrieves only the API matching all four selections."
     )
 
@@ -16683,9 +16186,9 @@ def render_existing_danip_ai_app():
         """
         <div class="section-card auto-analysis-card">
             <div class="section-kicker">AUTOMATIC ANALYSIS</div>
-            <div class="section-title">🤖 NEXUS AI will analyze the selected DANIP dataset automatically</div>
+            <div class="section-title">🤖 DANIP AI will analyze the selected dataset automatically</div>
             <div class="section-help">
-                Once the selected project API is retrieved, NEXUS AI automatically generates the baseline report,
+                Once the selected project API is retrieved, DANIP AI automatically generates the baseline report,
                 data-quality assessment, dashboard, trends and M&amp;E intelligence.
             </div>
         </div>
@@ -16706,7 +16209,7 @@ def render_existing_danip_ai_app():
                 <div style="font-size:2rem;">📡</div>
                 <strong>Select a Project/Program and API</strong>
                 <div style="margin-top:.35rem;">
-                    NEXUS will use the selected registered API to retrieve the data automatically.
+                    DANIP will use the selected registered API to retrieve the data automatically.
                 </div>
             </div>
             """,
@@ -18786,7 +18289,7 @@ def render_existing_danip_ai_app():
         section.left_margin = Inches(0.65)
         section.right_margin = Inches(0.65)
 
-        title = doc.add_heading("NEXUS AI — MEAL Intelligence & Programme Management Report", 0)
+        title = doc.add_heading("DANIP AI — MEAL Intelligence & Programme Management Report", 0)
         title.runs[0].font.size = Pt(20)
 
         programme = context.get("Programme / Project", "") or "Programme / Project"
@@ -18839,7 +18342,7 @@ def render_existing_danip_ai_app():
         doc.add_heading("16. Management Conclusion", level=1)
         doc.add_paragraph(context.get("Management Conclusion", "Edit this conclusion based on programme context, evidence and decisions."))
 
-        doc.add_paragraph("\nGenerated by NEXUS AI. Analytical values are evidence summaries; causal interpretation should use appropriate evaluation evidence.")
+        doc.add_paragraph("\nGenerated by DANIP AI. Analytical values are evidence summaries; causal interpretation should use appropriate evaluation evidence.")
 
         output = BytesIO()
         doc.save(output)
@@ -19373,10 +18876,10 @@ def render_existing_danip_ai_app():
                 "Reusing the loaded dataset",
                 "running",
                 "DATASET CACHE",
-                "NEXUS found the current source in memory and is preparing it for analysis.",
+                "DANIP found the current source in memory and is preparing it for analysis.",
             )
             df = st.session_state["loaded_df"].copy()
-            st.info("♻️ Using the already loaded dataset for automatic NEXUS AI analysis.")
+            st.info("♻️ Using the already loaded dataset for automatic DANIP AI analysis.")
         else:
             _nexus_sidebar_status(
                 "Connecting to the data source",
@@ -19570,7 +19073,7 @@ def render_existing_danip_ai_app():
         )
 
         _nexus_sidebar_status(
-            "NEXUS processing completed",
+            "DANIP processing completed",
             "success",
             "SYSTEM READY",
             "All current dataset, DQ, analysis, visualization and M&E intelligence modules are available.",
@@ -19596,6 +19099,37 @@ section[data-testid="stSidebar"] {
     width: 330px !important;
     min-width: 330px !important;
     max-width: 360px !important;
+}
+.danip-auth-status {
+    box-sizing:border-box !important;
+    width:100% !important;
+    border:1px solid transparent !important;
+    border-radius:9px !important;
+    padding:9px 10px !important;
+    margin:0 0 10px 0 !important;
+    font-size:.69rem !important;
+    font-weight:700 !important;
+    line-height:1.45 !important;
+}
+[data-testid="stSidebar"] .danip-auth-status,
+[data-testid="stSidebar"] .danip-auth-status.danip-auth-status--authenticated,
+[data-testid="stSidebar"] .danip-auth-status.danip-auth-status--disabled {
+    color:#173b2d !important;
+    -webkit-text-fill-color:#173b2d !important;
+    opacity:1 !important;
+}
+[data-testid="stSidebar"] .danip-auth-status--authenticated {
+    background:#ecfdf5 !important;
+    border-color:#a7f3d0 !important;
+}
+[data-testid="stSidebar"] .danip-auth-status--disabled,
+[data-testid="stSidebar"] .danip-auth-status--disabled * {
+    color:#9a3412 !important;
+    -webkit-text-fill-color:#9a3412 !important;
+}
+[data-testid="stSidebar"] .danip-auth-status--disabled {
+    background:#fff7ed !important;
+    border-color:#fed7aa !important;
 }
 section[data-testid="stSidebar"] > div:first-child {
     width: 100% !important;
@@ -20061,103 +19595,48 @@ st.markdown(
     border-radius:0!important;
     overflow:visible!important;
 }
-.st-key-danip_workspace_selector [role="radio"] {
-    min-height:44px!important;
-    padding:5px 7px!important;
-    background:transparent!important;
-    color:#334155!important;
-    -webkit-text-fill-color:#334155!important;
-    font-size:.76rem!important;
-    font-weight:650!important;
-    white-space:normal!important;
-}
-.st-key-danip_workspace_selector [role="radio"]:hover {background:#f1f5f9!important;color:#17374b!important}
-.st-key-danip_workspace_selector [role="radio"][aria-checked="true"] {
-    background:#f1f5f9!important;
-    color:#17374b!important;
-    -webkit-text-fill-color:#17374b!important;
-    box-shadow:inset 0 -3px #b03a2e!important;
-}
-.st-key-danip_workspace_selector [role="radio"] *,
-.st-key-danip_workspace_selector [role="radio"] p,
-.st-key-danip_workspace_selector [role="radio"] span {
-    color:inherit!important;
-    -webkit-text-fill-color:inherit!important;
-    font-weight:inherit!important;
-}
-.st-key-danip_workspace_selector [role="radio"] > div:first-child {display:none!important}
-.st-key-danip_workspace_selector [role="radio"] input {display:none!important}
-.st-key-danip_workspace_selector > label {display:none!important}
-.st-key-danip_workspace_selector div[role="radiogroup"] {
+.st-key-danip_workspace_selector > label,
+.st-key-danip_workspace_selector [data-testid="stWidgetLabel"] {display:none!important}
+.st-key-danip_workspace_selector [role="radiogroup"],
+.st-key-danip_workspace_selector [role="group"] {
     display:flex!important;
-    flex-direction:row!important;
-    flex-wrap:nowrap!important;
+    flex-flow:row nowrap!important;
     align-items:center!important;
-    justify-content:flex-start!important;
-    gap:2px!important;
+    gap:3px!important;
     width:100%!important;
-    min-height:56px!important;
-    padding:0!important;
-    margin:0!important;
-    overflow:visible!important;
+    padding:3px!important;
     background:transparent!important;
     border:0!important;
     box-shadow:none!important;
 }
-.st-key-danip_workspace_selector div[role="radiogroup"] > label {
-    position:relative!important;
-    display:flex!important;
-    flex:1 1 100px!important;
-    align-items:center!important;
-    justify-content:center!important;
+.st-key-danip_workspace_selector button {
+    flex:1 1 0!important;
     min-width:0!important;
-    min-height:52px!important;
-    padding:5px 8px!important;
-    margin:0!important;
-    border:0!important;
-    border-radius:6px!important;
+    min-height:42px!important;
+    padding:4px 5px!important;
+    border:1px solid transparent!important;
+    border-radius:7px!important;
     background:transparent!important;
     color:#334155!important;
     -webkit-text-fill-color:#334155!important;
-    font-size:.78rem!important;
+    font-size:.70rem!important;
     font-weight:650!important;
-    line-height:1.2!important;
-    text-align:center!important;
+    line-height:1.15!important;
     white-space:normal!important;
-    overflow-wrap:anywhere!important;
-    cursor:pointer!important;
-    transition:background .15s ease,color .15s ease!important;
 }
-.st-key-danip_workspace_selector div[role="radiogroup"] > label:hover {
+.st-key-danip_workspace_selector button:hover {
     background:#f1f5f9!important;
-}
-.st-key-danip_workspace_selector div[role="radiogroup"] > label:has(input:checked) {
+    border-color:#dbe4ef!important;
     color:#17374b!important;
     -webkit-text-fill-color:#17374b!important;
-    background:#f1f5f9!important;
-    box-shadow:inset 0 -3px #b03a2e!important;
 }
-.st-key-danip_workspace_selector div[role="radiogroup"] > label p,
-.st-key-danip_workspace_selector div[role="radiogroup"] > label span,
-.st-key-danip_workspace_selector div[role="radiogroup"] > label div {
-    color:inherit!important;
-    -webkit-text-fill-color:inherit!important;
-    margin:0!important;
-    line-height:inherit!important;
-}
-.st-key-danip_workspace_selector div[role="radiogroup"] > label input {accent-color:#b03a2e!important}
-.st-key-danip_workspace_selector div[role="radiogroup"] > label input {
-    position:absolute!important;
-    width:1px!important;
-    height:1px!important;
-    opacity:0!important;
-}
-.st-key-danip_workspace_selector div[role="radiogroup"] > label > div:first-child {display:none!important}
-.st-key-danip_workspace_selector div[role="radiogroup"] label[data-baseweb="radio"] > div > div:first-child {display:none!important}
-.st-key-danip_workspace_selector div[role="radiogroup"] label[data-baseweb="radio"] > div {gap:0!important}
-.st-key-danip_workspace_selector div[role="radiogroup"] > label:focus-within {
-    outline:2px solid #93c5fd!important;
-    outline-offset:-2px!important;
+.st-key-danip_workspace_selector button[aria-pressed="true"],
+.st-key-danip_workspace_selector button[aria-checked="true"] {
+    background:#edf2f7!important;
+    border-color:#dbe4ef!important;
+    color:#17374b!important;
+    -webkit-text-fill-color:#17374b!important;
+    box-shadow:inset 0 -2px #b03a2e!important;
 }
 .st-key-nexus_top_refresh button {
     min-height:38px!important;
@@ -20209,6 +19688,22 @@ div[data-testid="stHorizontalBlock"]:has(.st-key-danip_workspace_selector) {
     padding:2px 0 6px!important;
     border-bottom:1px solid #e2e8f0!important;
 }
+section[data-testid="stMain"] [data-testid="stChatInput"] {
+    background:#ffffff!important;
+    border:1px solid #cbd5e1!important;
+    border-radius:12px!important;
+}
+section[data-testid="stMain"] [data-testid="stChatInput"] textarea {
+    background:#ffffff!important;
+    color:#172b3a!important;
+    -webkit-text-fill-color:#172b3a!important;
+    caret-color:#172b3a!important;
+}
+section[data-testid="stMain"] [data-testid="stChatInput"] textarea::placeholder {
+    color:#64748b!important;
+    -webkit-text-fill-color:#64748b!important;
+    opacity:1!important;
+}
 @media (max-width:900px) {
     div[data-testid="stHorizontalBlock"]:has(.st-key-danip_workspace_selector) > div:first-child {flex:0 0 42px!important;min-width:42px!important}
     div[data-testid="stHorizontalBlock"]:has(.st-key-danip_workspace_selector) > div:nth-child(2) {display:none!important}
@@ -20216,15 +19711,19 @@ div[data-testid="stHorizontalBlock"]:has(.st-key-danip_workspace_selector) {
     div[data-testid="stHorizontalBlock"]:has(.st-key-danip_workspace_selector) > div:last-child {flex:0 0 42px!important;min-width:42px!important}
     .nexus-top-brand-copy {display:none!important}
     .nexus-top-brand {justify-content:center!important}
-    .st-key-danip_workspace_selector div[role="radiogroup"] {flex-wrap:wrap!important}
-    .st-key-danip_workspace_selector div[role="radiogroup"] > label {flex-basis:96px!important;font-size:.72rem!important;padding:5px 5px!important}
+    .st-key-danip_workspace_selector [role="radiogroup"],
+    .st-key-danip_workspace_selector [role="group"] {flex-wrap:wrap!important}
+    .st-key-danip_workspace_selector [role="radiogroup"] button,
+    .st-key-danip_workspace_selector [role="group"] button {flex:1 1 96px!important;font-size:.72rem!important;padding:5px!important}
     .st-key-nexus_top_refresh button {width:38px!important;min-width:38px!important;padding:0!important;font-size:0!important}
     .st-key-nexus_top_refresh button::after {content:"↻";font-size:1.15rem!important;line-height:1!important}
 }
 @media (max-width:600px) {
     div[data-testid="stHorizontalBlock"]:has(.st-key-danip_workspace_selector) {flex-wrap:nowrap!important;gap:5px!important}
-    .st-key-danip_workspace_selector div[role="radiogroup"] {gap:0!important;min-height:0!important}
-    .st-key-danip_workspace_selector div[role="radiogroup"] > label {flex:1 1 48%!important;min-height:46px!important;font-size:.65rem!important;padding:4px 3px!important}
+    .st-key-danip_workspace_selector [role="radiogroup"],
+    .st-key-danip_workspace_selector [role="group"] {gap:2px!important;min-height:0!important}
+    .st-key-danip_workspace_selector [role="radiogroup"] button,
+    .st-key-danip_workspace_selector [role="group"] button {flex:1 1 48%!important;min-height:42px!important;font-size:.65rem!important;padding:4px 3px!important}
 }
 </style>
     """,
