@@ -14933,9 +14933,9 @@ def render_danip_me_management_hubdef render_danip_me_management_hub():
         )
 
     # ---------------------------------------------------------
-    # LIVE DASHBOARD STATUS / CHANGE NOTIFICATION    # LIVE DASHBOARD STATUS / CHANGE NOTIFICATION
+    # LIVE DASHBOARD STATUS / CHANGE NOTIFICATION
     # ---------------------------------------------------------
-    filter_signature = (f_period, f_ou, tuple(f_indicator))
+    filter_signature = (f_period, f_ou, tuple(f_indicator), f_aggregation)
     previous_signature = st.session_state.get("mehub_previous_filter_signature")
     if previous_signature is not None and previous_signature != filter_signature:
         st.toast("Output analytics refreshed for the current selection.", icon="🔄")
