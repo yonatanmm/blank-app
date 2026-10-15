@@ -2480,6 +2480,92 @@ st.markdown(
     unsafe_allow_html=True,
 )
 # ============================================================
+# TOP-LEVEL DANIP WORKSPACE NAVIGATION
+# ============================================================
+# Use a horizontal Streamlit radio as the workspace switcher rather than
+# st.tabs. The refresh control is placed beside the workspace selector so
+# users can restart the application without using the browser refresh icon.
+
+workspace_options = [
+    "🤖 DANIP AI Data Analyst",
+    "🧭 DANIP M&E Management Hub",
+    "📊 Universal Power BI Analytics",
+    "🌐 AI Public Website Builder",
+    "📅 My Reports & Monitoring",
+]
+workspace_short_labels = {
+    "🤖 DANIP AI Data Analyst": "🤖 AI Analyst",
+    "🧭 DANIP M&E Management Hub": "🧭 M&E Hub",
+    "📊 Universal Power BI Analytics": "📊 Power BI",
+    "🌐 AI Public Website Builder": "🌐 Website Builder",
+    "📅 My Reports & Monitoring": "📅 Reports",
+}
+active_workspace = st.session_state.get("danip_workspace_selector", workspace_options[0])
+active_workspace_title = active_workspace.split(" ", 1)[-1]
+
+brand_col, page_col, nav_col, refresh_col = st.columns(
+    [1.55, 1.65, 5.9, .9], gap="small", vertical_alignment="center"
+)
+
+with brand_col:
+    st.markdown(
+        '<div class="nexus-top-brand">'
+        '<span class="nexus-top-brand-mark">N</span>'
+        '<span class="nexus-top-brand-copy"><span class="nexus-top-brand-name">NEXUS DANIP</span>'
+        '<span class="nexus-top-brand-subtitle">DATA INTELLIGENCE</span></span></div>',
+        unsafe_allow_html=True,
+    )
+
+with page_col:
+    st.markdown(
+        '<div class="nexus-top-page"><span class="nexus-top-page-kicker">CURRENT WORKSPACE</span>'
+        f'<span class="nexus-top-page-title">{html.escape(active_workspace_title)}</span></div>',
+        unsafe_allow_html=True,
+    )
+
+with nav_col:
+    workspace = st.radio(
+        "DANIP workspace",
+        workspace_options,
+        horizontal=True,
+        format_func=lambda option: workspace_short_labels.get(option, option),
+        label_visibility="collapsed",
+        key="danip_workspace_selector",
+    )
+
+with refresh_col:
+    st.markdown(
+        """
+        <style>
+        .st-key-nexus_top_refresh button {width:100%;}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    if st.button("↻ Refresh", key="nexus_top_refresh", help="Refresh and reset the current session", use_container_width=True):
+        # Full application reset: also remove the pasted API/Data URL so the
+        # user returns to a completely blank starting point. Persistent MEAL
+        # records in danip_meal.db are intentionally preserved.
+        _auth_state = {
+            "danip_authenticated": st.session_state.get("danip_authenticated", False),
+            "danip_user": st.session_state.get("danip_user", {}),
+            "danip_access_token": st.session_state.get("danip_access_token", ""),
+            "danip_refresh_token": st.session_state.get("danip_refresh_token", ""),
+        }
+        st.session_state.clear()
+        st.session_state.update(_auth_state)
+        st.session_state["data_url_input"] = ""
+        st.session_state["last_analyzed_url"] = ""
+        st.session_state["loaded_source_url"] = ""
+        st.session_state["data_loaded"] = False
+        try:
+            st.query_params.clear()
+        except Exception:
+            pass
+        st.rerun()
+
+
+# ============================================================
 # HEADER
 # ============================================================
 
@@ -19965,242 +20051,185 @@ render_common_sidebar()
 st.markdown(
     """
 <style>
-/* ============================================================
-   DANIP WORKSPACE TABS — TRANSPARENT ADMIN NAVIGATION
-   No filled background. Active workspace uses red indicator.
-   ============================================================ */
-
-/* Horizontal workspace selector */
-div[data-testid="stRadio"] {
-    width: 100% !important;
-    margin: 0 !important;
-    padding: 0 !important;
+/* Compact enterprise header: brand, workspace navigation and refresh utility. */
+.st-key-danip_workspace_selector {
+    width:100%!important;
+    margin:0!important;
+    padding:0!important;
+    background:transparent!important;
+    border:0!important;
+    border-radius:0!important;
+    overflow:visible!important;
 }
-
-/* Remove the radio group's default visual label spacing */
-div[data-testid="stRadio"] > label {
-    display: none !important;
+.st-key-danip_workspace_selector [role="radio"] {
+    min-height:44px!important;
+    padding:5px 7px!important;
+    background:transparent!important;
+    color:#334155!important;
+    -webkit-text-fill-color:#334155!important;
+    font-size:.76rem!important;
+    font-weight:650!important;
+    white-space:normal!important;
 }
-
-/* The horizontal option row */
-div[data-testid="stRadio"] div[role="radiogroup"] {
-    display: flex !important;
-    flex-direction: row !important;
-    align-items: center !important;
-    gap: 0 !important;
-    width: 100% !important;
-    min-height: 46px !important;
-    padding: 0 !important;
-    margin: 0 !important;
-    background: transparent !important;
-    border: 0 !important;
-    box-shadow: none !important;
-    overflow-x: auto !important;
-    scrollbar-width: none !important;
+.st-key-danip_workspace_selector [role="radio"]:hover {background:#f1f5f9!important;color:#17374b!important}
+.st-key-danip_workspace_selector [role="radio"][aria-checked="true"] {
+    background:#f1f5f9!important;
+    color:#17374b!important;
+    -webkit-text-fill-color:#17374b!important;
+    box-shadow:inset 0 -3px #b03a2e!important;
 }
-div[data-testid="stRadio"] div[role="radiogroup"]::-webkit-scrollbar {
-    display: none !important;
+.st-key-danip_workspace_selector [role="radio"] *,
+.st-key-danip_workspace_selector [role="radio"] p,
+.st-key-danip_workspace_selector [role="radio"] span {
+    color:inherit!important;
+    -webkit-text-fill-color:inherit!important;
+    font-weight:inherit!important;
 }
-
-/* Each workspace option */
-div[data-testid="stRadio"] div[role="radiogroup"] > label {
-    position: relative !important;
-    display: inline-flex !important;
-    align-items: center !important;
-    justify-content: center !important;
-    flex: 0 0 auto !important;
-    min-height: 46px !important;
-    padding: 0 22px !important;
-    margin: 0 !important;
-    background: transparent !important;
-    border: 0 !important;
-    border-radius: 0 !important;
-    box-shadow: none !important;
-    color: #17374b !important;
-    -webkit-text-fill-color: #17374b !important;
-    font-weight: 650 !important;
-    font-size: 0.92rem !important;
-    cursor: pointer !important;
-    white-space: nowrap !important;
-    transition: color .15s ease, background .15s ease !important;
+.st-key-danip_workspace_selector [role="radio"] > div:first-child {display:none!important}
+.st-key-danip_workspace_selector [role="radio"] input {display:none!important}
+.st-key-danip_workspace_selector > label {display:none!important}
+.st-key-danip_workspace_selector div[role="radiogroup"] {
+    display:flex!important;
+    flex-direction:row!important;
+    flex-wrap:nowrap!important;
+    align-items:center!important;
+    justify-content:flex-start!important;
+    gap:2px!important;
+    width:100%!important;
+    min-height:56px!important;
+    padding:0!important;
+    margin:0!important;
+    overflow:visible!important;
+    background:transparent!important;
+    border:0!important;
+    box-shadow:none!important;
 }
-
-/* Kill Streamlit's selected filled background */
-div[data-testid="stRadio"] div[role="radiogroup"] > label,
-div[data-testid="stRadio"] div[role="radiogroup"] > label:hover,
-div[data-testid="stRadio"] div[role="radiogroup"] > label:has(input:checked) {
-    background: transparent !important;
+.st-key-danip_workspace_selector div[role="radiogroup"] > label {
+    position:relative!important;
+    display:flex!important;
+    flex:1 1 100px!important;
+    align-items:center!important;
+    justify-content:center!important;
+    min-width:0!important;
+    min-height:52px!important;
+    padding:5px 8px!important;
+    margin:0!important;
+    border:0!important;
+    border-radius:6px!important;
+    background:transparent!important;
+    color:#334155!important;
+    -webkit-text-fill-color:#334155!important;
+    font-size:.78rem!important;
+    font-weight:650!important;
+    line-height:1.2!important;
+    text-align:center!important;
+    white-space:normal!important;
+    overflow-wrap:anywhere!important;
+    cursor:pointer!important;
+    transition:background .15s ease,color .15s ease!important;
 }
-
-/* Text inside options */
-div[data-testid="stRadio"] div[role="radiogroup"] > label p,
-div[data-testid="stRadio"] div[role="radiogroup"] > label span,
-div[data-testid="stRadio"] div[role="radiogroup"] > label div {
-    color: #17374b !important;
-    -webkit-text-fill-color: #17374b !important;
+.st-key-danip_workspace_selector div[role="radiogroup"] > label:hover {
+    background:#f1f5f9!important;
 }
-
-/* Native radio indicator — white/transparent by default */
-div[data-testid="stRadio"] div[role="radiogroup"] > label input {
-    accent-color: #b03a2e !important;
+.st-key-danip_workspace_selector div[role="radiogroup"] > label:has(input:checked) {
+    color:#17374b!important;
+    -webkit-text-fill-color:#17374b!important;
+    background:#f1f5f9!important;
+    box-shadow:inset 0 -3px #b03a2e!important;
 }
-
-/* Active red indicator and red text */
-div[data-testid="stRadio"] div[role="radiogroup"] > label:has(input:checked) {
-    color: #17374b !important;
-    -webkit-text-fill-color: #17374b !important;
+.st-key-danip_workspace_selector div[role="radiogroup"] > label p,
+.st-key-danip_workspace_selector div[role="radiogroup"] > label span,
+.st-key-danip_workspace_selector div[role="radiogroup"] > label div {
+    color:inherit!important;
+    -webkit-text-fill-color:inherit!important;
+    margin:0!important;
+    line-height:inherit!important;
 }
-
-/* Red underline for active workspace, like the reference */
-div[data-testid="stRadio"] div[role="radiogroup"] > label:has(input:checked)::after {
-    content: "" !important;
-    position: absolute !important;
-    left: 14px !important;
-    right: 14px !important;
-    bottom: 0 !important;
-    height: 3px !important;
-    background: #b03a2e !important;
-    border-radius: 0 !important;
+.st-key-danip_workspace_selector div[role="radiogroup"] > label input {accent-color:#b03a2e!important}
+.st-key-danip_workspace_selector div[role="radiogroup"] > label input {
+    position:absolute!important;
+    width:1px!important;
+    height:1px!important;
+    opacity:0!important;
 }
-
-/* ============================================================
-   NO HOVER / NO FOCUS BACKGROUND
-   Workspace navigation stays transparent at all times.
-   Only the active workspace gets the red underline.
-   ============================================================ */
-div[data-testid="stRadio"],
-div[data-testid="stRadio"] > div,
-div[data-testid="stRadio"] > div > div,
-div[data-testid="stRadio"] div[role="radiogroup"],
-div[data-testid="stRadio"] div[role="radiogroup"] > label,
-div[data-testid="stRadio"] div[role="radiogroup"] > label:hover,
-div[data-testid="stRadio"] div[role="radiogroup"] > label:focus,
-div[data-testid="stRadio"] div[role="radiogroup"] > label:focus-within,
-div[data-testid="stRadio"] div[role="radiogroup"] > label:active,
-div[data-testid="stRadio"] div[role="radiogroup"] > label:has(input:checked),
-div[data-testid="stRadio"] div[role="radiogroup"] > label:has(input:checked):hover,
-div[data-testid="stRadio"] div[role="radiogroup"] > label:has(input:checked):focus,
-div[data-testid="stRadio"] div[role="radiogroup"] > label:has(input:checked):focus-within {
-    background: transparent !important;
-    background-color: transparent !important;
-    box-shadow: none !important;
-    outline: none !important;
+.st-key-danip_workspace_selector div[role="radiogroup"] > label > div:first-child {display:none!important}
+.st-key-danip_workspace_selector div[role="radiogroup"] label[data-baseweb="radio"] > div > div:first-child {display:none!important}
+.st-key-danip_workspace_selector div[role="radiogroup"] label[data-baseweb="radio"] > div {gap:0!important}
+.st-key-danip_workspace_selector div[role="radiogroup"] > label:focus-within {
+    outline:2px solid #93c5fd!important;
+    outline-offset:-2px!important;
 }
-
-div[data-testid="stRadio"] div[role="radiogroup"] > label:hover,
-div[data-testid="stRadio"] div[role="radiogroup"] > label:focus,
-div[data-testid="stRadio"] div[role="radiogroup"] > label:focus-within,
-div[data-testid="stRadio"] div[role="radiogroup"] > label:active {
-    color: #17374b !important;
-    -webkit-text-fill-color: #17374b !important;
-    filter: none !important;
-    transform: none !important;
+.st-key-nexus_top_refresh button {
+    min-height:38px!important;
+    height:38px!important;
+    border:1px solid #d5dee8!important;
+    border-radius:7px!important;
+    background:#fff!important;
+    color:#2c3e50!important;
+    font-size:.78rem!important;
+    font-weight:650!important;
+    padding:0 10px!important;
+    white-space:nowrap!important;
+    transition:background .15s ease,border-color .15s ease!important;
 }
-
-div[data-testid="stRadio"] div[role="radiogroup"] > label:hover p,
-div[data-testid="stRadio"] div[role="radiogroup"] > label:hover span,
-div[data-testid="stRadio"] div[role="radiogroup"] > label:hover div,
-div[data-testid="stRadio"] div[role="radiogroup"] > label:focus p,
-div[data-testid="stRadio"] div[role="radiogroup"] > label:focus span,
-div[data-testid="stRadio"] div[role="radiogroup"] > label:focus div,
-div[data-testid="stRadio"] div[role="radiogroup"] > label:focus-within p,
-div[data-testid="stRadio"] div[role="radiogroup"] > label:focus-within span,
-div[data-testid="stRadio"] div[role="radiogroup"] > label:focus-within div {
-    color: #17374b !important;
-    -webkit-text-fill-color: #17374b !important;
-    background: transparent !important;
+.st-key-nexus_top_refresh button:hover {
+    background:#f1f5f9!important;
+    border-color:#aebdcd!important;
 }
-
-/* Remove Streamlit's focus ring / keyboard highlight */
-div[data-testid="stRadio"] input:focus,
-div[data-testid="stRadio"] input:focus-visible {
-    outline: none !important;
-    box-shadow: none !important;
+.nexus-top-brand {
+    display:flex;
+    align-items:center;
+    gap:9px;
+    min-height:56px;
+    color:#2c3e50;
+    white-space:nowrap;
 }
-
-/* Mobile */
-@media (max-width: 700px) {
-    div[data-testid="stRadio"] div[role="radiogroup"] > label {
-        padding: 0 14px !important;
-        font-size: 0.84rem !important;
-    }
+.nexus-top-brand-mark {
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    width:32px;
+    height:32px;
+    flex:0 0 32px;
+    border-radius:7px;
+    background:#2c3e50;
+    color:#fff;
+    font-size:.95rem;
+    font-weight:800;
+}
+.nexus-top-brand-name {font-size:.84rem;font-weight:800;letter-spacing:.01em;line-height:1.15}
+.nexus-top-brand-copy {display:flex;flex-direction:column;min-width:0}
+.nexus-top-brand-subtitle {margin-top:2px;color:#64748b;font-size:.58rem;font-weight:650;letter-spacing:.08em;line-height:1.1}
+.nexus-top-page {display:flex;flex-direction:column;justify-content:center;min-height:50px;min-width:0;padding-left:8px;border-left:1px solid #e2e8f0;color:#2c3e50}
+.nexus-top-page-kicker {color:#64748b;font-size:.55rem;font-weight:750;letter-spacing:.08em;line-height:1.1}
+.nexus-top-page-title {margin-top:3px;font-size:.76rem;font-weight:750;line-height:1.2;overflow-wrap:anywhere}
+div[data-testid="stHorizontalBlock"]:has(.st-key-danip_workspace_selector) {
+    align-items:center!important;
+    gap:10px!important;
+    padding:2px 0 6px!important;
+    border-bottom:1px solid #e2e8f0!important;
+}
+@media (max-width:900px) {
+    div[data-testid="stHorizontalBlock"]:has(.st-key-danip_workspace_selector) > div:first-child {flex:0 0 42px!important;min-width:42px!important}
+    div[data-testid="stHorizontalBlock"]:has(.st-key-danip_workspace_selector) > div:nth-child(2) {display:none!important}
+    div[data-testid="stHorizontalBlock"]:has(.st-key-danip_workspace_selector) > div:nth-child(3) {flex:1 1 auto!important;min-width:0!important}
+    div[data-testid="stHorizontalBlock"]:has(.st-key-danip_workspace_selector) > div:last-child {flex:0 0 42px!important;min-width:42px!important}
+    .nexus-top-brand-copy {display:none!important}
+    .nexus-top-brand {justify-content:center!important}
+    .st-key-danip_workspace_selector div[role="radiogroup"] {flex-wrap:wrap!important}
+    .st-key-danip_workspace_selector div[role="radiogroup"] > label {flex-basis:96px!important;font-size:.72rem!important;padding:5px 5px!important}
+    .st-key-nexus_top_refresh button {width:38px!important;min-width:38px!important;padding:0!important;font-size:0!important}
+    .st-key-nexus_top_refresh button::after {content:"↻";font-size:1.15rem!important;line-height:1!important}
+}
+@media (max-width:600px) {
+    div[data-testid="stHorizontalBlock"]:has(.st-key-danip_workspace_selector) {flex-wrap:nowrap!important;gap:5px!important}
+    .st-key-danip_workspace_selector div[role="radiogroup"] {gap:0!important;min-height:0!important}
+    .st-key-danip_workspace_selector div[role="radiogroup"] > label {flex:1 1 48%!important;min-height:46px!important;font-size:.65rem!important;padding:4px 3px!important}
 }
 </style>
     """,
     unsafe_allow_html=True,
 )
-
-
-# ============================================================
-# TOP-LEVEL DANIP WORKSPACE NAVIGATION
-# ============================================================
-# Use a horizontal Streamlit radio as the workspace switcher rather than
-# st.tabs. The refresh control is placed beside the workspace selector so
-# users can restart the application without using the browser refresh icon.
-
-nav_col, refresh_col = st.columns([8.5, 1.5], gap="small", vertical_alignment="center")
-
-with nav_col:
-    workspace = st.radio(
-        "DANIP workspace",
-        [
-            "🤖 DANIP AI Data Analyst",
-            "🧭 DANIP M&E Management Hub",
-            "📊 Universal Power BI Analytics",
-            "🌐 AI Public Website Builder",
-            "📅 My Reports & Monitoring",
-        ],
-        horizontal=True,
-        label_visibility="collapsed",
-        key="danip_workspace_selector",
-    )
-
-with refresh_col:
-    st.markdown(
-        """
-        <style>
-        div[data-testid="stButton"] > button.nexus-top-refresh {
-            min-height: 38px !important;
-            height: 38px !important;
-            border: 1px solid #17374b !important;
-            border-radius: 6px !important;
-            background: #17374b !important;
-            color: #ffffff !important;
-            font-size: 0.82rem !important;
-            font-weight: 650 !important;
-            padding: 0 12px !important;
-            white-space: nowrap !important;
-        }
-        div[data-testid="stButton"] > button.nexus-top-refresh:hover {
-            background: #244f66 !important;
-            border-color: #244f66 !important;
-            color: #ffffff !important;
-        }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-    if st.button("🔄 Refresh", key="nexus_top_refresh", use_container_width=True):
-        # Full application reset: also remove the pasted API/Data URL so the
-        # user returns to a completely blank starting point. Persistent MEAL
-        # records in danip_meal.db are intentionally preserved.
-        _auth_state = {
-            "danip_authenticated": st.session_state.get("danip_authenticated", False),
-            "danip_user": st.session_state.get("danip_user", {}),
-            "danip_access_token": st.session_state.get("danip_access_token", ""),
-            "danip_refresh_token": st.session_state.get("danip_refresh_token", ""),
-        }
-        st.session_state.clear()
-        st.session_state.update(_auth_state)
-        st.session_state["data_url_input"] = ""
-        st.session_state["last_analyzed_url"] = ""
-        st.session_state["loaded_source_url"] = ""
-        st.session_state["data_loaded"] = False
-        try:
-            st.query_params.clear()
-        except Exception:
-            pass
-        st.rerun()
 
 
 # ============================================================
