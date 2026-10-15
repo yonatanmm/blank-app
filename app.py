@@ -14416,7 +14416,7 @@ def _me_hub_indicator_columns(df):
 
     return out
 
-def _me_hub_extract_source_indicatorsdef _me_hub_extract_source_indicators(source_url):
+def _me_hub_extract_source_indicators(source_url):
     """Extract the complete dx indicator universe from a DHIS2 analytics URL.
 
     DHIS2 analytics URLs can request indicators explicitly with one or more
@@ -14820,7 +14820,7 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
         "Reporting coverage (%)": st.column_config.ProgressColumn("Reporting coverage (%)", min_value=0, max_value=100, format="%.1f%%"),
     })
 
-def render_danip_me_management_hubdef render_danip_me_management_hub():
+def render_danip_me_management_hub():
     """Separate responsive M&E Management Hub using the already-loaded API dataset when available."""
     _me_hub_init_db()
     _me_hub_responsive_css()
