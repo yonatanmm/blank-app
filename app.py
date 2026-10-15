@@ -13925,6 +13925,187 @@ def _me_hub_numeric_series(series):
     return pd.to_numeric(cleaned, errors="coerce")
 
 
+_ME_HUB_AGGREGATION_OPTIONS = [
+    "Sum (Default)",
+    "Mean (Average)",
+    "Count",
+    "Minimum",
+    "Maximum",
+]
+
+
+def _me_hub_aggregate_series(series, aggregation_type="Sum (Default)"):
+    """Aggregate valid numeric observations without converting missing values to zero."""
+    values = _me_hub_numeric_series(series).dropna()
+    method = {
+        "Sum (Default)": "sum",
+        "Sum": "sum",
+        "Mean (Average)": "mean",
+        "Mean": "mean",
+        "Average": "mean",
+        "Count": "count",
+        "Minimum": "min",
+        "Minimum (Min)": "min",
+        "Maximum": "max",
+        "Maximum (Max)": "max",
+    }.get(str(aggregation_type), str(aggregation_type).strip().lower())
+
+    if method == "count":
+        return int(values.count())
+    if values.empty:
+        return np.nan
+    if method == "sum":
+        return float(values.sum(min_count=1))
+    if method == "mean":
+        return float(values.mean())
+    if method in {"min", "minimum"}:
+        return float(values.min())
+    if method in {"max", "maximum"}:
+        return float(values.max())
+    raise ValueError(f"Unsupported M&E aggregation type: {aggregation_type}")
+
+
+def _me_hub_is_non_additive_indicator(indicator):
+    """Identify rate-like measures by their labels when definition metadata is absent."""
+    label = str(indicator or "").strip().lower()
+    return bool(re.search(
+        r"%|\b(percent(?:age)?|coverage|proportion|rate|ratio|prevalence|incidence)\b",
+        label,
+    ))
+
+
+def _me_hub_find_numerator_denominator(df, indicator):
+    """Find a unique related numerator/denominator pair, or a single generic pair."""
+    if not isinstance(df, pd.DataFrame):
+        return None, None
+
+    marker = re.compile(r"(?:^|[\s_-])(numerator|num|denominator|den)(?:$|[\s_-])", re.I)
+    excluded = {"numerator", "num", "denominator", "den", "coverage", "rate", "ratio", "percentage", "percent", "proportion", "of", "the"}
+
+    def parts(value):
+        return [token for token in re.findall(r"[a-z0-9]+", str(value).lower()) if token not in excluded]
+
+    def base_parts(value):
+        return re.findall(r"[a-z0-9]+", marker.sub(" ", str(value)).lower())
+
+    indicator_parts = parts(indicator)
+    indicator_tokens = set(re.findall(r"[a-z0-9]+", str(indicator).lower()))
+    numerator_cols, denominator_cols = [], []
+    for col in df.columns:
+        match = marker.search(str(col))
+        if not match:
+            continue
+        kind = match.group(1).lower()
+        column_base = base_parts(col)
+        score = len(set(indicator_parts) & set(column_base))
+        record = (score, col)
+        if kind in {"numerator", "num"}:
+            numerator_cols.append(record)
+        else:
+            denominator_cols.append(record)
+
+    if len(numerator_cols) == 1 and len(denominator_cols) == 1:
+        numerator_base = set(base_parts(numerator_cols[0][1]))
+        denominator_base = set(base_parts(denominator_cols[0][1]))
+        if not numerator_base and not denominator_base:
+            return numerator_cols[0][1], denominator_cols[0][1]
+        if numerator_base == denominator_base and numerator_base & indicator_tokens:
+            return numerator_cols[0][1], denominator_cols[0][1]
+
+    if not indicator_parts:
+        return None, None
+
+    numerator_cols = sorted(numerator_cols, key=lambda item: item[0], reverse=True)
+    denominator_cols = sorted(denominator_cols, key=lambda item: item[0], reverse=True)
+    if (
+        numerator_cols and denominator_cols
+        and numerator_cols[0][0] > 0
+        and denominator_cols[0][0] > 0
+        and (len(numerator_cols) == 1 or numerator_cols[0][0] > numerator_cols[1][0])
+        and (len(denominator_cols) == 1 or denominator_cols[0][0] > denominator_cols[1][0])
+    ):
+        return numerator_cols[0][1], denominator_cols[0][1]
+    return None, None
+
+
+def _me_hub_resolve_aggregation(df, indicator, aggregation_type):
+    """Resolve the requested method and safeguard non-additive indicators."""
+    requested = str(aggregation_type or "Sum (Default)")
+    method = {
+        "Sum (Default)": "sum",
+        "Mean (Average)": "mean",
+        "Count": "count",
+        "Minimum": "min",
+        "Maximum": "max",
+    }.get(requested, "sum")
+    result = {
+        "requested": requested,
+        "method": method,
+        "label": {"sum": "Sum", "mean": "Mean", "count": "Count", "min": "Minimum", "max": "Maximum"}[method],
+        "numerator": None,
+        "denominator": None,
+        "scale": 1.0,
+        "note": "",
+    }
+
+    if method == "sum" and _me_hub_is_non_additive_indicator(indicator):
+        numerator, denominator = _me_hub_find_numerator_denominator(df, indicator)
+        if numerator is not None and denominator is not None:
+            result.update({
+                "method": "weighted_rate",
+                "numerator": numerator,
+                "denominator": denominator,
+                "scale": 100.0 if re.search(r"%|\b(percent(?:age)?|coverage|proportion)\b", str(indicator), re.I) else 1.0,
+                "label": "Weighted rate",
+                "note": f"{indicator}: calculated from summed numerator and denominator; values were not summed.",
+            })
+        else:
+            result.update({
+                "method": "mean",
+                "label": "Mean safeguard",
+                "note": f"{indicator}: SUM is not valid for a rate/percentage. Mean of valid reported values used because a unique numerator/denominator pair was not available.",
+            })
+    return result
+
+
+def _me_hub_apply_aggregation(values, resolution, numerator=None, denominator=None):
+    """Apply a resolved M&E aggregation, using paired components for weighted rates."""
+    if resolution.get("method") == "weighted_rate":
+        num = _me_hub_numeric_series(numerator).reset_index(drop=True) if numerator is not None else pd.Series(dtype=float)
+        den = _me_hub_numeric_series(denominator).reset_index(drop=True) if denominator is not None else pd.Series(dtype=float)
+        if num.empty or den.empty:
+            return np.nan
+        paired = pd.DataFrame({"numerator": num, "denominator": den}).dropna()
+        paired = paired[paired["denominator"] > 0]
+        denominator_total = float(paired["denominator"].sum(min_count=1)) if not paired.empty else np.nan
+        if paired.empty or not np.isfinite(denominator_total) or denominator_total <= 0:
+            return np.nan
+        return float(paired["numerator"].sum(min_count=1) / denominator_total * resolution.get("scale", 1.0))
+    return _me_hub_aggregate_series(values, resolution.get("method", "sum"))
+
+
+def _me_hub_aggregate_by_group(df, group_cols, value_col, resolution):
+    """Reusable grouped aggregation for reporting periods and organisation units."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return pd.DataFrame(columns=[*group_cols, "value"])
+    if group_cols:
+        grouped = df.groupby(group_cols, dropna=False, sort=False)
+    else:
+        grouped = [((), df)]
+
+    rows = []
+    for key, group in grouped:
+        key_values = key if isinstance(key, tuple) else (key,)
+        row = dict(zip(group_cols, key_values))
+        numerator_col = resolution.get("numerator")
+        denominator_col = resolution.get("denominator")
+        numerator = group[numerator_col] if numerator_col in group.columns else None
+        denominator = group[denominator_col] if denominator_col in group.columns else None
+        row["value"] = _me_hub_apply_aggregation(group[value_col], resolution, numerator, denominator)
+        rows.append(row)
+    return pd.DataFrame(rows, columns=[*group_cols, "value"])
+
+
 def _me_hub_find_indicator_dimension(df):
     """Find the DHIS2 long-format indicator dimension (usually dx)."""
     if not isinstance(df, pd.DataFrame) or df.empty:
@@ -14192,6 +14373,7 @@ def _me_hub_indicator_columns(df):
     exact_metadata = {
         "id", "uid", "uuid", "code", "year", "month", "day",
         "quarter", "week", "period", "periodid", "periodcode",
+        "numerator", "denominator", "num", "den",
         "period_id", "period_code", "ou", "ouid", "ou_id",
         "organisationunitid", "organisationunit_id",
         "organisation unit id", "orgunitid", "orgunit_id",
@@ -14234,7 +14416,7 @@ def _me_hub_indicator_columns(df):
 
     return out
 
-def _me_hub_extract_source_indicators(source_url):
+def _me_hub_extract_source_indicatorsdef _me_hub_extract_source_indicators(source_url):
     """Extract the complete dx indicator universe from a DHIS2 analytics URL.
 
     DHIS2 analytics URLs can request indicators explicitly with one or more
@@ -14390,7 +14572,7 @@ def _me_hub_resolve_organisation_names(df, source_url=None):
     return out
 
 
-def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_ou="All", selected_indicator="All"):
+def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_ou="All", selected_indicator="All", aggregation_type="Sum (Default)"):
     """Render output-focused performance, value completeness and trends."""
     if not isinstance(df, pd.DataFrame) or df.empty:
         st.info("Load the API dataset in DANIP AI Data Analyst to populate output analytics.")
@@ -14424,27 +14606,48 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
         return
 
     values = {col: _me_hub_numeric_series(work[col]) for col in indicator_cols}
+    aggregation_by_indicator = {
+        col: _me_hub_resolve_aggregation(work, col, aggregation_type)
+        for col in indicator_cols
+    }
     observation_count = sum(int(series.notna().sum()) for series in values.values())
     def _output_period_summary(indicator):
-        indicator_rows = pd.DataFrame({
-            "period": work["__ME_PERIOD_LABEL__"],
-            "period_date": work["__ME_PERIOD_DATE__"],
-            "value": values[indicator],
-        }).dropna(subset=["value"])
-        if indicator_rows["period_date"].notna().any():
-            return indicator_rows.dropna(subset=["period_date"]).groupby(
-                ["period", "period_date"], as_index=False
-            )["value"].mean().sort_values("period_date")
-        return indicator_rows.groupby("period", as_index=False, sort=False)["value"].mean()
+        resolution = aggregation_by_indicator[indicator]
+        indicator_rows = work[["__ME_PERIOD_LABEL__", "__ME_PERIOD_DATE__"]].copy()
+        indicator_rows["__ME_VALUE__"] = values[indicator]
+        for paired_col in (resolution.get("numerator"), resolution.get("denominator")):
+            if paired_col and paired_col in work.columns:
+                indicator_rows[paired_col] = work[paired_col]
+        if indicator_rows["__ME_PERIOD_DATE__"].notna().any():
+            indicator_rows = indicator_rows.dropna(subset=["__ME_PERIOD_DATE__"])
+            period_values = _me_hub_aggregate_by_group(
+                indicator_rows,
+                ["__ME_PERIOD_LABEL__", "__ME_PERIOD_DATE__"],
+                "__ME_VALUE__",
+                resolution,
+            ).sort_values("__ME_PERIOD_DATE__")
+            return period_values.rename(columns={"__ME_PERIOD_LABEL__": "period", "__ME_PERIOD_DATE__": "period_date"})
+        period_values = _me_hub_aggregate_by_group(
+            indicator_rows, ["__ME_PERIOD_LABEL__"], "__ME_VALUE__", resolution
+        )
+        return period_values.rename(columns={"__ME_PERIOD_LABEL__": "period"})
 
     period_summaries = {indicator: _output_period_summary(indicator) for indicator in indicator_cols}
     indicators_with_trend = sum(len(period_summary) >= 2 for period_summary in period_summaries.values())
-    kpis = st.columns(4)
+    kpis = st.columns(5)
     kpis[0].metric("Output indicators", f"{len(indicator_cols):,}")
     kpis[1].metric("Reported values", f"{observation_count:,}")
     kpis[2].metric("Indicators with trend", f"{indicators_with_trend:,} / {len(indicator_cols):,}", help="Indicators with reported values in at least two distinct reporting periods in the current selection.")
     kpis[3].metric("Reporting units", f"{work['__ME_OU_LABEL__'].nunique():,}")
-    st.caption(f"{work['__ME_PERIOD_LABEL__'].nunique():,} reporting period(s) in the current selection. Period-to-period changes are calculated within each indicator; indicators with different units are not compared by raw value.")
+    kpis[4].metric("Aggregation Type", aggregation_type)
+    st.caption(f"{work['__ME_PERIOD_LABEL__'].nunique():,} reporting period(s) in the current selection. {aggregation_type} is applied independently within each indicator; indicators with different units are not combined.")
+    aggregation_notes = list(dict.fromkeys(
+        resolution["note"] for resolution in aggregation_by_indicator.values() if resolution.get("note")
+    ))
+    for note in aggregation_notes[:5]:
+        st.warning(note)
+    if len(aggregation_notes) > 5:
+        st.caption(f"{len(aggregation_notes) - 5} additional indicator-specific aggregation safeguards are applied.")
 
     rows = []
     for col, series in values.items():
@@ -14465,6 +14668,7 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
         )
         rows.append({
             "Output indicator": _me_hub_indicator_label(col),
+            "Aggregation used": aggregation_by_indicator[col]["label"],
             "Reported values": observed,
             "Records in selection": len(work),
             "Value completeness": (observed / len(work) * 100) if len(work) else 0,
@@ -14502,6 +14706,7 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
 
     with right:
         st.markdown("### Indicator reports by period")
+        st.caption("This chart counts valid indicator observations per period; it describes reporting activity rather than aggregating indicator values.")
         activity = pd.DataFrame({
             "period": work["__ME_PERIOD_LABEL__"],
             "period_date": work["__ME_PERIOD_DATE__"],
@@ -14536,11 +14741,25 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
                 "period_date": work["__ME_PERIOD_DATE__"],
                 "organisation": work["__ME_OU_LABEL__"],
                 "value": series,
-            }).dropna(subset=["value"])
+            })
+            resolution = aggregation_by_indicator[indicator]
+            for paired_col in (resolution.get("numerator"), resolution.get("denominator")):
+                if paired_col and paired_col in work.columns:
+                    card_data[paired_col] = work.loc[card_data.index, paired_col]
             with card:
                 with st.container(border=True):
                     st.markdown(f"#### {_me_hub_indicator_label(indicator)}")
-                    if card_data.empty:
+                    has_card_values = card_data["value"].notna().any()
+                    if resolution.get("method") == "weighted_rate":
+                        numerator_col = resolution.get("numerator")
+                        denominator_col = resolution.get("denominator")
+                        if numerator_col in card_data.columns and denominator_col in card_data.columns:
+                            paired_values = pd.DataFrame({
+                                "numerator": _me_hub_numeric_series(card_data[numerator_col]),
+                                "denominator": _me_hub_numeric_series(card_data[denominator_col]),
+                            }).dropna()
+                            has_card_values = has_card_values or bool((paired_values["denominator"] > 0).any())
+                    if card_data.empty or not has_card_values:
                         st.info("No reported values in this selection.")
                         continue
 
@@ -14554,7 +14773,7 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
                     )
 
                     card_metrics = st.columns(3)
-                    card_metrics[0].metric("Latest period value", f"{latest_value:,.2f}", help=f"Mean across selected reporting units for {latest_period}.")
+                    card_metrics[0].metric("Latest period value", f"{latest_value:,.2f}", help=f"{resolution['label']} for {latest_period}; requested aggregation: {aggregation_type}.")
                     card_metrics[1].metric("Change vs prior", f"{change_pct:+.1f}%" if pd.notna(change_pct) else ("New" if len(period_values) >= 2 and previous_value == 0 else "—"), delta_color="normal")
                     card_metrics[2].metric("Values reported", f"{observed:,} / {len(work):,}")
                     st.progress(min(max(completeness / 100, 0.0), 1.0), text=f"Reporting coverage · {completeness:.1f}%")
@@ -14565,23 +14784,26 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
                             if "period_date" in period_values.columns:
                                 trend_fig = px.line(
                                     period_values, x="period_date", y="value", markers=True,
-                                    labels={"period_date": "Period", "value": "Mean value"},
+                                    labels={"period_date": "Period", "value": f"{resolution['label']} value"},
                                 )
                             else:
                                 trend_fig = px.line(
                                     period_values, x="period", y="value", markers=True,
-                                    labels={"period": "Period", "value": "Mean value"},
+                                    labels={"period": "Period", "value": f"{resolution['label']} value"},
                                 )
                             trend_fig.update_layout(height=230, margin=dict(l=4, r=4, t=8, b=4), showlegend=False)
                             st.plotly_chart(trend_fig, use_container_width=True, key=f"mehub_output_trend_{start_idx}_{indicator}")
                         with unit_col:
-                            latest_units = card_data[card_data["period"] == latest_period].groupby(
-                                "organisation", as_index=False
-                            )["value"].mean().sort_values("value", ascending=False).head(10)
+                            latest_units = _me_hub_aggregate_by_group(
+                                card_data[card_data["period"] == latest_period],
+                                ["organisation"],
+                                "value",
+                                resolution,
+                            ).sort_values("value", ascending=False).head(10)
                             unit_fig = px.bar(
                                 latest_units.sort_values("value", ascending=True),
                                 x="value", y="organisation", orientation="h",
-                                labels={"value": "Mean value", "organisation": "Reporting unit"},
+                                labels={"value": f"{resolution['label']} value", "organisation": "Reporting unit"},
                             )
                             unit_fig.update_layout(height=230, margin=dict(l=4, r=4, t=8, b=4), showlegend=False)
                             st.plotly_chart(unit_fig, use_container_width=True, key=f"mehub_output_units_{start_idx}_{indicator}")
@@ -14598,7 +14820,7 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
         "Reporting coverage (%)": st.column_config.ProgressColumn("Reporting coverage (%)", min_value=0, max_value=100, format="%.1f%%"),
     })
 
-def render_danip_me_management_hub():
+def render_danip_me_management_hubdef render_danip_me_management_hub():
     """Separate responsive M&E Management Hub using the already-loaded API dataset when available."""
     _me_hub_init_db()
     _me_hub_responsive_css()
@@ -14683,7 +14905,7 @@ def render_danip_me_management_hub():
     dept_options = ["All"] + sorted(base_programs["department"].dropna().astype(str).replace("", np.nan).dropna().unique().tolist()) if not base_programs.empty else ["All"]
     status_options = ["All"] + sorted(base_programs["status"].dropna().astype(str).replace("", np.nan).dropna().unique().tolist()) if not base_programs.empty else ["All"]
 
-    f1, f2, f3 = st.columns([1, 1, 1.4])
+    f1, f2, f3, f4 = st.columns([1, 1, 1.4, .95])
     with f1: f_period = st.selectbox("Period", period_options, key="mehub_period_filter")
     with f2: f_ou = st.selectbox("Reporting unit", ou_options, key="mehub_ou_filter")
     with f3:
@@ -14700,9 +14922,18 @@ def render_danip_me_management_hub():
             key="mehub_indicator_filter",
             help="Select output measures to analyze. Structural fields such as period, organisation unit and IDs are excluded.",
         )
+    if st.session_state.get("mehub_aggregation_type") not in _ME_HUB_AGGREGATION_OPTIONS:
+        st.session_state["mehub_aggregation_type"] = _ME_HUB_AGGREGATION_OPTIONS[0]
+    with f4:
+        f_aggregation = st.selectbox(
+            "Aggregation Type",
+            _ME_HUB_AGGREGATION_OPTIONS,
+            key="mehub_aggregation_type",
+            help="Applied independently per indicator. Rate and percentage indicators are protected from invalid summation.",
+        )
 
     # ---------------------------------------------------------
-    # LIVE DASHBOARD STATUS / CHANGE NOTIFICATION
+    # LIVE DASHBOARD STATUS / CHANGE NOTIFICATION    # LIVE DASHBOARD STATUS / CHANGE NOTIFICATION
     # ---------------------------------------------------------
     filter_signature = (f_period, f_ou, tuple(f_indicator))
     previous_signature = st.session_state.get("mehub_previous_filter_signature")
@@ -14737,7 +14968,7 @@ def render_danip_me_management_hub():
     if has_api:
         st.markdown("## 📊 Output Analytics")
         st.caption("Analyze output performance by indicator, reporting period and organisation unit, including period-to-period change, current values and reporting coverage. Each indicator is compared only with its own history.")
-        _me_hub_render_auto_indicator_dashboard(api_df, f_period, f_ou, f_indicator)
+        _me_hub_render_auto_indicator_dashboard(api_df, f_period, f_ou, f_indicator, f_aggregation)
     else:
         st.markdown("## 📊 Output Analytics")
         st.info("No API dataset is loaded. Paste the API/Data URL in DANIP AI Data Analyst and return here; output analytics will populate automatically.")
