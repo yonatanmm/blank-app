@@ -68,7 +68,7 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="NEXUS DANIP | Secure Access",
+    page_title="DANIP AI | Secure Access",
     page_icon="🔐",
     layout="centered",
     initial_sidebar_state="collapsed",
@@ -249,9 +249,10 @@ st.markdown(
    ============================================================ */
 
 .block-container {
-    max-width: 760px;
-    padding-top: 1.5rem;
-    padding-bottom: 2rem;
+    box-sizing: border-box;
+    width: 100%;
+    max-width: 720px;
+    padding: clamp(1rem, 4vh, 2.5rem) clamp(.75rem, 3vw, 1.5rem) 2rem;
 }
 
 
@@ -260,10 +261,14 @@ st.markdown(
    ============================================================ */
 
 .danip-card {
+    box-sizing: border-box;
+    width: 100%;
+    max-width: 620px;
+    margin: 0 auto;
     background: #ffffff;
     border: 1px solid #d7dee6;
     border-radius: 15px;
-    padding: 28px;
+    padding: clamp(18px, 4vw, 30px);
     box-shadow: 0 8px 28px rgba(23,55,75,0.08);
 }
 
@@ -275,7 +280,7 @@ st.markdown(
 .danip-title {
     text-align: center;
     color: #17374b;
-    font-size: 25px;
+    font-size: clamp(22px, 4vw, 30px);
     font-weight: 900;
     letter-spacing: -0.3px;
     margin-top: 2px;
@@ -290,7 +295,7 @@ st.markdown(
 .danip-subtitle {
     text-align: center;
     color: #557087;
-    font-size: 11px;
+    font-size: clamp(12px, 2vw, 14px);
     font-weight: 500;
     margin-bottom: 28px;
 }
@@ -306,6 +311,7 @@ st.markdown(
     border-radius: 8px;
     padding: 14px 16px;
     margin-bottom: 16px;
+    overflow-wrap: anywhere;
 }
 
 
@@ -319,7 +325,7 @@ st.markdown(
 
 .danip-security-text {
     color: #ffffff;
-    font-size: 10px;
+    font-size: 13px;
     line-height: 1.65;
     font-weight: 600;
 }
@@ -335,9 +341,10 @@ st.markdown(
     border-radius: 8px;
     padding: 11px 13px;
     color: #174b72;
-    font-size: 10px;
+    font-size: 12px;
     line-height: 1.65;
     margin-bottom: 16px;
+    overflow-wrap: anywhere;
 }
 
 
@@ -354,7 +361,8 @@ div[data-testid="stLinkButton"] > a {
 
     width: 100%;
 
-    min-height: 42px;
+    min-height: 48px;
+    box-sizing: border-box;
 
     border-radius: 7px;
 
@@ -364,7 +372,7 @@ div[data-testid="stLinkButton"] > a {
 
     color: #ffffff !important;
 
-    font-size: 11px;
+    font-size: 14px;
 
     font-weight: 800;
 
@@ -424,9 +432,52 @@ div[data-testid="stLinkButton"] > a:hover {
 
     color: #8292a1;
 
-    font-size: 9px;
+    font-size: 11px;
 
     margin-top: 27px;
+}
+
+/* Keep the login card readable and touch friendly on tablets and phones. */
+@media (max-width: 640px) {
+    .block-container {
+        max-width: 100%;
+        padding: 1rem .75rem 1.5rem;
+    }
+
+    .danip-card {
+        max-width: 100%;
+        padding: 20px 16px;
+        border-radius: 12px;
+    }
+
+    .danip-subtitle {
+        margin-bottom: 22px;
+    }
+
+    .danip-security,
+    .danip-provider {
+        padding: 13px;
+    }
+
+    div[data-testid="stLinkButton"] > a {
+        min-height: 50px;
+    }
+}
+
+@media (max-width: 380px) {
+    .block-container {
+        padding-right: .5rem;
+        padding-left: .5rem;
+    }
+
+    .danip-card {
+        padding: 16px 13px;
+    }
+
+    .danip-security-text,
+    .danip-provider {
+        font-size: 12px;
+    }
 }
 
 
@@ -1055,7 +1106,7 @@ def handle_callback():
     except requests.HTTPError as exc:
 
         st.error(
-            "NEXUS DANIP could not complete "
+            "DANIP AI could not complete "
             "DHIS2 authentication."
         )
 
@@ -1080,7 +1131,7 @@ def handle_callback():
     except requests.RequestException:
 
         st.error(
-            "NEXUS DANIP could not connect "
+            "DANIP AI could not connect "
             "to the DHIS2 authentication service."
         )
 
@@ -1145,7 +1196,7 @@ def handle_callback():
     except Exception:
 
         st.error(
-            "NEXUS DANIP could not complete "
+            "DANIP AI could not complete "
             "DHIS2 authentication."
         )
 
@@ -1201,7 +1252,7 @@ def login_page():
     st.markdown(
         """
 <div class="danip-title">
-NEXUS DANIP
+DANIP AI
 </div>
 """,
         unsafe_allow_html=True,
@@ -1235,7 +1286,7 @@ Data + M&amp;E Intelligence Platform
 </div>
 
 <div class="danip-security-text">
-Sign in using your existing DHIS2 account. Your DHIS2 username and password are entered on the official DHIS2 authentication page and are not collected by NEXUS DANIP.
+Sign in using your existing DHIS2 account. Your DHIS2 username and password are entered on the official DHIS2 authentication page and are not collected by DANIP AI.
 </div>
 
 </div>
@@ -1324,7 +1375,7 @@ dhis2.nutritionintl.org
     st.markdown(
         """
 <div class="danip-footer">
-Protected NEXUS DANIP workspace
+Protected DANIP AI workspace
 </div>
 """,
         unsafe_allow_html=True,
