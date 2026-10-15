@@ -151,7 +151,8 @@ DANIP_OAUTH_ME_URL = _dhis2_secret(
 # can be restored later by changing only this value.
 # ============================================================
 
-ENABLE_DHIS2_AUTHENTICATION = True
+# Temporarily disabled for the local governance preview; restore True when DHIS2 login is needed.
+ENABLE_DHIS2_AUTHENTICATION = False
 
 
 if "danip_authenticated" not in st.session_state:
@@ -581,10 +582,9 @@ with st.sidebar:
     if ENABLE_DHIS2_AUTHENTICATION:
         st.markdown(
             f"""
-            <div class="danip-auth-status danip-auth-status--authenticated"
-                 style="background:#ecfdf5!important;color:#173b2d!important;-webkit-text-fill-color:#173b2d!important;opacity:1!important">
-                <span style="color:#173b2d!important;-webkit-text-fill-color:#173b2d!important;opacity:1!important">🔓 DHIS2 authenticated</span><br>
-                <span style="color:#173b2d!important;-webkit-text-fill-color:#173b2d!important;opacity:1!important">User: {html.escape(str(DANIP_AUTHENTICATED_USERNAME))}</span>
+            <div class="danip-auth-status danip-auth-status--authenticated">
+                🔓 DHIS2 authenticated<br>
+                User: {html.escape(str(DANIP_AUTHENTICATED_USERNAME))}
             </div>
             """,
             unsafe_allow_html=True,
@@ -2091,7 +2091,9 @@ workspace_short_labels = {
     "🌐 AI Public Website Builder": "🌐 Website Builder",
     "📅 My Reports & Monitoring": "📅 Reports",
 }
-active_workspace = st.session_state.get("danip_workspace_selector", workspace_options[0])
+if "danip_workspace_selector" not in st.session_state:
+    st.session_state["danip_workspace_selector"] = workspace_options[0]
+active_workspace = st.session_state["danip_workspace_selector"]
 active_workspace_title = active_workspace.split(" ", 1)[-1]
 
 brand_col, page_col, nav_col, refresh_col = st.columns(
@@ -2119,7 +2121,6 @@ with nav_col:
         "DANIP workspace",
         workspace_options,
         selection_mode="single",
-        default=active_workspace,
         required=True,
         format_func=lambda option: workspace_short_labels.get(option, option),
         label_visibility="collapsed",
@@ -14696,6 +14697,9 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
                 labels={"Change vs previous period (%)": "Change from previous period (%)"},
                 hover_data={"Change vs previous period (%)": ":.1f"},
             )
+            change_fig.update_traces(
+                hovertemplate="<b>%{y}</b><br>Change from previous period: %{x:,.1f}%<extra></extra>"
+            )
             change_fig.add_vline(x=0, line_color="#64748b", line_width=1)
             change_fig.update_layout(height=max(300, 34 * len(change_summary)), margin=dict(l=8, r=8, t=12, b=8), coloraxis_showscale=False)
             st.plotly_chart(change_fig, use_container_width=True)
@@ -14722,6 +14726,10 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
             activity_fig = px.bar(
                 activity_summary, x="period_date" if "period_date" in activity_summary else "period",
                 y="reported_values", labels={"period_date": "Reporting period", "period": "Reporting period", "reported_values": "Reported indicator values"},
+            )
+            period_hover = "%{x|%b %Y}" if "period_date" in activity_summary else "%{x}"
+            activity_fig.update_traces(
+                hovertemplate=f"Reporting period: {period_hover}<br>Reported indicator values: %{{y:,.0f}}<extra></extra>"
             )
             activity_fig.update_layout(height=300, margin=dict(l=8, r=8, t=12, b=8), showlegend=False)
             st.plotly_chart(activity_fig, use_container_width=True)
@@ -14780,6 +14788,14 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
 
                     if px:
                         trend_col, unit_col = st.columns(2)
+                        numeric_format = ",.0f" if resolution.get("method") == "count" else ",.2f"
+                        percent_suffix = (
+                            "%" if resolution.get("method") != "count"
+                            and re.search(r"%|\b(percent(?:age)?|coverage|proportion)\b", str(indicator), re.I)
+                            else ""
+                        )
+                        value_hover = f"%{{y:{numeric_format}}}{percent_suffix}"
+                        hover_method = html.escape(str(resolution["label"]))
                         with trend_col:
                             if "period_date" in period_values.columns:
                                 trend_fig = px.line(
@@ -14791,6 +14807,12 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
                                     period_values, x="period", y="value", markers=True,
                                     labels={"period": "Period", "value": f"{resolution['label']} value"},
                                 )
+                                period_hover = "Reporting period: %{x}"
+                            if "period_date" in period_values.columns:
+                                period_hover = "Reporting period: %{x|%b %Y}"
+                            trend_fig.update_traces(
+                                hovertemplate=f"{period_hover}<br>{hover_method}: {value_hover}<extra></extra>"
+                            )
                             trend_fig.update_layout(height=230, margin=dict(l=4, r=4, t=8, b=4), showlegend=False)
                             st.plotly_chart(trend_fig, use_container_width=True, key=f"mehub_output_trend_{start_idx}_{indicator}")
                         with unit_col:
@@ -14804,6 +14826,9 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
                                 latest_units.sort_values("value", ascending=True),
                                 x="value", y="organisation", orientation="h",
                                 labels={"value": f"{resolution['label']} value", "organisation": "Reporting unit"},
+                            )
+                            unit_fig.update_traces(
+                                hovertemplate=f"Reporting unit: %{{y}}<br>{hover_method}: %{{x:{numeric_format}}}{percent_suffix}<extra></extra>"
                             )
                             unit_fig.update_layout(height=230, margin=dict(l=4, r=4, t=8, b=4), showlegend=False)
                             st.plotly_chart(unit_fig, use_container_width=True, key=f"mehub_output_units_{start_idx}_{indicator}")
@@ -14967,7 +14992,7 @@ def render_danip_me_management_hub():
     # ---------------------------------------------------------
     if has_api:
         st.markdown("## 📊 Output Analytics")
-        st.caption("Analyze output performance by indicator, reporting period and organisation unit, including period-to-period change, current values and reporting coverage. Each indicator is compared only with its own history.")
+        st.caption("Analyze output performance by indicator, reporting period and organisation unit. Selected aggregation is recalculated for each indicator, period, organisation unit, summary and graph.")
         _me_hub_render_auto_indicator_dashboard(api_df, f_period, f_ou, f_indicator, f_aggregation)
     else:
         st.markdown("## 📊 Output Analytics")
@@ -19428,7 +19453,7 @@ st.markdown(
    NEXUS RESPONSIVE SIDEBAR — VISUAL ONLY
    Keeps the existing application logic unchanged.
    ========================================================= */
-section[data-testid="stSidebar"] {
+section[data-testid="stSidebar"][aria-expanded="true"] {
     width: 330px !important;
     min-width: 330px !important;
     max-width: 360px !important;
@@ -19963,18 +19988,14 @@ section[data-testid="stSidebar"] > div:first-child {
     -webkit-text-fill-color:initial !important;
 }
 
-/* Keep the shared workspace menu visible on every page and viewport. */
-section[data-testid="stSidebar"] {
-    display:block !important;
-    visibility:visible !important;
-    opacity:1 !important;
-    transform:translateX(0) !important;
+/* Sidebar sizing is limited to its expanded state so Streamlit can collapse it. */
+section[data-testid="stSidebar"][aria-expanded="true"] {
     width:clamp(280px,23vw,340px) !important;
     min-width:clamp(280px,23vw,340px) !important;
     max-width:340px !important;
 }
 @media (max-width:760px) {
-    section[data-testid="stSidebar"] {
+    section[data-testid="stSidebar"][aria-expanded="true"] {
         width:min(88vw,320px) !important;
         min-width:min(88vw,320px) !important;
         max-width:min(88vw,320px) !important;
@@ -20225,3 +20246,5 @@ elif workspace == "📅 My Reports & Monitoring":
 # ============================================================
 # END — DANIP AI + SEPARATE DANIP M&E MANAGEMENT HUB
 # ============================================================app
+
+
