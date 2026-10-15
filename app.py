@@ -14777,121 +14777,123 @@ def _me_hub_resolve_organisation_names(df, source_url=None):
 
 
 def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_ou="All", selected_indicator="All"):
-    """Automatically generate indicator charts from the currently loaded API data."""
-    if not isinstance(df,pd.DataFrame) or df.empty:
-        st.info("Load the API dataset in DANIP AI Data Analyst to populate the indicator dashboard automatically.")
+    """Render output-focused performance, value completeness and trends."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        st.info("Load the API dataset in DANIP AI Data Analyst to populate output analytics.")
         return
-    period_col=find_period_column(df); ou_col=find_ou_column(df)
-    indicator_cols=_me_hub_indicator_columns(df)
-    work=df.copy()
-    work["__ME_PERIOD_LABEL__"]=work[period_col].astype(str) if period_col else "All data"
-    work["__ME_PERIOD_DATE__"]=_me_hub_period_dates(work[period_col]) if period_col else pd.NaT
-    if "__ME_ORG_NAME__" in work.columns:
-        work["__ME_OU_LABEL__"]=work["__ME_ORG_NAME__"].astype(str)
-    else:
-        work["__ME_OU_LABEL__"]=work[ou_col].astype(str) if ou_col else "All organisation units"
-    if selected_period!="All": work=work[work["__ME_PERIOD_LABEL__"]==str(selected_period)]
-    if selected_ou!="All": work=work[work["__ME_OU_LABEL__"]==str(selected_ou)]
-    if work.empty:
-        st.warning("No records match the selected filters."); return
-    # The filter is a multi-select. ``All`` (or an empty selection) means all
-    # valid indicator columns; otherwise keep exactly the indicators selected
-    # by the user. A string is still accepted for backward compatibility.
-    if isinstance(selected_indicator, (list, tuple, set)):
-        selected_values = [str(x) for x in selected_indicator]
-    elif selected_indicator is None:
-        selected_values = []
-    else:
-        selected_values = [str(selected_indicator)]
 
-    if selected_values and "All" not in selected_values:
-        selected_lookup = set(selected_values)
-        indicator_cols = [c for c in indicator_cols if str(c) in selected_lookup]
-    if not indicator_cols:
-        st.warning("No numeric indicator values were detected in the M&E view.")
-        st.caption(
-            "The AI workspace may still have the dataset. M&E accepts DHIS2 long format (dx/value), "
-            "wide indicator columns, numeric strings, commas and percentage signs."
-        )
+    period_col = find_period_column(df)
+    ou_col = find_ou_column(df)
+    indicator_cols = _me_hub_indicator_columns(df)
+    work = df.copy()
+    work["__ME_PERIOD_LABEL__"] = work[period_col].astype(str) if period_col else "All data"
+    work["__ME_PERIOD_DATE__"] = _me_hub_period_dates(work[period_col]) if period_col else pd.NaT
+    work["__ME_OU_LABEL__"] = (
+        work["__ME_ORG_NAME__"].astype(str) if "__ME_ORG_NAME__" in work.columns
+        else work[ou_col].astype(str) if ou_col else "All organisation units"
+    )
+    if selected_period != "All":
+        work = work[work["__ME_PERIOD_LABEL__"] == str(selected_period)]
+    if selected_ou != "All":
+        work = work[work["__ME_OU_LABEL__"] == str(selected_ou)]
+    if work.empty:
+        st.warning("No records match the selected period and organisation filters.")
         return
-    # KPIs
-    allvals=pd.concat([_me_hub_numeric_series(work[c]) for c in indicator_cols],ignore_index=True)
-    kc=st.columns(5)
-    kc[0].metric("Indicators",f"{len(indicator_cols):,}")
-    kc[1].metric("Observations",f"{int(allvals.notna().sum()):,}")
-    kc[2].metric("Organisation Units",f"{work['__ME_OU_LABEL__'].nunique():,}")
-    kc[3].metric("Periods",f"{work['__ME_PERIOD_LABEL__'].nunique():,}")
-    kc[4].metric("Average Value",f"{allvals.mean():,.2f}" if allvals.notna().any() else "—")
+
+    selected_values = list(selected_indicator) if isinstance(selected_indicator, (list, tuple, set)) else [selected_indicator]
+    if selected_values and "All" not in selected_values:
+        selected_lookup = {str(value) for value in selected_values}
+        indicator_cols = [col for col in indicator_cols if str(col) in selected_lookup]
+    if not indicator_cols:
+        st.warning("No numeric output indicators were found for these filters.")
+        st.caption("The Hub recognizes numeric indicator columns and DHIS2 dx/value data. Check the loaded dataset if output measures are missing.")
+        return
+
+    values = {col: _me_hub_numeric_series(work[col]) for col in indicator_cols}
+    observation_count = sum(int(series.notna().sum()) for series in values.values())
+    possible_count = len(work) * len(indicator_cols)
+    value_completeness = (observation_count / possible_count * 100) if possible_count else 0
+    kpis = st.columns(4)
+    kpis[0].metric("Output indicators", f"{len(indicator_cols):,}")
+    kpis[1].metric("Reported values", f"{observation_count:,}")
+    kpis[2].metric("Value completeness", f"{value_completeness:.1f}%", help="Non-missing indicator cells divided by all indicator-by-record cells in the current selection. This is dataset completeness, not an expected-reporting target.")
+    kpis[3].metric("Reporting units", f"{work['__ME_OU_LABEL__'].nunique():,}")
+    st.caption(f"{work['__ME_PERIOD_LABEL__'].nunique():,} reporting period(s) in the current selection. Indicator values retain their own units and are not ranked against one another by magnitude.")
+
+    rows = []
+    for col, series in values.items():
+        observed = int(series.notna().sum())
+        rows.append({
+            "Output indicator": _me_hub_indicator_label(col),
+            "Reported values": observed,
+            "Records in selection": len(work),
+            "Value completeness": (observed / len(work) * 100) if len(work) else 0,
+            "Mean reported value": float(series.mean()) if observed else np.nan,
+            "Latest reported value": (
+                float(work.loc[series.notna()].sort_values("__ME_PERIOD_DATE__")[col].dropna().iloc[-1])
+                if observed and work.loc[series.notna(), "__ME_PERIOD_DATE__"].notna().any()
+                else float(series.dropna().iloc[-1]) if observed else np.nan
+            ),
+        })
+    summary = pd.DataFrame(rows).sort_values("Value completeness", ascending=True)
+
     try:
         import plotly.express as px
     except Exception:
-        px=None
-    # Summary / ranking
-    rows=[]
-    for c in indicator_cols:
-        v=_me_hub_numeric_series(work[c]).dropna()
-        rows.append({"indicator":_me_hub_indicator_label(c),"average":float(v.mean()) if not v.empty else np.nan,"total":float(v.sum()) if not v.empty else 0,"observations":int(v.size),"zero_values":int((v==0).sum()) if not v.empty else 0})
-    summary=pd.DataFrame(rows).dropna(subset=["average"])
-    if px and not summary.empty:
-        fig=px.bar(summary.sort_values("average"),x="average",y="indicator",orientation="h",title="Average Value by Indicator")
-        fig.update_layout(height=max(360,34*len(summary)),margin=dict(l=10,r=10,t=45,b=10))
-        st.plotly_chart(fig,use_container_width=True)
-    # Overall trend
-    trend_rows=[]
-    for c in indicator_cols:
-        t=pd.DataFrame({"period":work["__ME_PERIOD_LABEL__"],"period_date":work["__ME_PERIOD_DATE__"],"indicator":_me_hub_indicator_label(c),"value":_me_hub_numeric_series(work[c])}).dropna(subset=["value"])
-        if not t.empty: trend_rows.append(t)
-    trend_all=pd.concat(trend_rows,ignore_index=True) if trend_rows else pd.DataFrame()
-    if px and not trend_all.empty:
-        if trend_all["period_date"].notna().any():
-            t=trend_all.dropna(subset=["period_date"]).groupby(["period_date","indicator"],as_index=False)["value"].mean().sort_values("period_date")
-            fig=px.line(t,x="period_date",y="value",color="indicator",markers=True,title="Indicator Trends Over Time")
-            fig.update_layout(height=430,margin=dict(l=10,r=10,t=45,b=10),xaxis_title="Period",yaxis_title="Value")
+        px = None
+
+    left, right = st.columns([1.05, 1.4])
+    with left:
+        st.markdown("### Output value completeness")
+        if px:
+            coverage_fig = px.bar(
+                summary.sort_values("Value completeness", ascending=True),
+                x="Value completeness", y="Output indicator", orientation="h",
+                range_x=[0, 100], labels={"Value completeness": "Non-missing values (%)"},
+            )
+            coverage_fig.update_layout(height=max(300, 34 * len(summary)), margin=dict(l=8, r=8, t=12, b=8))
+            st.plotly_chart(coverage_fig, use_container_width=True)
         else:
-            t=trend_all.groupby(["period","indicator"],as_index=False)["value"].mean()
-            fig=px.line(t,x="period",y="value",color="indicator",markers=True,title="Indicator Values by Period")
-            fig.update_layout(height=430,margin=dict(l=10,r=10,t=45,b=10))
-        st.plotly_chart(fig,use_container_width=True)
-    # Organisation-unit comparison, if available
-    if px and ou_col and not trend_all.empty:
-        ou_rows=[]
-        for c in indicator_cols:
-            t=pd.DataFrame({"ou":work["__ME_OU_LABEL__"],"value":_me_hub_numeric_series(work[c]),"indicator":_me_hub_indicator_label(c)}).dropna(subset=["value"])
-            if not t.empty: ou_rows.append(t.groupby(["ou","indicator"],as_index=False)["value"].mean())
-        if ou_rows:
-            oo=pd.concat(ou_rows,ignore_index=True)
-            top=summary.sort_values("average",ascending=False)["indicator"].head(12).tolist()
-            oo=oo[oo["indicator"].isin(top)]
-            fig=px.bar(oo,x="ou",y="value",color="indicator",barmode="group",title="Indicator Performance by Organisation Unit")
-            fig.update_layout(height=430,margin=dict(l=10,r=10,t=45,b=10),xaxis_title="Organisation Unit",yaxis_title="Average Value")
-            st.plotly_chart(fig,use_container_width=True)
-    # Individual charts: one responsive chart for every populated indicator
-    st.markdown("### 📈 Indicator-by-Indicator Analysis")
-    st.caption(f"{len(indicator_cols):,} indicator chart(s) generated automatically. All charts respond to the Period and Organisation Unit filters above.")
-    for i in range(0,len(indicator_cols),2):
-        cc=st.columns(2)
-        for j,c in enumerate(indicator_cols[i:i+2]):
-            with cc[j]:
-                title=_me_hub_indicator_label(c)
-                vals=_me_hub_numeric_series(work[c])
-                d=pd.DataFrame({"period":work["__ME_PERIOD_LABEL__"],"period_date":work["__ME_PERIOD_DATE__"],"ou":work["__ME_OU_LABEL__"],"value":vals}).dropna(subset=["value"])
-                st.markdown(f"**{title}**")
-                if d.empty:
-                    st.info("No observations for this indicator in the selected filters."); continue
-                if px and d["period_date"].notna().any():
-                    g=d.dropna(subset=["period_date"]).groupby(["period_date","ou"],as_index=False)["value"].mean().sort_values("period_date")
-                    fig=px.line(g,x="period_date",y="value",color="ou",markers=True)
-                elif px:
-                    g=d.groupby(["period","ou"],as_index=False)["value"].mean()
-                    fig=px.bar(g,x="period",y="value",color="ou",barmode="group")
-                else:
-                    st.dataframe(d,use_container_width=True,hide_index=True); continue
-                fig.update_layout(height=300,margin=dict(l=5,r=5,t=5,b=5),xaxis_title=None,yaxis_title="Value")
-                st.plotly_chart(fig,use_container_width=True)
-    st.markdown("### 📋 Indicator Summary")
-    out=summary.copy(); out.columns=["Indicator","Average","Total","Observations","Zero Values"]
-    out["Average"]=out["Average"].round(2); out["Total"]=out["Total"].round(2)
-    st.dataframe(out,use_container_width=True,hide_index=True)
+            st.dataframe(summary[["Output indicator", "Value completeness"]], use_container_width=True, hide_index=True)
+
+    with right:
+        st.markdown("### Output trend")
+        trend_indicator = st.selectbox(
+            "Select output to trend", indicator_cols,
+            format_func=_me_hub_indicator_label,
+            key="mehub_output_trend_indicator",
+        )
+        trend = pd.DataFrame({
+            "period": work["__ME_PERIOD_LABEL__"],
+            "period_date": work["__ME_PERIOD_DATE__"],
+            "organisation": work["__ME_OU_LABEL__"],
+            "value": values[trend_indicator],
+        }).dropna(subset=["value"])
+        if trend.empty:
+            st.info("No reported values for this output in the current selection.")
+        elif px:
+            if trend["period_date"].notna().any():
+                trend_plot = trend.dropna(subset=["period_date"]).groupby(["period_date", "organisation"], as_index=False)["value"].mean().sort_values("period_date")
+                fig = px.line(trend_plot, x="period_date", y="value", color="organisation", markers=True, labels={"period_date": "Reporting period", "value": "Mean reported value", "organisation": "Reporting unit"})
+            else:
+                trend_plot = trend.groupby(["period", "organisation"], as_index=False)["value"].mean()
+                fig = px.line(trend_plot, x="period", y="value", color="organisation", markers=True, labels={"value": "Mean reported value", "organisation": "Reporting unit"})
+            fig.update_layout(height=360, margin=dict(l=8, r=8, t=12, b=8), legend_title_text="Reporting unit")
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.dataframe(trend, use_container_width=True, hide_index=True)
+
+    st.markdown("### Output indicator register")
+    display = summary.rename(columns={
+        "Value completeness": "Value completeness (%)",
+        "Mean reported value": "Mean reported value",
+    })
+    display["Value completeness (%)"] = display["Value completeness (%)"].round(1)
+    display["Mean reported value"] = display["Mean reported value"].round(2)
+    display["Latest reported value"] = display["Latest reported value"].round(2)
+    st.dataframe(display, use_container_width=True, hide_index=True, column_config={
+        "Value completeness (%)": st.column_config.ProgressColumn("Value completeness (%)", min_value=0, max_value=100, format="%.1f%%"),
+    })
 
 def render_danip_me_management_hub():
     """Separate responsive M&E Management Hub using the already-loaded API dataset when available."""
@@ -14950,7 +14952,7 @@ def render_danip_me_management_hub():
     base_programs = api_programs.copy() if has_api and not api_programs.empty else manual_programs.copy()
 
     # M&E Hub header — compact because the common NEXUS banner is shared above both tabs.
-    st.markdown("""<div class="mh-title-card" style="margin-top:.15rem"><div class="mh-kicker">DANIP · MONITORING, EVALUATION & LEARNING</div><div class="mh-title">🧭 DANIP M&E Management Hub</div><div class="mh-help">Automatic indicator monitoring from the same DHIS2/API dataset loaded by DANIP AI Data Analyst.</div></div>""", unsafe_allow_html=True)
+    st.markdown("""<div class="mh-title-card" style="margin-top:.15rem"><div class="mh-kicker">DANIP · MONITORING, EVALUATION & LEARNING</div><div class="mh-title">🧭 DANIP M&E Management Hub</div><div class="mh-help">Output performance and reporting trends from the same DHIS2/API dataset loaded by DANIP AI Data Analyst.</div></div>""", unsafe_allow_html=True)
     if has_api:
         st.markdown(
             f'<div class="mehub-source">🟢 <b>Live API dataset connected.</b> '
@@ -14973,15 +14975,14 @@ def render_danip_me_management_hub():
     ou_options = ["All"] + sorted(api_df[ou_display_col].dropna().astype(str).unique().tolist()) if has_api and ou_display_col else ["All"]
     indicator_options = ["All"] + [str(c) for c in indicator_cols] if has_api else ["All"]
 
-    # Programme/governance metadata filters remain available when the source contains it.
     program_options = ["All"] + sorted(base_programs["program_name"].dropna().astype(str).unique().tolist()) if not base_programs.empty else ["All"]
     sponsor_options = ["All"] + sorted(base_programs["sponsor"].dropna().astype(str).replace("", np.nan).dropna().unique().tolist()) if not base_programs.empty else ["All"]
     dept_options = ["All"] + sorted(base_programs["department"].dropna().astype(str).replace("", np.nan).dropna().unique().tolist()) if not base_programs.empty else ["All"]
     status_options = ["All"] + sorted(base_programs["status"].dropna().astype(str).replace("", np.nan).dropna().unique().tolist()) if not base_programs.empty else ["All"]
 
-    f1, f2, f3, f4, f5 = st.columns(5)
+    f1, f2, f3 = st.columns([1, 1, 1.4])
     with f1: f_period = st.selectbox("Period", period_options, key="mehub_period_filter")
-    with f2: f_ou = st.selectbox("Organisation Unit Name", ou_options, key="mehub_ou_filter")
+    with f2: f_ou = st.selectbox("Reporting unit", ou_options, key="mehub_ou_filter")
     with f3:
         # Streamlit may retain the old selectbox value after an app update.
         # Convert/remove that legacy state before creating the multiselect so
@@ -14990,25 +14991,20 @@ def render_danip_me_management_hub():
         if _old_indicator_state is not None and not isinstance(_old_indicator_state, list):
             st.session_state.pop("mehub_indicator_filter", None)
         f_indicator = st.multiselect(
-            "Indicator(s)",
+            "Output indicator(s)",
             indicator_options,
             default=["All"],
             key="mehub_indicator_filter",
-            help="Select one or more indicators. Period, organisation-unit and other structural metadata fields are excluded automatically.",
+            help="Select output measures to analyze. Structural fields such as period, organisation unit and IDs are excluded.",
         )
-    with f4: f_program = st.selectbox("Program Name", program_options, key="mehub_program_filter")
-    with f5: f_status = st.selectbox("Program Status", status_options, key="mehub_status_filter")
-    g1, g2 = st.columns(2)
-    with g1: f_sponsor = st.selectbox("Sponsor", sponsor_options, key="mehub_sponsor_filter")
-    with g2: f_dept = st.selectbox("Department", dept_options, key="mehub_dept_filter")
 
     # ---------------------------------------------------------
     # LIVE DASHBOARD STATUS / CHANGE NOTIFICATION
     # ---------------------------------------------------------
-    filter_signature = (f_period, f_ou, tuple(f_indicator), f_program, f_status, f_sponsor, f_dept)
+    filter_signature = (f_period, f_ou, tuple(f_indicator))
     previous_signature = st.session_state.get("mehub_previous_filter_signature")
     if previous_signature is not None and previous_signature != filter_signature:
-        st.toast("Dashboard updated — charts and indicators refreshed for the new selection.", icon="🔄")
+        st.toast("Output analytics refreshed for the current selection.", icon="🔄")
     st.session_state["mehub_previous_filter_signature"] = filter_signature
 
     if has_api:
@@ -15021,14 +15017,14 @@ def render_danip_me_management_hub():
         st.markdown(
             f'<div class="mehub-statusbar"><span class="mehub-status-dot"></span>'
             f'<span class="mehub-status-main">Live dashboard ready</span>'
-            f'<span class="mehub-status-muted">{html.escape(status_text)} · Filter changes automatically refresh all analysis.</span></div>',
+            f'<span class="mehub-status-muted">{html.escape(status_text)} · Filters refresh output analysis automatically.</span></div>',
             unsafe_allow_html=True,
         )
     else:
         st.markdown(
             '<div class="mehub-statusbar"><span class="mehub-status-dot" style="background:#f59e0b"></span>'
             '<span class="mehub-status-main">Waiting for API data</span>'
-            '<span class="mehub-status-muted">Load the dataset in DANIP AI Data Analyst to activate the M&E dashboard.</span></div>',
+            '<span class="mehub-status-muted">Load the dataset in DANIP AI Data Analyst to activate output analytics.</span></div>',
             unsafe_allow_html=True,
         )
 
@@ -15036,273 +15032,278 @@ def render_danip_me_management_hub():
     # AUTOMATIC INDICATOR DASHBOARD — PRIMARY VIEW
     # ---------------------------------------------------------
     if has_api:
-        st.markdown("## 📊 M&E Indicator Dashboard")
-        st.caption("The dashboard is generated directly from the indicators in the API dataset. Change Period, Organisation Unit or Indicator and every chart updates automatically.")
+        st.markdown("## 📊 Output Analytics")
+        st.caption("Track output value completeness and trends by reporting period and organisation unit. Values are analyzed within each indicator so different units are not compared directly.")
         _me_hub_render_auto_indicator_dashboard(api_df, f_period, f_ou, f_indicator)
     else:
-        st.markdown("## 📊 M&E Indicator Dashboard")
-        st.info("No API dataset is loaded. Paste the API/Data URL in DANIP AI Data Analyst and return here; the indicator dashboard will populate automatically.")
+        st.markdown("## 📊 Output Analytics")
+        st.info("No API dataset is loaded. Paste the API/Data URL in DANIP AI Data Analyst and return here; output analytics will populate automatically.")
 
-    # ---------------------------------------------------------
-    # MANAGEMENT SUMMARY / GOVERNANCE FILTERS
-    # ---------------------------------------------------------
-    p = base_programs.copy()
-    if not p.empty:
-        if f_program != "All": p = p[p["program_name"].astype(str) == f_program]
-        if f_sponsor != "All": p = p[p["sponsor"].astype(str) == f_sponsor]
-        if f_dept != "All": p = p[p["department"].astype(str) == f_dept]
-        if f_status != "All": p = p[p["status"].astype(str) == f_status]
-    selected_names = set(p["program_name"].astype(str).tolist()) if not p.empty else set()
-    fi_manual = issues[issues["program_name"].astype(str).isin(selected_names)] if selected_names else issues.iloc[0:0]
-    fr = risks[risks["program_name"].astype(str).isin(selected_names)] if selected_names else risks.iloc[0:0]
-    fc = changes[changes["program_name"].astype(str).isin(selected_names)] if selected_names else changes.iloc[0:0]
-    # Filter the M&E workplan once at the management-summary level so it is
-    # available both to the Workplan tab and the Management Priorities section.
-    fw = workplan[workplan["program_name"].astype(str).isin(selected_names)] if selected_names else workplan.iloc[0:0]
+    with st.expander("Management registers & governance", expanded=False):
+        st.caption("Programme oversight, issue tracking, risks, workplans and evidence registers.")
+        gf1, gf2, gf3, gf4 = st.columns(4)
+        with gf1: f_program = st.selectbox("Programme", program_options, key="mehub_program_filter")
+        with gf2: f_status = st.selectbox("Programme status", status_options, key="mehub_status_filter")
+        with gf3: f_sponsor = st.selectbox("Sponsor", sponsor_options, key="mehub_sponsor_filter")
+        with gf4: f_dept = st.selectbox("Department", dept_options, key="mehub_dept_filter")
+        # ---------------------------------------------------------
+        p = base_programs.copy()
+        if not p.empty:
+            if f_program != "All": p = p[p["program_name"].astype(str) == f_program]
+            if f_sponsor != "All": p = p[p["sponsor"].astype(str) == f_sponsor]
+            if f_dept != "All": p = p[p["department"].astype(str) == f_dept]
+            if f_status != "All": p = p[p["status"].astype(str) == f_status]
+        selected_names = set(p["program_name"].astype(str).tolist()) if not p.empty else set()
+        fi_manual = issues[issues["program_name"].astype(str).isin(selected_names)] if selected_names else issues.iloc[0:0]
+        fr = risks[risks["program_name"].astype(str).isin(selected_names)] if selected_names else risks.iloc[0:0]
+        fc = changes[changes["program_name"].astype(str).isin(selected_names)] if selected_names else changes.iloc[0:0]
+        # Filter the M&E workplan once at the management-summary level so it is
+        # available both to the Workplan tab and the Management Priorities section.
+        fw = workplan[workplan["program_name"].astype(str).isin(selected_names)] if selected_names else workplan.iloc[0:0]
 
-    # Financial summary variables are deliberately calculated only from explicit
-    # finance fields exposed by the API view. Never treat arbitrary DHIS2 indicator
-    # values as budget/expenditure data.
-    financial_available = isinstance(api_finance, pd.DataFrame) and not api_finance.empty and any(
-        c in api_finance.columns for c in ["budget", "actual", "eac"]
-    )
-    if financial_available:
-        total_budget = float(pd.to_numeric(api_finance.get("budget"), errors="coerce").sum()) if "budget" in api_finance.columns else 0.0
-        total_fin_actual = float(pd.to_numeric(api_finance.get("actual"), errors="coerce").sum()) if "actual" in api_finance.columns else 0.0
-        total_eac = float(pd.to_numeric(api_finance.get("eac"), errors="coerce").sum()) if "eac" in api_finance.columns else 0.0
-    else:
-        total_budget = total_fin_actual = total_eac = 0.0
-
-    active_dq = int(len(api_quality_issues)) if has_api else 0
-    active_manual_issues = int((fi_manual["status"].astype(str).str.lower().isin(["open", "in progress", "active"])).sum()) if not fi_manual.empty else 0
-    active_issues = active_dq + active_manual_issues
-    active_risks = int((fr["status"].astype(str).str.lower().isin(["open", "active", "monitoring"])).sum()) if not fr.empty else 0
-    active_changes = int((fc["status"].astype(str).str.lower().isin(["pending", "open", "in review", "approved"])).sum()) if not fc.empty else 0
-    progress = pd.to_numeric(p.get("progress", pd.Series(dtype=float)), errors="coerce").dropna() if not p.empty else pd.Series(dtype=float)
-    k = st.columns(7)
-    k[0].metric("Programs", len(p)); k[1].metric("Active Issues", active_issues); k[2].metric("Active Risks", active_risks); k[3].metric("Change Requests", active_changes)
-    k[4].metric("M&E Records", f"{len(api_df):,}" if has_api else "0"); k[5].metric("On Track", int((progress >= 90).sum()) if not progress.empty else "—"); k[6].metric("Avg Progress", f"{progress.mean():.1f}%" if not progress.empty else "—")
-
-    # ---------------------------------------------------------
-    # MANAGEMENT WORKSPACES
-    # ---------------------------------------------------------
-    st.markdown("## M&E Management Workspaces")
-    st.caption("The API-derived dashboard above is read-only. The registers below remain editable management records.")
-    mt1, mt2, mt3, mt4, mt5, mt6 = st.tabs([
-        "📋 Programs", "🚨 Issues & DQ", "⚠️ Risks", "🔄 Change Requests", "🗓️ M&E Workplan", "📁 Evidence"
-    ])
-
-    with mt1:
-        st.markdown("### API Programme Portfolio")
-        if has_api and not api_programs.empty:
-            api_show = api_programs.copy()
-            st.dataframe(api_show, use_container_width=True, hide_index=True)
-            st.caption("Automatically populated from the same API dataset used by DANIP AI Data Analyst. This table is read-only.")
+        # Financial summary variables are deliberately calculated only from explicit
+        # finance fields exposed by the API view. Never treat arbitrary DHIS2 indicator
+        # values as budget/expenditure data.
+        financial_available = isinstance(api_finance, pd.DataFrame) and not api_finance.empty and any(
+            c in api_finance.columns for c in ["budget", "actual", "eac"]
+        )
+        if financial_available:
+            total_budget = float(pd.to_numeric(api_finance.get("budget"), errors="coerce").sum()) if "budget" in api_finance.columns else 0.0
+            total_fin_actual = float(pd.to_numeric(api_finance.get("actual"), errors="coerce").sum()) if "actual" in api_finance.columns else 0.0
+            total_eac = float(pd.to_numeric(api_finance.get("eac"), errors="coerce").sum()) if "eac" in api_finance.columns else 0.0
         else:
-            st.info("No API-derived programme metadata is available yet.")
+            total_budget = total_fin_actual = total_eac = 0.0
 
-        st.markdown("### Manual Governance Register")
-        with st.form("mehub_add_program", clear_on_submit=True):
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                pn = st.text_input("Program Name")
-                sponsor = st.text_input("Sponsor")
-                department = st.text_input("Department")
-            with c2:
-                status = st.selectbox("Program Status", ["On Track", "Watch", "Troubled", "Completed", "On Hold"])
-                year = st.number_input("Calendar Year", min_value=2000, max_value=2100, value=datetime.now().year, step=1)
-                budget = st.number_input("Budget", min_value=0.0, value=0.0, step=1000.0)
-            with c3:
-                actual = st.number_input("Actual", min_value=0.0, value=0.0, step=1000.0)
-                eac = st.number_input("EAC", min_value=0.0, value=0.0, step=1000.0)
-                progress = st.number_input("Progress %", min_value=0.0, max_value=100.0, value=0.0, step=1.0)
-            c4, c5 = st.columns(2)
-            with c4:
-                start_date = st.date_input("Start Date")
-            with c5:
-                finish_date = st.date_input("Finish Date")
-            notes = st.text_area("Notes")
-            if st.form_submit_button("➕ Add Programme", use_container_width=True):
-                if pn.strip():
-                    _me_hub_insert("me_programs", {
-                        "program_name": pn.strip(), "sponsor": sponsor.strip(), "department": department.strip(),
-                        "status": status, "calendar_year": int(year), "budget": float(budget), "actual": float(actual),
-                        "eac": float(eac), "progress": float(progress), "start_date": str(start_date), "finish_date": str(finish_date), "notes": notes.strip()
-                    })
-                    st.rerun()
-                else:
-                    st.error("Program Name is required.")
-        if not manual_programs.empty:
-            st.dataframe(manual_programs.drop(columns=["created_at"], errors="ignore"), use_container_width=True, hide_index=True)
+        active_dq = int(len(api_quality_issues)) if has_api else 0
+        active_manual_issues = int((fi_manual["status"].astype(str).str.lower().isin(["open", "in progress", "active"])).sum()) if not fi_manual.empty else 0
+        active_issues = active_dq + active_manual_issues
+        active_risks = int((fr["status"].astype(str).str.lower().isin(["open", "active", "monitoring"])).sum()) if not fr.empty else 0
+        active_changes = int((fc["status"].astype(str).str.lower().isin(["pending", "open", "in review", "approved"])).sum()) if not fc.empty else 0
+        progress = pd.to_numeric(p.get("progress", pd.Series(dtype=float)), errors="coerce").dropna() if not p.empty else pd.Series(dtype=float)
+        k = st.columns(7)
+        k[0].metric("Programs", len(p)); k[1].metric("Active Issues", active_issues); k[2].metric("Active Risks", active_risks); k[3].metric("Change Requests", active_changes)
+        k[4].metric("M&E Records", f"{len(api_df):,}" if has_api else "0"); k[5].metric("On Track", int((progress >= 90).sum()) if not progress.empty else "—"); k[6].metric("Avg Progress", f"{progress.mean():.1f}%" if not progress.empty else "—")
 
-    with mt2:
-        st.markdown("### Data Quality & Issue Register")
-        if has_api and api_quality_issues:
-            st.markdown(f"**{len(api_quality_issues):,} DQ finding(s)** were detected by the main DANIP data-quality engine.")
-            try:
-                st.dataframe(pd.DataFrame(api_quality_issues), use_container_width=True, hide_index=True)
-            except Exception:
-                st.write(api_quality_issues)
-        else:
-            st.info("No API data-quality findings are available yet.")
-        with st.form("mehub_add_issue", clear_on_submit=True):
-            c1, c2 = st.columns(2)
-            with c1:
-                iprog = st.selectbox("Program", ["General"] + program_options[1:], key="mehub_iprog")
-                issue = st.text_area("Issue")
-                owner = st.text_input("Owner", key="mehub_i_owner")
-            with c2:
-                priority = st.selectbox("Priority", ["High", "Medium", "Low"])
-                istatus = st.selectbox("Status", ["Open", "In Progress", "Resolved", "Closed"])
-                due = st.date_input("Due Date", key="mehub_i_due")
-            if st.form_submit_button("➕ Add Issue", use_container_width=True):
-                if issue.strip():
-                    _me_hub_insert("me_issues", {"program_name": iprog, "issue": issue.strip(), "priority": priority, "owner": owner.strip(), "status": istatus, "due_date": str(due)})
-                    st.rerun()
-                else:
-                    st.error("Issue is required.")
-        show = fi_manual if f_program != "All" else issues
-        if not show.empty:
+        # ---------------------------------------------------------
+        # MANAGEMENT WORKSPACES
+        # ---------------------------------------------------------
+        st.markdown("## M&E Management Workspaces")
+        st.caption("The API-derived dashboard above is read-only. The registers below remain editable management records.")
+        mt1, mt2, mt3, mt4, mt5, mt6 = st.tabs([
+            "📋 Programs", "🚨 Issues & DQ", "⚠️ Risks", "🔄 Change Requests", "🗓️ M&E Workplan", "📁 Evidence"
+        ])
+
+        with mt1:
+            st.markdown("### API Programme Portfolio")
+            if has_api and not api_programs.empty:
+                api_show = api_programs.copy()
+                st.dataframe(api_show, use_container_width=True, hide_index=True)
+                st.caption("Automatically populated from the same API dataset used by DANIP AI Data Analyst. This table is read-only.")
+            else:
+                st.info("No API-derived programme metadata is available yet.")
+
+            st.markdown("### Manual Governance Register")
+            with st.form("mehub_add_program", clear_on_submit=True):
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    pn = st.text_input("Program Name")
+                    sponsor = st.text_input("Sponsor")
+                    department = st.text_input("Department")
+                with c2:
+                    status = st.selectbox("Program Status", ["On Track", "Watch", "Troubled", "Completed", "On Hold"])
+                    year = st.number_input("Calendar Year", min_value=2000, max_value=2100, value=datetime.now().year, step=1)
+                    budget = st.number_input("Budget", min_value=0.0, value=0.0, step=1000.0)
+                with c3:
+                    actual = st.number_input("Actual", min_value=0.0, value=0.0, step=1000.0)
+                    eac = st.number_input("EAC", min_value=0.0, value=0.0, step=1000.0)
+                    progress = st.number_input("Progress %", min_value=0.0, max_value=100.0, value=0.0, step=1.0)
+                c4, c5 = st.columns(2)
+                with c4:
+                    start_date = st.date_input("Start Date")
+                with c5:
+                    finish_date = st.date_input("Finish Date")
+                notes = st.text_area("Notes")
+                if st.form_submit_button("➕ Add Programme", use_container_width=True):
+                    if pn.strip():
+                        _me_hub_insert("me_programs", {
+                            "program_name": pn.strip(), "sponsor": sponsor.strip(), "department": department.strip(),
+                            "status": status, "calendar_year": int(year), "budget": float(budget), "actual": float(actual),
+                            "eac": float(eac), "progress": float(progress), "start_date": str(start_date), "finish_date": str(finish_date), "notes": notes.strip()
+                        })
+                        st.rerun()
+                    else:
+                        st.error("Program Name is required.")
+            if not manual_programs.empty:
+                st.dataframe(manual_programs.drop(columns=["created_at"], errors="ignore"), use_container_width=True, hide_index=True)
+
+        with mt2:
+            st.markdown("### Data Quality & Issue Register")
+            if has_api and api_quality_issues:
+                st.markdown(f"**{len(api_quality_issues):,} DQ finding(s)** were detected by the main DANIP data-quality engine.")
+                try:
+                    st.dataframe(pd.DataFrame(api_quality_issues), use_container_width=True, hide_index=True)
+                except Exception:
+                    st.write(api_quality_issues)
+            else:
+                st.info("No API data-quality findings are available yet.")
+            with st.form("mehub_add_issue", clear_on_submit=True):
+                c1, c2 = st.columns(2)
+                with c1:
+                    iprog = st.selectbox("Program", ["General"] + program_options[1:], key="mehub_iprog")
+                    issue = st.text_area("Issue")
+                    owner = st.text_input("Owner", key="mehub_i_owner")
+                with c2:
+                    priority = st.selectbox("Priority", ["High", "Medium", "Low"])
+                    istatus = st.selectbox("Status", ["Open", "In Progress", "Resolved", "Closed"])
+                    due = st.date_input("Due Date", key="mehub_i_due")
+                if st.form_submit_button("➕ Add Issue", use_container_width=True):
+                    if issue.strip():
+                        _me_hub_insert("me_issues", {"program_name": iprog, "issue": issue.strip(), "priority": priority, "owner": owner.strip(), "status": istatus, "due_date": str(due)})
+                        st.rerun()
+                    else:
+                        st.error("Issue is required.")
+            show = fi_manual if f_program != "All" else issues
+            if not show.empty:
+                st.dataframe(show.drop(columns=["created_at"], errors="ignore"), use_container_width=True, hide_index=True)
+
+        with mt3:
+            st.markdown("### Risk Register")
+            with st.form("mehub_add_risk", clear_on_submit=True):
+                c1, c2 = st.columns(2)
+                with c1:
+                    rprog = st.selectbox("Program", ["General"] + program_options[1:], key="mehub_rprog")
+                    risk = st.text_area("Risk")
+                    owner = st.text_input("Owner", key="mehub_r_owner")
+                with c2:
+                    rating = st.selectbox("Rating", ["High", "Medium", "Low"])
+                    rstatus = st.selectbox("Status", ["Open", "Monitoring", "Mitigated", "Closed"])
+                    rdue = st.date_input("Review Date", key="mehub_r_due")
+                mitigation = st.text_area("Mitigation", key="mehub_r_mit")
+                if st.form_submit_button("➕ Add Risk", use_container_width=True):
+                    if risk.strip():
+                        _me_hub_insert("me_risks", {"program_name": rprog, "risk": risk.strip(), "rating": rating, "owner": owner.strip(), "mitigation": mitigation.strip(), "status": rstatus, "due_date": str(rdue)})
+                        st.rerun()
+                    else:
+                        st.error("Risk is required.")
+            show = fr if f_program != "All" else risks
             st.dataframe(show.drop(columns=["created_at"], errors="ignore"), use_container_width=True, hide_index=True)
 
-    with mt3:
-        st.markdown("### Risk Register")
-        with st.form("mehub_add_risk", clear_on_submit=True):
-            c1, c2 = st.columns(2)
-            with c1:
-                rprog = st.selectbox("Program", ["General"] + program_options[1:], key="mehub_rprog")
-                risk = st.text_area("Risk")
-                owner = st.text_input("Owner", key="mehub_r_owner")
-            with c2:
-                rating = st.selectbox("Rating", ["High", "Medium", "Low"])
-                rstatus = st.selectbox("Status", ["Open", "Monitoring", "Mitigated", "Closed"])
-                rdue = st.date_input("Review Date", key="mehub_r_due")
-            mitigation = st.text_area("Mitigation", key="mehub_r_mit")
-            if st.form_submit_button("➕ Add Risk", use_container_width=True):
-                if risk.strip():
-                    _me_hub_insert("me_risks", {"program_name": rprog, "risk": risk.strip(), "rating": rating, "owner": owner.strip(), "mitigation": mitigation.strip(), "status": rstatus, "due_date": str(rdue)})
-                    st.rerun()
-                else:
-                    st.error("Risk is required.")
-        show = fr if f_program != "All" else risks
-        st.dataframe(show.drop(columns=["created_at"], errors="ignore"), use_container_width=True, hide_index=True)
+        with mt4:
+            st.markdown("### Change Request Register")
+            with st.form("mehub_add_change", clear_on_submit=True):
+                c1, c2 = st.columns(2)
+                with c1:
+                    cprog = st.selectbox("Program", ["General"] + program_options[1:], key="mehub_cprog")
+                    ctext = st.text_area("Change Request")
+                    cowner = st.text_input("Owner", key="mehub_c_owner")
+                with c2:
+                    cimpact = st.selectbox("Impact", ["High", "Medium", "Low"])
+                    cstatus = st.selectbox("Status", ["Pending", "In Review", "Approved", "Rejected", "Closed"])
+                    cdate = st.date_input("Requested Date", key="mehub_c_date")
+                if st.form_submit_button("➕ Add Change Request", use_container_width=True):
+                    if ctext.strip():
+                        _me_hub_insert("me_changes", {"program_name": cprog, "change_request": ctext.strip(), "impact": cimpact, "owner": cowner.strip(), "status": cstatus, "requested_date": str(cdate)})
+                        st.rerun()
+                    else:
+                        st.error("Change Request is required.")
+            show = fc if f_program != "All" else changes
+            st.dataframe(show.drop(columns=["created_at"], errors="ignore"), use_container_width=True, hide_index=True)
 
-    with mt4:
-        st.markdown("### Change Request Register")
-        with st.form("mehub_add_change", clear_on_submit=True):
-            c1, c2 = st.columns(2)
-            with c1:
-                cprog = st.selectbox("Program", ["General"] + program_options[1:], key="mehub_cprog")
-                ctext = st.text_area("Change Request")
-                cowner = st.text_input("Owner", key="mehub_c_owner")
-            with c2:
-                cimpact = st.selectbox("Impact", ["High", "Medium", "Low"])
-                cstatus = st.selectbox("Status", ["Pending", "In Review", "Approved", "Rejected", "Closed"])
-                cdate = st.date_input("Requested Date", key="mehub_c_date")
-            if st.form_submit_button("➕ Add Change Request", use_container_width=True):
-                if ctext.strip():
-                    _me_hub_insert("me_changes", {"program_name": cprog, "change_request": ctext.strip(), "impact": cimpact, "owner": cowner.strip(), "status": cstatus, "requested_date": str(cdate)})
-                    st.rerun()
-                else:
-                    st.error("Change Request is required.")
-        show = fc if f_program != "All" else changes
-        st.dataframe(show.drop(columns=["created_at"], errors="ignore"), use_container_width=True, hide_index=True)
+        with mt5:
+            st.markdown("### M&E Workplan & Reporting Calendar")
+            with st.form("mehub_add_workplan", clear_on_submit=True):
+                c1, c2 = st.columns(2)
+                with c1:
+                    wprog = st.selectbox("Program", ["General"] + program_options[1:], key="mehub_wprog")
+                    wactivity = st.text_input("M&E Activity")
+                    windicator = st.text_input("Related Indicator")
+                    wowner = st.text_input("Responsible Person")
+                with c2:
+                    wdue = st.date_input("Due Date", key="mehub_w_due")
+                    wstatus = st.selectbox("Status", ["Planned", "In Progress", "Completed", "Overdue", "Cancelled"])
+                    wevidence = st.text_input("Evidence / Link")
+                wnotes = st.text_area("Notes", key="mehub_w_notes")
+                if st.form_submit_button("➕ Add M&E Activity", use_container_width=True):
+                    if wactivity.strip():
+                        _me_hub_insert("me_workplan", {"program_name": wprog, "activity": wactivity.strip(), "indicator": windicator.strip(), "owner": wowner.strip(), "due_date": str(wdue), "status": wstatus, "evidence_link": wevidence.strip(), "notes": wnotes.strip()})
+                        st.rerun()
+                    else:
+                        st.error("M&E Activity is required.")
+            show = fw if f_program != "All" else workplan
+            if not show.empty:
+                wp = show.drop(columns=["created_at"], errors="ignore").copy()
+                due = pd.to_datetime(wp["due_date"], errors="coerce")
+                wp["Calendar Status"] = np.where(
+                    (due < pd.Timestamp.today()) & ~wp["status"].astype(str).str.lower().isin(["completed", "cancelled"]),
+                    "🔴 Overdue",
+                    wp["status"].map(_me_hub_status_class) + " " + wp["status"].astype(str),
+                )
+                st.dataframe(wp, use_container_width=True, hide_index=True)
+            else:
+                st.info("No M&E workplan activities yet.")
 
-    with mt5:
-        st.markdown("### M&E Workplan & Reporting Calendar")
-        with st.form("mehub_add_workplan", clear_on_submit=True):
-            c1, c2 = st.columns(2)
-            with c1:
-                wprog = st.selectbox("Program", ["General"] + program_options[1:], key="mehub_wprog")
-                wactivity = st.text_input("M&E Activity")
-                windicator = st.text_input("Related Indicator")
-                wowner = st.text_input("Responsible Person")
-            with c2:
-                wdue = st.date_input("Due Date", key="mehub_w_due")
-                wstatus = st.selectbox("Status", ["Planned", "In Progress", "Completed", "Overdue", "Cancelled"])
-                wevidence = st.text_input("Evidence / Link")
-            wnotes = st.text_area("Notes", key="mehub_w_notes")
-            if st.form_submit_button("➕ Add M&E Activity", use_container_width=True):
-                if wactivity.strip():
-                    _me_hub_insert("me_workplan", {"program_name": wprog, "activity": wactivity.strip(), "indicator": windicator.strip(), "owner": wowner.strip(), "due_date": str(wdue), "status": wstatus, "evidence_link": wevidence.strip(), "notes": wnotes.strip()})
-                    st.rerun()
-                else:
-                    st.error("M&E Activity is required.")
-        show = fw if f_program != "All" else workplan
-        if not show.empty:
-            wp = show.drop(columns=["created_at"], errors="ignore").copy()
-            due = pd.to_datetime(wp["due_date"], errors="coerce")
-            wp["Calendar Status"] = np.where(
-                (due < pd.Timestamp.today()) & ~wp["status"].astype(str).str.lower().isin(["completed", "cancelled"]),
-                "🔴 Overdue",
-                wp["status"].map(_me_hub_status_class) + " " + wp["status"].astype(str),
-            )
-            st.dataframe(wp, use_container_width=True, hide_index=True)
+        with mt6:
+            st.markdown("### Evidence & Verification Repository")
+            with st.form("mehub_add_evidence", clear_on_submit=True):
+                c1, c2 = st.columns(2)
+                with c1:
+                    eprog = st.selectbox("Program", ["General"] + program_options[1:], key="mehub_eprog")
+                    eindicator = st.text_input("Indicator")
+                    etype = st.selectbox("Evidence Type", ["DHIS2", "DQA", "Survey", "Register", "Report", "Monitoring Visit", "Other"])
+                    etitle = st.text_input("Evidence Title")
+                with c2:
+                    elink = st.text_input("Source / SharePoint Link")
+                    eperiod = st.text_input("Reporting Period")
+                    everify = st.selectbox("Verification Status", ["Pending", "Verified", "Needs Review", "Rejected"])
+                    enotes = st.text_area("Notes")
+                if st.form_submit_button("➕ Add Evidence", use_container_width=True):
+                    if etitle.strip():
+                        _me_hub_insert("me_evidence", {"program_name": eprog, "indicator": eindicator.strip(), "evidence_type": etype, "title": etitle.strip(), "source_link": elink.strip(), "period": eperiod.strip(), "verification_status": everify, "notes": enotes.strip()})
+                        st.rerun()
+                    else:
+                        st.error("Evidence Title is required.")
+            show = evidence[evidence["program_name"].astype(str).isin(selected_names)] if selected_names else evidence.iloc[0:0]
+            st.dataframe(show.drop(columns=["created_at"], errors="ignore"), use_container_width=True, hide_index=True)
+
+        # ---------------------------------------------------------
+        # MANAGEMENT PRIORITIES
+        # ---------------------------------------------------------
+        st.markdown("---")
+        st.markdown("### 🧠 M&E Management Priorities")
+        priority_messages = []
+        if active_issues:
+            priority_messages.append(f"**{active_issues} active issue(s)** require owner follow-up and closure evidence.")
+        if active_risks:
+            priority_messages.append(f"**{active_risks} active risk(s)** should remain under mitigation/review.")
+        if active_changes:
+            priority_messages.append(f"**{active_changes} change request(s)** need governance decision or status confirmation.")
+        if not fw.empty:
+            due = pd.to_datetime(fw["due_date"], errors="coerce")
+            overdue = int(((due < pd.Timestamp.today()) & ~fw["status"].astype(str).str.lower().isin(["completed", "cancelled"])).sum())
+            if overdue:
+                priority_messages.append(f"**{overdue} M&E workplan item(s)** are overdue.")
+        if financial_available and total_budget > 0 and total_eac > total_budget:
+            priority_messages.append("**EAC is above approved budget** for the selected portfolio; review the variance and assumptions.")
+        if api_quality_summary:
+            try:
+                dq_score = api_quality_summary.get("Overall Score", api_quality_summary.get("score", None))
+                if dq_score is not None:
+                    priority_messages.append(f"**DQ score: {dq_score}** — consider data-quality evidence when interpreting programme performance.")
+            except Exception:
+                pass
+        if priority_messages:
+            for msg in priority_messages:
+                st.warning(msg)
+        elif has_api:
+            st.success("No management exceptions are currently recorded for the selected API portfolio.")
         else:
-            st.info("No M&E workplan activities yet.")
+            st.info("Load the API dataset to activate automatic M&E management analysis.")
 
-    with mt6:
-        st.markdown("### Evidence & Verification Repository")
-        with st.form("mehub_add_evidence", clear_on_submit=True):
-            c1, c2 = st.columns(2)
-            with c1:
-                eprog = st.selectbox("Program", ["General"] + program_options[1:], key="mehub_eprog")
-                eindicator = st.text_input("Indicator")
-                etype = st.selectbox("Evidence Type", ["DHIS2", "DQA", "Survey", "Register", "Report", "Monitoring Visit", "Other"])
-                etitle = st.text_input("Evidence Title")
-            with c2:
-                elink = st.text_input("Source / SharePoint Link")
-                eperiod = st.text_input("Reporting Period")
-                everify = st.selectbox("Verification Status", ["Pending", "Verified", "Needs Review", "Rejected"])
-                enotes = st.text_area("Notes")
-            if st.form_submit_button("➕ Add Evidence", use_container_width=True):
-                if etitle.strip():
-                    _me_hub_insert("me_evidence", {"program_name": eprog, "indicator": eindicator.strip(), "evidence_type": etype, "title": etitle.strip(), "source_link": elink.strip(), "period": eperiod.strip(), "verification_status": everify, "notes": enotes.strip()})
-                    st.rerun()
-                else:
-                    st.error("Evidence Title is required.")
-        show = evidence[evidence["program_name"].astype(str).isin(selected_names)] if selected_names else evidence.iloc[0:0]
-        st.dataframe(show.drop(columns=["created_at"], errors="ignore"), use_container_width=True, hide_index=True)
-
-    # ---------------------------------------------------------
-    # MANAGEMENT PRIORITIES
-    # ---------------------------------------------------------
-    st.markdown("---")
-    st.markdown("### 🧠 M&E Management Priorities")
-    priority_messages = []
-    if active_issues:
-        priority_messages.append(f"**{active_issues} active issue(s)** require owner follow-up and closure evidence.")
-    if active_risks:
-        priority_messages.append(f"**{active_risks} active risk(s)** should remain under mitigation/review.")
-    if active_changes:
-        priority_messages.append(f"**{active_changes} change request(s)** need governance decision or status confirmation.")
-    if not fw.empty:
-        due = pd.to_datetime(fw["due_date"], errors="coerce")
-        overdue = int(((due < pd.Timestamp.today()) & ~fw["status"].astype(str).str.lower().isin(["completed", "cancelled"])).sum())
-        if overdue:
-            priority_messages.append(f"**{overdue} M&E workplan item(s)** are overdue.")
-    if financial_available and total_budget > 0 and total_eac > total_budget:
-        priority_messages.append("**EAC is above approved budget** for the selected portfolio; review the variance and assumptions.")
-    if api_quality_summary:
-        try:
-            dq_score = api_quality_summary.get("Overall Score", api_quality_summary.get("score", None))
-            if dq_score is not None:
-                priority_messages.append(f"**DQ score: {dq_score}** — consider data-quality evidence when interpreting programme performance.")
-        except Exception:
-            pass
-    if priority_messages:
-        for msg in priority_messages:
-            st.warning(msg)
-    elif has_api:
-        st.success("No management exceptions are currently recorded for the selected API portfolio.")
-    else:
-        st.info("Load the API dataset to activate automatic M&E management analysis.")
-
-    st.caption(
-        "API-derived values are read from the same complete dataset loaded by DANIP AI Data Analyst. "
-        "Financial fields are populated only when explicit budget/actual/EAC columns exist; arbitrary DHIS2 values are not relabelled as finance."
-    )
-    st.markdown('</div>', unsafe_allow_html=True)
+        st.caption(
+            "API-derived values are read from the same complete dataset loaded by DANIP AI Data Analyst. "
+            "Financial fields are populated only when explicit budget/actual/EAC columns exist; arbitrary DHIS2 values are not relabelled as finance."
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
 
 
 
