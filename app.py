@@ -19731,8 +19731,12 @@ section[data-testid="stSidebar"] > div:first-child {
     -webkit-text-fill-color:initial !important;
 }
 
-/* Sidebar adapts to available width while preserving Streamlit's collapse control. */
+/* Keep the shared workspace menu visible on every page and viewport. */
 section[data-testid="stSidebar"] {
+    display:block !important;
+    visibility:visible !important;
+    opacity:1 !important;
+    transform:translateX(0) !important;
     width:clamp(280px,23vw,340px) !important;
     min-width:clamp(280px,23vw,340px) !important;
     max-width:340px !important;
