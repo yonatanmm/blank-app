@@ -1477,16 +1477,6 @@ def run_danip():
 
     with st.sidebar:
 
-        st.markdown(
-            """
-<div class="danip-user-box">
-🔓 DHIS2 authenticated
-</div>
-""",
-            unsafe_allow_html=True,
-        )
-
-
         st.caption(
             f"User: {username}"
         )
