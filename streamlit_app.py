@@ -70,7 +70,7 @@ import streamlit as st
 st.set_page_config(
     page_title="DANIP AI | Secure Access",
     page_icon="🔐",
-    layout="centered",
+    layout="wide",
     initial_sidebar_state="collapsed",
 )
 
@@ -492,6 +492,163 @@ div[data-testid="stLinkButton"] > a:hover {
 
 </style>
 """,
+    unsafe_allow_html=True,
+)
+
+# The sign-in page uses a full-bleed hero; keep these styles separate from the
+# older card rules above so every login element shares one responsive layout.
+try:
+    _login_hero_bytes = Path(__file__).with_name("assets").joinpath("danip-login-hero.jpg").read_bytes()
+    _login_hero_background = (
+        'url("data:image/jpeg;base64,'
+        + base64.b64encode(_login_hero_bytes).decode("ascii")
+        + '")'
+    )
+except OSError:
+    _login_hero_background = "none"
+
+st.markdown(
+    """
+<style>
+.stApp {
+    min-height: 100vh;
+    background-color: #172746;
+    background-image: linear-gradient(90deg, rgba(18,31,66,.92) 0%, rgba(26,41,79,.78) 48%, rgba(22,37,74,.40) 100%), __DANIP_LOGIN_BACKGROUND__;
+    background-position: center;
+    background-size: cover;
+    background-repeat: no-repeat;
+}
+[data-testid="stAppViewContainer"] { min-height: 100vh; }
+.block-container {
+    box-sizing: border-box;
+    width: 100%;
+    max-width: none;
+    min-height: 100vh;
+    padding: 0 clamp(22px, 8vw, 140px);
+}
+[data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stDecoration"], .stAppDeployButton {
+    display: none !important;
+}
+.st-key-danip_login_hero {
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: flex-start;
+    width: min(100%, 620px);
+    min-height: 100vh;
+    padding: 64px 0 56px;
+    color: #fff;
+}
+.danip-login-content { width: 100%; }
+.danip-login-brand {
+    color: #fff;
+    font-size: clamp(2.6rem, 6vw, 4rem);
+    font-weight: 950;
+    line-height: 1;
+    letter-spacing: -.065em;
+    margin: 0 0 40px;
+    text-shadow: 0 2px 18px rgba(0,0,0,.12);
+}
+.danip-login-kicker {
+    color: #b9d4ff;
+    font-size: .75rem;
+    font-weight: 800;
+    letter-spacing: .17em;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+}
+.danip-login-title {
+    color: #fff;
+    font-size: clamp(1.9rem, 4vw, 2.75rem);
+    line-height: 1.13;
+    letter-spacing: -.035em;
+    font-weight: 850;
+    margin: 0 0 15px;
+}
+.danip-login-description {
+    max-width: 540px;
+    color: rgba(244,247,255,.86);
+    font-size: clamp(1rem, 1.8vw, 1.12rem);
+    line-height: 1.65;
+    margin: 0 0 26px;
+}
+.danip-login-security {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    color: rgba(235,241,255,.78);
+    font-size: .86rem;
+    margin: 25px 0 0;
+}
+.danip-login-security-mark {
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid rgba(255,255,255,.28);
+    border-radius: 50%;
+    color: #d7e5ff;
+    flex: 0 0 auto;
+}
+div[data-testid="stLinkButton"] { width: fit-content; max-width: 100%; }
+div[data-testid="stLinkButton"] > a {
+    width: auto;
+    min-width: 218px;
+    min-height: 50px;
+    box-sizing: border-box;
+    padding: 0 27px;
+    border-radius: 999px;
+    border: 1px solid rgba(255,255,255,.9);
+    background: #fff;
+    color: #465b91 !important;
+    font-size: .96rem;
+    font-weight: 800;
+    text-decoration: none !important;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: transform .16s ease, background-color .16s ease, box-shadow .16s ease;
+}
+div[data-testid="stLinkButton"] > a:hover {
+    background: #eef3ff;
+    color: #344b85 !important;
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(8,17,40,.20);
+}
+.danip-login-footer { color: rgba(230,237,252,.65); font-size: .76rem; margin-top: 36px; }
+[data-testid="stSidebar"] { display: none !important; }
+@media (max-width: 760px) {
+    .stApp {
+        background-image: linear-gradient(90deg, rgba(18,31,66,.88), rgba(20,35,73,.68)), __DANIP_LOGIN_BACKGROUND__;
+        background-position: 60% center;
+    }
+    .block-container { padding: 0 clamp(20px, 6vw, 52px); }
+    .st-key-danip_login_hero { width: min(100%, 560px); min-height: 100svh; padding: 44px 0; }
+    .danip-login-brand { margin-bottom: 32px; }
+    div[data-testid="stLinkButton"] > a { min-height: 52px; }
+}
+@media (max-width: 480px) {
+    .stApp {
+        background-image: linear-gradient(90deg, rgba(16,29,62,.87), rgba(16,29,62,.73)), __DANIP_LOGIN_BACKGROUND__;
+        background-position: 63% center;
+    }
+    .block-container { padding: 0 22px; }
+    .st-key-danip_login_hero {
+        justify-content: flex-end;
+        min-height: 100svh;
+        padding: 0 0 max(34px, env(safe-area-inset-bottom));
+    }
+    .danip-login-brand { font-size: 2.65rem; margin-bottom: 28px; }
+    .danip-login-title { font-size: clamp(1.85rem, 9vw, 2.35rem); }
+    .danip-login-description { font-size: 1rem; margin-bottom: 22px; }
+    div[data-testid="stLinkButton"], div[data-testid="stLinkButton"] > a { width: 100%; }
+    div[data-testid="stLinkButton"] > a { min-height: 54px; }
+    .danip-login-footer { margin-top: 27px; }
+}
+</style>
+""".replace("__DANIP_LOGIN_BACKGROUND__", _login_hero_background),
     unsafe_allow_html=True,
 )
 
@@ -1106,7 +1263,7 @@ def handle_callback():
     except requests.HTTPError as exc:
 
         st.error(
-            "NEXUS DANIP could not complete "
+            "DANIP AI could not complete "
             "DHIS2 authentication."
         )
 
@@ -1131,7 +1288,7 @@ def handle_callback():
     except requests.RequestException:
 
         st.error(
-            "NEXUS DANIP could not connect "
+            "DANIP AI could not connect "
             "to the DHIS2 authentication service."
         )
 
@@ -1196,7 +1353,7 @@ def handle_callback():
     except Exception:
 
         st.error(
-            "NEXUS DANIP could not complete "
+            "DANIP AI could not complete "
             "DHIS2 authentication."
         )
 
@@ -1234,162 +1391,48 @@ def logout():
 # ============================================================
 
 def login_page():
-
-    # ========================================================
-    # CARD
-    # ========================================================
-
-    st.markdown(
-        '<div class="danip-card">',
-        unsafe_allow_html=True,
-    )
-
-
-    # ========================================================
-    # TITLE
-    # ========================================================
-
-    st.markdown(
-        """
-<div class="danip-title">
-NEXUS DANIP
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-
-    # ========================================================
-    # SUBTITLE
-    # ========================================================
-
-    st.markdown(
-        """
-<div class="danip-subtitle">
-Data + M&amp;E Intelligence Platform
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-
-    # ========================================================
-    # SECURITY NOTICE
-    # ========================================================
-
-    st.markdown(
-        """
-<div class="danip-security">
-
-<div class="danip-security-title">
-🔐 Authorized access only
-</div>
-
-<div class="danip-security-text">
-Sign in using your existing DHIS2 account. Your DHIS2 username and password are entered on the official DHIS2 authentication page and are not collected by NEXUS DANIP.
-</div>
-
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-
-    # ========================================================
-    # PROVIDER
-    # ========================================================
-
-    st.markdown(
-        """
-<div class="danip-provider">
-
-<b>Authentication provider:</b>
-Datalytics for Nutrition International Program (DANIP)
-
-<br>
-
-<b>DHIS2 server:</b>
-dhis2.nutritionintl.org
-
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-
-    # ========================================================
-    # CONFIGURATION CHECK
-    # ========================================================
-
-    missing = config_missing()
-
-
-    if missing:
-
-        st.warning(
-            "DHIS2 OAuth authentication still needs "
-            "to be configured."
+    """Render the full-screen DHIS2 welcome page while preserving OAuth routing."""
+    with st.container(key="danip_login_hero"):
+        st.markdown(
+            """
+            <div class="danip-login-content">
+                <div class="danip-login-brand">DANIP</div>
+                <div class="danip-login-kicker">Data + M&amp;E Intelligence</div>
+                <h1 class="danip-login-title">DANIP AI Data Analyst</h1>
+                <p class="danip-login-description">
+                    Access output analytics, indicator trends, and reporting insights
+                    through your connected DHIS2 account.
+                </p>
+                <div class="danip-login-security">
+                    <span class="danip-login-security-mark" aria-hidden="true">&#10003;</span>
+                    <span>Secure sign-in through your organization&#8217;s DHIS2 server</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
-
-        st.write(
-            "Missing configuration:"
-        )
-
-
-        for item in missing:
-
-            st.code(
-                item
+        missing = config_missing()
+        if missing:
+            st.warning("DHIS2 OAuth authentication still needs to be configured.")
+            st.write("Missing configuration:")
+            for item in missing:
+                st.code(item)
+        else:
+            st.link_button(
+                "Access Dashboard  →",
+                authorization_url(),
+                use_container_width=False,
             )
 
-
-    else:
-
-        # ====================================================
-        # LOGIN URL
-        # ====================================================
-
-        auth_url = authorization_url()
-
-
-        # ====================================================
-        # SIGN IN BUTTON
-        # ====================================================
-
-        st.link_button(
-
-            "🔐 Sign in with DHIS2",
-
-            auth_url,
-
-            use_container_width=True,
-
+        st.markdown(
+            """
+            <div class="danip-login-footer">
+                Protected access via DHIS2 &middot; dhis2.nutritionintl.org
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
-
-
-    # ========================================================
-    # FOOTER
-    # ========================================================
-
-    st.markdown(
-        """
-<div class="danip-footer">
-Protected NEXUS DANIP workspace
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-
-    # ========================================================
-    # END CARD
-    # ========================================================
-
-    st.markdown(
-        "</div>",
-        unsafe_allow_html=True,
-    )
 
 
 # ============================================================
@@ -1536,3 +1579,4 @@ if st.session_state.danip_authenticated:
 else:
 
     login_page()
+
