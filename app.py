@@ -14400,29 +14400,53 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
 
     values = {col: _me_hub_numeric_series(work[col]) for col in indicator_cols}
     observation_count = sum(int(series.notna().sum()) for series in values.values())
-    possible_count = len(work) * len(indicator_cols)
-    value_completeness = (observation_count / possible_count * 100) if possible_count else 0
+    def _output_period_summary(indicator):
+        indicator_rows = pd.DataFrame({
+            "period": work["__ME_PERIOD_LABEL__"],
+            "period_date": work["__ME_PERIOD_DATE__"],
+            "value": values[indicator],
+        }).dropna(subset=["value"])
+        if indicator_rows["period_date"].notna().any():
+            return indicator_rows.dropna(subset=["period_date"]).groupby(
+                ["period", "period_date"], as_index=False
+            )["value"].mean().sort_values("period_date")
+        return indicator_rows.groupby("period", as_index=False, sort=False)["value"].mean()
+
+    period_summaries = {indicator: _output_period_summary(indicator) for indicator in indicator_cols}
+    indicators_with_trend = sum(len(period_summary) >= 2 for period_summary in period_summaries.values())
     kpis = st.columns(4)
     kpis[0].metric("Output indicators", f"{len(indicator_cols):,}")
     kpis[1].metric("Reported values", f"{observation_count:,}")
-    kpis[2].metric("Value completeness", f"{value_completeness:.1f}%", help="Non-missing indicator cells divided by all indicator-by-record cells in the current selection. This is dataset completeness, not an expected-reporting target.")
+    kpis[2].metric("Indicators with trend", f"{indicators_with_trend:,} / {len(indicator_cols):,}", help="Indicators with reported values in at least two distinct reporting periods in the current selection.")
     kpis[3].metric("Reporting units", f"{work['__ME_OU_LABEL__'].nunique():,}")
-    st.caption(f"{work['__ME_PERIOD_LABEL__'].nunique():,} reporting period(s) in the current selection. Indicator values retain their own units and are not ranked against one another by magnitude.")
+    st.caption(f"{work['__ME_PERIOD_LABEL__'].nunique():,} reporting period(s) in the current selection. Period-to-period changes are calculated within each indicator; indicators with different units are not compared by raw value.")
 
     rows = []
     for col, series in values.items():
         observed = int(series.notna().sum())
+        period_values = period_summaries[col]
+        latest_value = float(period_values.iloc[-1]["value"]) if len(period_values) else np.nan
+        previous_value = float(period_values.iloc[-2]["value"]) if len(period_values) >= 2 else np.nan
+        change_pct = (
+            ((latest_value - previous_value) / abs(previous_value)) * 100
+            if len(period_values) >= 2 and previous_value != 0 else np.nan
+        )
+        trend = (
+            "Insufficient periods" if len(period_values) < 2
+            else "New from zero" if previous_value == 0 and latest_value != 0
+            else "No change" if latest_value == previous_value
+            else "Increased" if latest_value > previous_value
+            else "Decreased"
+        )
         rows.append({
             "Output indicator": _me_hub_indicator_label(col),
             "Reported values": observed,
             "Records in selection": len(work),
             "Value completeness": (observed / len(work) * 100) if len(work) else 0,
-            "Mean reported value": float(series.mean()) if observed else np.nan,
-            "Latest reported value": (
-                float(work.loc[series.notna()].sort_values("__ME_PERIOD_DATE__")[col].dropna().iloc[-1])
-                if observed and work.loc[series.notna(), "__ME_PERIOD_DATE__"].notna().any()
-                else float(series.dropna().iloc[-1]) if observed else np.nan
-            ),
+            "Previous period value": previous_value,
+            "Latest reported value": latest_value,
+            "Change vs previous period (%)": change_pct,
+            "Trend": trend,
         })
     summary = pd.DataFrame(rows).sort_values("Value completeness", ascending=True)
 
@@ -14433,20 +14457,26 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
 
     left, right = st.columns([1.05, 1.4])
     with left:
-        st.markdown("### Output value completeness")
-        if px:
-            coverage_fig = px.bar(
-                summary.sort_values("Value completeness", ascending=True),
-                x="Value completeness", y="Output indicator", orientation="h",
-                range_x=[0, 100], labels={"Value completeness": "Non-missing values (%)"},
+        st.markdown("### Period-over-period output change")
+        change_summary = summary.dropna(subset=["Change vs previous period (%)"]).sort_values("Change vs previous period (%)")
+        if px and not change_summary.empty:
+            change_fig = px.bar(
+                change_summary,
+                x="Change vs previous period (%)", y="Output indicator", orientation="h",
+                color="Change vs previous period (%)", color_continuous_scale=["#dc5a52", "#aab4c2", "#15966a"],
+                labels={"Change vs previous period (%)": "Change from previous period (%)"},
+                hover_data={"Change vs previous period (%)": ":.1f"},
             )
-            coverage_fig.update_layout(height=max(300, 34 * len(summary)), margin=dict(l=8, r=8, t=12, b=8))
-            st.plotly_chart(coverage_fig, use_container_width=True)
+            change_fig.add_vline(x=0, line_color="#64748b", line_width=1)
+            change_fig.update_layout(height=max(300, 34 * len(change_summary)), margin=dict(l=8, r=8, t=12, b=8), coloraxis_showscale=False)
+            st.plotly_chart(change_fig, use_container_width=True)
+        elif change_summary.empty:
+            st.info("At least two reporting periods are needed to show indicator change.")
         else:
-            st.dataframe(summary[["Output indicator", "Value completeness"]], use_container_width=True, hide_index=True)
+            st.dataframe(change_summary[["Output indicator", "Change vs previous period (%)", "Trend"]], use_container_width=True, hide_index=True)
 
     with right:
-        st.markdown("### Reported output values by period")
+        st.markdown("### Indicator reports by period")
         activity = pd.DataFrame({
             "period": work["__ME_PERIOD_LABEL__"],
             "period_date": work["__ME_PERIOD_DATE__"],
@@ -14461,7 +14491,7 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
         if px:
             activity_fig = px.bar(
                 activity_summary, x="period_date" if "period_date" in activity_summary else "period",
-                y="reported_values", labels={"period_date": "Reporting period", "period": "Reporting period", "reported_values": "Non-missing output values"},
+                y="reported_values", labels={"period_date": "Reporting period", "period": "Reporting period", "reported_values": "Reported indicator values"},
             )
             activity_fig.update_layout(height=300, margin=dict(l=8, r=8, t=12, b=8), showlegend=False)
             st.plotly_chart(activity_fig, use_container_width=True)
@@ -14469,7 +14499,7 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
             st.dataframe(activity_summary, use_container_width=True, hide_index=True)
 
     st.markdown("### Indicator reporting cards")
-    st.caption("Each card reports one output indicator, its latest period value, dataset completeness and its own trend. No data-quality findings are shown here.")
+    st.caption("Each indicator is analyzed on its own scale with latest and previous period values, relative change, reporting coverage and a trend chart.")
     for start_idx in range(0, len(indicator_cols), 2):
         card_columns = st.columns(2)
         for card, indicator in zip(card_columns, indicator_cols[start_idx:start_idx + 2]):
@@ -14489,20 +14519,20 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
                         st.info("No reported values in this selection.")
                         continue
 
-                    if card_data["period_date"].notna().any():
-                        period_values = card_data.dropna(subset=["period_date"]).groupby(
-                            ["period", "period_date"], as_index=False
-                        )["value"].mean().sort_values("period_date")
-                    else:
-                        period_values = card_data.groupby("period", as_index=False)["value"].mean()
+                    period_values = period_summaries[indicator]
                     latest_value = float(period_values.iloc[-1]["value"])
                     latest_period = str(period_values.iloc[-1]["period"])
+                    previous_value = float(period_values.iloc[-2]["value"]) if len(period_values) >= 2 else np.nan
+                    change_pct = (
+                        ((latest_value - previous_value) / abs(previous_value)) * 100
+                        if len(period_values) >= 2 and previous_value != 0 else np.nan
+                    )
 
                     card_metrics = st.columns(3)
                     card_metrics[0].metric("Latest period value", f"{latest_value:,.2f}", help=f"Mean across selected reporting units for {latest_period}.")
-                    card_metrics[1].metric("Mean reported", f"{series.mean():,.2f}" if observed else "—")
+                    card_metrics[1].metric("Change vs prior", f"{change_pct:+.1f}%" if pd.notna(change_pct) else ("New" if len(period_values) >= 2 and previous_value == 0 else "—"), delta_color="normal")
                     card_metrics[2].metric("Values reported", f"{observed:,} / {len(work):,}")
-                    st.progress(min(max(completeness / 100, 0.0), 1.0), text=f"Value completeness · {completeness:.1f}%")
+                    st.progress(min(max(completeness / 100, 0.0), 1.0), text=f"Reporting coverage · {completeness:.1f}%")
 
                     if px:
                         trend_col, unit_col = st.columns(2)
@@ -14534,15 +14564,13 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
                         st.dataframe(period_values, use_container_width=True, hide_index=True)
 
     st.markdown("### Output indicator register")
-    display = summary.rename(columns={
-        "Value completeness": "Value completeness (%)",
-        "Mean reported value": "Mean reported value",
-    })
-    display["Value completeness (%)"] = display["Value completeness (%)"].round(1)
-    display["Mean reported value"] = display["Mean reported value"].round(2)
+    display = summary.rename(columns={"Value completeness": "Reporting coverage (%)"})
+    display["Reporting coverage (%)"] = display["Reporting coverage (%)"].round(1)
+    display["Change vs previous period (%)"] = display["Change vs previous period (%)"].round(1)
+    display["Previous period value"] = display["Previous period value"].round(2)
     display["Latest reported value"] = display["Latest reported value"].round(2)
     st.dataframe(display, use_container_width=True, hide_index=True, column_config={
-        "Value completeness (%)": st.column_config.ProgressColumn("Value completeness (%)", min_value=0, max_value=100, format="%.1f%%"),
+        "Reporting coverage (%)": st.column_config.ProgressColumn("Reporting coverage (%)", min_value=0, max_value=100, format="%.1f%%"),
     })
 
 def render_danip_me_management_hub():
@@ -14683,7 +14711,7 @@ def render_danip_me_management_hub():
     # ---------------------------------------------------------
     if has_api:
         st.markdown("## 📊 Output Analytics")
-        st.caption("Track output value completeness and trends by reporting period and organisation unit. Values are analyzed within each indicator so different units are not compared directly.")
+        st.caption("Analyze output performance by indicator, reporting period and organisation unit, including period-to-period change, current values and reporting coverage. Each indicator is compared only with its own history.")
         _me_hub_render_auto_indicator_dashboard(api_df, f_period, f_ou, f_indicator)
     else:
         st.markdown("## 📊 Output Analytics")
@@ -19113,7 +19141,8 @@ section[data-testid="stSidebar"] {
 }
 [data-testid="stSidebar"] .danip-auth-status,
 [data-testid="stSidebar"] .danip-auth-status.danip-auth-status--authenticated,
-[data-testid="stSidebar"] .danip-auth-status.danip-auth-status--disabled {
+[data-testid="stSidebar"] .danip-auth-status.danip-auth-status--disabled,
+[data-testid="stSidebar"] .danip-auth-status--authenticated * {
     color:#173b2d !important;
     -webkit-text-fill-color:#173b2d !important;
     opacity:1 !important;
