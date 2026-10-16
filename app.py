@@ -13210,9 +13210,8 @@ div[class*="st-key-danip_ai_table_"] {
 div[class*="st-key-danip_ai_table_"] [data-testid="stDataFrame"] {
     max-width: 100% !important;
     border: 1px solid rgba(148, 163, 184, .28) !important;
-    border-radius: 12px !important;
+    border-radius: 8px !important;
     overflow: hidden !important;
-    box-shadow: 0 3px 12px rgba(15, 23, 42, .045) !important;
     background: var(--secondary-background-color, #fff) !important;
 }
 div[class*="st-key-danip_ai_table_"] [data-testid="stDataFrame"] [role="columnheader"] {
@@ -18355,7 +18354,8 @@ def render_existing_danip_ai_app():
         render_professional_table(
             table_df,
             key="complete_loaded_dataset",
-            height=600,
+            height=480,
+            row_height=30,
         )
 
         with st.expander("📊 Dataset Information", expanded=False):
