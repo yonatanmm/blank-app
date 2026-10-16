@@ -13229,9 +13229,18 @@ div[class*="st-key-danip_ai_response_"] {
 }
 div[class*="st-key-danip_ai_response_"] h2,
 div[class*="st-key-danip_ai_response_"] h3 {
-    margin-top: .65rem;
-    padding-bottom: .3rem;
+    margin: .9rem 0 .5rem;
+    padding: .4rem .6rem;
+    border-left: 3px solid var(--primary-color, #2563eb);
     border-bottom: 1px solid rgba(148, 163, 184, .24);
+    border-radius: 0 7px 7px 0;
+    background: rgba(148, 163, 184, .07);
+}
+div[class*="st-key-danip_ai_response_"] h2 {
+    font-size: 1.02rem;
+}
+div[class*="st-key-danip_ai_response_"] h3 {
+    font-size: .94rem;
 }
 div[class*="st-key-danip_ai_response_"] table {
     display: block;
@@ -13276,7 +13285,7 @@ def render_professional_table(
     height=None,
     hide_index=True,
     column_config=None,
-    row_height=38,
+    row_height=30,
 ):
     """Render an AI Analyst dataframe with presentation-only formatting."""
     if not isinstance(data, pd.DataFrame):
@@ -13295,12 +13304,21 @@ def render_professional_table(
         series = data[column]
         label = str(column)
         normalized_label = re.sub(r"[^a-z0-9%]+", " ", label.lower()).strip()
+        compact_label = re.sub(r"[^a-z0-9]+", "", label.lower())
         is_period = bool(re.search(
             r"\b(period|month|quarter|year|week|date|day)\b", normalized_label
+        )) or bool(re.fullmatch(
+            r"(?:period|month|quarter|year|week|date|day)(?:name|code|id|start|end)?",
+            compact_label,
+        )) or bool(re.fullmatch(
+            r"reporting(?:period|month|quarter|year|week|date)(?:name|code)?",
+            compact_label,
         ))
-        is_percent = "%" in normalized_label or bool(re.search(
-            r"\b(percent|percentage)\b", normalized_label
-        ))
+        is_percent = (
+            "%" in normalized_label
+            or bool(re.search(r"\b(percent|percentage|pct)\b", normalized_label))
+            or compact_label.endswith("pct")
+        )
 
         if pd.api.types.is_datetime64_any_dtype(series.dtype):
             if column not in configs:
@@ -13338,7 +13356,7 @@ def render_professional_table(
             if column not in configs:
                 configs[column] = st.column_config.NumberColumn(
                     label=label,
-                    width=125,
+                    width=110,
                     alignment="right",
                     format=number_format,
                 )
@@ -13346,7 +13364,7 @@ def render_professional_table(
 
         if pd.api.types.is_string_dtype(series.dtype) or pd.api.types.is_object_dtype(series.dtype):
             if column not in configs and re.search(
-                r"indicator|organisation|organization|facility|country|project|programme|program|description|name",
+                r"indicator|organisationunit|organizationunit|orgunit|organisation|organization|facility|country|project|programme|program|description|name",
                 label,
                 flags=re.IGNORECASE,
             ):
