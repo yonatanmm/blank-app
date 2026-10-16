@@ -15421,9 +15421,52 @@ def _me_hub_render_auto_indicator_dashboard(df, selected_period="All", selected_
     display["Change vs previous period (%)"] = display["Change vs previous period (%)"].round(1)
     display["Previous period value"] = display["Previous period value"].round(2)
     display["Latest reported value"] = display["Latest reported value"].round(2)
-    st.dataframe(display, use_container_width=True, hide_index=True, column_config={
-        "Reporting coverage (%)": st.column_config.ProgressColumn("Reporting coverage (%)", min_value=0, max_value=100, format="%.1f%%"),
-    })
+    register_styled = (
+        display.style
+        .format({
+            "Reported values": "{:,.0f}",
+            "Records in selection": "{:,.0f}",
+            "Reporting coverage (%)": "{:.1f}%",
+            "Previous period value": "{:,.2f}",
+            "Latest reported value": "{:,.2f}",
+            "Change vs previous period (%)": "{:+,.1f}%",
+        }, na_rep="—")
+        .bar(
+            subset=["Reporting coverage (%)"],
+            vmin=0,
+            vmax=100,
+            color="#bfdbfe",
+        )
+        .set_table_styles([
+            {
+                "selector": "th",
+                "props": [
+                    ("font-size", "16px"),
+                    ("font-weight", "800"),
+                    ("background-color", "#f1f5f9"),
+                    ("border-bottom", "2px solid #cbd5e1"),
+                    ("padding", "10px 12px"),
+                    ("white-space", "normal"),
+                    ("vertical-align", "middle"),
+                ],
+            },
+            {
+                "selector": "td",
+                "props": [
+                    ("font-size", "15px"),
+                    ("padding", "9px 12px"),
+                    ("line-height", "1.35"),
+                    ("border-bottom", "1px solid #e2e8f0"),
+                    ("vertical-align", "middle"),
+                ],
+            },
+            {
+                "selector": "tbody tr:nth-child(even) td",
+                "props": [("background-color", "#f8fafc")],
+            },
+        ])
+    )
+    st.table(register_styled.hide(axis="index"))
 
 def render_danip_me_management_hub():
     """Separate responsive M&E Management Hub using the already-loaded API dataset when available."""
