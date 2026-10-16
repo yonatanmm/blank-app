@@ -17150,6 +17150,12 @@ def render_existing_danip_ai_app():
                 st.session_state["danip_active_source_from_registry"] = bool(
                     selected_registry_row is not None and retrieval_url == selected_api
                 )
+                if st.session_state["danip_active_source_from_registry"]:
+                    st.session_state["danip_selected_registry_identity"] = _build_registry_refresh_identity(
+                        selected_registry_row
+                    )
+                else:
+                    st.session_state.pop("danip_selected_registry_identity", None)
                 st.session_state["danip_project_results"] = [{
                     "project": selected_project,
                     "country": str(selected_registry_row.get("Country", "")) if selected_registry_row is not None else "",
@@ -19949,6 +19955,12 @@ def render_existing_danip_ai_app():
                 and not manual_api_url
                 and source_url == selected_api
             )
+            if st.session_state["danip_active_source_from_registry"]:
+                st.session_state["danip_selected_registry_identity"] = _build_registry_refresh_identity(
+                    selected_registry_row
+                )
+            else:
+                st.session_state.pop("danip_selected_registry_identity", None)
 
             _nexus_sidebar_status(
                 f"Dataset loaded successfully — {len(df):,} records",
@@ -20816,6 +20828,108 @@ def _restore_dataset_source_metadata(fresh_df, previous_df):
     return fresh_df
 
 
+def _registry_refresh_text(value):
+    """Convert registry cells to trimmed text without turning blanks into 'nan'."""
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    return str(value or "").strip()
+
+
+def _build_registry_refresh_identity(registry_row):
+    """Keep the loaded registry row's identifying fields for future refreshes."""
+    return {
+        "project": _registry_refresh_text(registry_row.get("Project/Program Name", "")),
+        "country": _registry_refresh_text(registry_row.get("Country", "")),
+        "type": _registry_refresh_text(registry_row.get("Type", "")),
+        "data_source": _registry_refresh_text(registry_row.get("Data Source", "")),
+        "api_url": _registry_refresh_text(registry_row.get("API URL", "")),
+    }
+
+
+def _resolve_active_registry_row(registry, identity, previous_df, selected_project, previous_api_url):
+    """Resolve the latest workbook row for the project/API currently loaded."""
+    if not isinstance(registry, pd.DataFrame) or registry.empty:
+        raise ValueError("The refreshed project registry is empty.")
+
+    candidates = registry.copy()
+    if "_active" in candidates.columns:
+        candidates = candidates[candidates["_active"].fillna(False).astype(bool)]
+    if candidates.empty:
+        raise ValueError("The refreshed registry contains no active API rows.")
+
+    identity = identity if isinstance(identity, dict) else {}
+    identity = dict(identity)
+    previous_df = previous_df if isinstance(previous_df, pd.DataFrame) else pd.DataFrame()
+
+    def previous_value(column):
+        if column not in previous_df.columns:
+            return ""
+        values = previous_df[column].dropna().map(_registry_refresh_text)
+        values = values[values != ""].unique()
+        return values[0] if len(values) == 1 else ""
+
+    project = (
+        _registry_refresh_text(identity.get("project"))
+        or _registry_refresh_text(selected_project)
+        or previous_value("DANIP Project/Program")
+    )
+    if not project:
+        raise ValueError("The loaded project could not be matched to the refreshed registry.")
+
+    project_rows = candidates[
+        candidates["Project/Program Name"].map(_registry_refresh_text).str.casefold()
+        == project.casefold()
+    ].copy()
+    if project_rows.empty:
+        raise ValueError("The loaded project is not present in the refreshed registry.")
+
+    old_api_url = (
+        _registry_refresh_text(identity.get("api_url"))
+        or _registry_refresh_text(previous_api_url)
+    )
+    if old_api_url:
+        exact_api_rows = project_rows[
+            project_rows["API URL"].map(_registry_refresh_text).str.casefold()
+            == old_api_url.casefold()
+        ]
+        if len(exact_api_rows) == 1:
+            return exact_api_rows.iloc[0]
+        if not exact_api_rows.empty:
+            project_rows = exact_api_rows
+
+    # If an admin edits the API URL, use the remaining row metadata to find
+    # the same registry entry. Ignore an identifier that no longer matches so
+    # legitimate metadata edits do not make the active API impossible to refresh.
+    selectors = (
+        ("Type", "type", "DANIP Type"),
+        ("Data Source", "data_source", "DANIP Data Source"),
+        ("Country", "country", "DANIP Country"),
+    )
+    for registry_column, identity_key, dataset_column in selectors:
+        value = (
+            _registry_refresh_text(identity.get(identity_key))
+            or previous_value(dataset_column)
+        )
+        if not value or registry_column not in project_rows.columns:
+            continue
+        matching_rows = project_rows[
+            project_rows[registry_column].map(_registry_refresh_text).str.casefold()
+            == value.casefold()
+        ]
+        if not matching_rows.empty:
+            project_rows = matching_rows
+
+    if len(project_rows) == 1:
+        return project_rows.iloc[0]
+    raise ValueError(
+        "The refreshed registry has multiple matching APIs for the loaded project. "
+        "The previous dataset was kept because the correct API could not be identified safely."
+    )
+
+
 def _process_top_refresh_request():
     """Refresh the live registry/API source before rendering the workspace."""
     if not st.session_state.pop("nexus_force_refresh_requested", False):
@@ -20848,6 +20962,8 @@ def _process_top_refresh_request():
         return
 
     refreshed_registry = None
+    refreshed_registry_row = None
+    previous_api_url = source_url
     refreshed_from_registry = bool(
         st.session_state.get("danip_active_source_from_registry")
         or (
@@ -20862,6 +20978,18 @@ def _process_top_refresh_request():
                 # This app's live Excel configuration source is a Google Sheets
                 # project registry. Re-download its current XLSX export first.
                 refreshed_registry = load_danip_project_registry(force_refresh=True)
+                refreshed_registry_row = _resolve_active_registry_row(
+                    refreshed_registry,
+                    st.session_state.get("danip_selected_registry_identity"),
+                    previous_df,
+                    st.session_state.get("danip_selected_project_loaded", ""),
+                    previous_api_url,
+                )
+                source_url = _registry_refresh_text(
+                    refreshed_registry_row.get("API URL", "")
+                )
+                if not source_url:
+                    raise ValueError("The selected registry row has no API URL.")
 
             fresh_raw = get_direct_api_data(source_url, force_refresh=True)
             fresh_df = normalize_dataframe(fresh_raw)
@@ -20869,6 +20997,19 @@ def _process_top_refresh_request():
                 raise ValueError("The active API returned no usable rows or columns.")
 
             fresh_df = _restore_dataset_source_metadata(fresh_df, previous_df)
+            if refreshed_registry_row is not None:
+                refreshed_metadata = {
+                    "DANIP Project/Program": "Project/Program Name",
+                    "DANIP Country": "Country",
+                    "DANIP Data Source": "Data Source",
+                    "DANIP Type": "Type",
+                }
+                for dataset_column, registry_column in refreshed_metadata.items():
+                    if registry_column in refreshed_registry_row.index:
+                        fresh_df[dataset_column] = _registry_refresh_text(
+                            refreshed_registry_row.get(registry_column, "")
+                        )
+                fresh_df["DANIP API URL"] = source_url
             fresh_issues, _fresh_matrix, fresh_summary = build_quality_matrix(fresh_df)
             if not isinstance(fresh_summary, dict):
                 raise ValueError("The refreshed dataset did not produce a valid quality summary.")
@@ -20912,6 +21053,14 @@ def _process_top_refresh_request():
         st.session_state["danip_project_registry_error"] = ""
         st.session_state["danip_project_registry_last_loaded"] = refreshed_at
         st.session_state["danip_active_source_from_registry"] = True
+        st.session_state["danip_selected_api_url"] = source_url
+        st.session_state["danip_current_api_url"] = source_url
+        st.session_state["danip_selected_project_loaded"] = _registry_refresh_text(
+            refreshed_registry_row.get("Project/Program Name", "")
+        )
+        st.session_state["danip_selected_registry_identity"] = _build_registry_refresh_identity(
+            refreshed_registry_row
+        )
     st.session_state["nexus_last_data_refresh"] = refreshed_at
 
     # Drop only dataset-dependent calculations and numerical chat context.
