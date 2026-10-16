@@ -151,7 +151,7 @@ DANIP_OAUTH_ME_URL = _dhis2_secret(
 # can be restored later by changing only this value.
 # ============================================================
 
-ENABLE_DHIS2_AUTHENTICATION = False
+ENABLE_DHIS2_AUTHENTICATION = True
 
 
 if "danip_authenticated" not in st.session_state:
@@ -13201,6 +13201,199 @@ For a NORMAL NON-REPORT QUESTION, remain concise and use sections where useful:
     }
 
 
+_AI_ANALYST_PRESENTATION_CSS = """
+<style>
+div[class*="st-key-danip_ai_table_"] {
+    min-width: 0 !important;
+    max-width: 100% !important;
+}
+div[class*="st-key-danip_ai_table_"] [data-testid="stDataFrame"] {
+    max-width: 100% !important;
+    border: 1px solid rgba(148, 163, 184, .28) !important;
+    border-radius: 12px !important;
+    overflow: hidden !important;
+    box-shadow: 0 3px 12px rgba(15, 23, 42, .045) !important;
+    background: var(--secondary-background-color, #fff) !important;
+}
+div[class*="st-key-danip_ai_table_"] [data-testid="stDataFrame"] [role="columnheader"] {
+    font-weight: 700 !important;
+}
+div[class*="st-key-danip_ai_response_"] {
+    min-width: 0;
+    padding: .7rem .85rem;
+    border: 1px solid rgba(148, 163, 184, .22);
+    border-radius: 12px;
+    background: rgba(148, 163, 184, .08);
+    color: inherit;
+    line-height: 1.65;
+    overflow-wrap: anywhere;
+}
+div[class*="st-key-danip_ai_response_"] h2,
+div[class*="st-key-danip_ai_response_"] h3 {
+    margin-top: .65rem;
+    padding-bottom: .3rem;
+    border-bottom: 1px solid rgba(148, 163, 184, .24);
+}
+div[class*="st-key-danip_ai_response_"] table {
+    display: block;
+    width: 100%;
+    max-width: 100%;
+    overflow-x: auto;
+    border-collapse: collapse;
+    border: 1px solid rgba(148, 163, 184, .28);
+    border-radius: 10px;
+}
+div[class*="st-key-danip_ai_response_"] thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    font-weight: 700;
+    background: rgba(148, 163, 184, .14);
+}
+div[class*="st-key-danip_ai_response_"] th,
+div[class*="st-key-danip_ai_response_"] td {
+    padding: .5rem .7rem;
+    border-bottom: 1px solid rgba(148, 163, 184, .2);
+    text-align: left;
+    vertical-align: top;
+    overflow-wrap: anywhere;
+}
+div[class*="st-key-danip_ai_response_"] tbody tr:hover td {
+    background: rgba(59, 130, 246, .055);
+}
+@media (max-width: 640px) {
+    div[class*="st-key-danip_ai_response_"] {
+        padding: .55rem .6rem;
+    }
+}
+</style>
+"""
+
+
+def render_professional_table(
+    data,
+    *,
+    key,
+    height=None,
+    hide_index=True,
+    column_config=None,
+    row_height=38,
+):
+    """Render an AI Analyst dataframe with presentation-only formatting."""
+    if not isinstance(data, pd.DataFrame):
+        st.dataframe(data, use_container_width=True, hide_index=hide_index, height=height)
+        return
+
+    safe_key = re.sub(r"[^A-Za-z0-9_-]+", "_", str(key)).strip("_") or "table"
+    configs = dict(column_config or {})
+
+    for column in data.columns:
+        series = data[column]
+        label = str(column)
+        normalized_label = re.sub(r"[^a-z0-9%]+", " ", label.lower()).strip()
+        is_period = bool(re.search(
+            r"\b(period|month|quarter|year|week|date|day)\b", normalized_label
+        ))
+        is_percent = "%" in normalized_label or bool(re.search(
+            r"\b(percent|percentage)\b", normalized_label
+        ))
+
+        if pd.api.types.is_datetime64_any_dtype(series.dtype):
+            if column not in configs:
+                datetime_format = "YYYY-MM-DD" if is_period else "YYYY-MM-DD HH:mm"
+                configs[column] = st.column_config.DatetimeColumn(
+                    label=label,
+                    width="medium",
+                    format=datetime_format,
+                    alignment="left",
+                )
+            continue
+
+        if pd.api.types.is_bool_dtype(series.dtype):
+            continue
+
+        if pd.api.types.is_numeric_dtype(series.dtype):
+            values = series.dropna()
+            is_whole = pd.api.types.is_integer_dtype(series.dtype)
+            if not is_whole and not values.empty:
+                try:
+                    numeric_values = values.to_numpy(dtype="float64")
+                    is_whole = bool(
+                        np.isfinite(numeric_values).all()
+                        and np.equal(numeric_values, np.floor(numeric_values)).all()
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    is_whole = False
+
+            if is_period:
+                number_format = "%.0f"
+            elif is_percent:
+                number_format = "%,d%%" if is_whole else "%,.1f%%"
+            else:
+                number_format = "%,d" if is_whole else "%,.2f"
+            if column not in configs:
+                configs[column] = st.column_config.NumberColumn(
+                    label=label,
+                    width=125,
+                    alignment="right",
+                    format=number_format,
+                )
+            continue
+
+        if pd.api.types.is_string_dtype(series.dtype) or pd.api.types.is_object_dtype(series.dtype):
+            if column not in configs and re.search(
+                r"indicator|organisation|organization|facility|country|project|programme|program|description|name",
+                label,
+                flags=re.IGNORECASE,
+            ):
+                configs[column] = st.column_config.TextColumn(
+                    label=label,
+                    width="large",
+                    alignment="left",
+                )
+
+    styled = data.style.set_table_styles([
+        {
+            "selector": "th",
+            "props": [
+                ("font-weight", "700"),
+                ("background-color", "rgba(148, 163, 184, .12)"),
+                ("border-bottom", "1px solid rgba(148, 163, 184, .35)"),
+                ("padding", "8px 10px"),
+            ],
+        },
+        {
+            "selector": "td",
+            "props": [
+                ("border-bottom", "1px solid rgba(148, 163, 184, .16)"),
+                ("padding", "7px 10px"),
+            ],
+        },
+        {
+            "selector": "tbody tr:nth-child(even) td",
+            "props": [("background-color", "rgba(148, 163, 184, .035)")],
+        },
+        {
+            "selector": "tbody tr:hover td",
+            "props": [("background-color", "rgba(59, 130, 246, .07)")],
+        },
+    ])
+    # Keep missing values visible without applying per-cell styles to very large
+    # datasets, where a full-cell Styler pass can be needlessly expensive.
+    if data.size <= 60000:
+        styled = styled.highlight_null(color="rgba(245, 158, 11, .12)")
+
+    with st.container(key=f"danip_ai_table_{safe_key}"):
+        st.dataframe(
+            styled,
+            width="stretch",
+            hide_index=hide_index,
+            height=height,
+            row_height=row_height,
+            column_config=configs or None,
+        )
+
+
 def render_analysis_chatbot(
     df=None,
     source_url="",
@@ -13210,6 +13403,7 @@ def render_analysis_chatbot(
     quality_summary=None,
 ):
     """Render the chatbot independently of DHIS2/API availability."""
+    st.markdown(_AI_ANALYST_PRESENTATION_CSS, unsafe_allow_html=True)
     if isinstance(df,pd.DataFrame) and not df.empty:
         st.session_state["nexus_chat_df"]=df
         st.session_state["nexus_chat_source_url"]=str(source_url or "")
@@ -13256,13 +13450,17 @@ def render_analysis_chatbot(
             unsafe_allow_html=True,
         )
 
-    for message in st.session_state["analysis_chat_messages"]:
+    for message_index, message in enumerate(st.session_state["analysis_chat_messages"]):
         with st.chat_message("user" if message.get("role")=="user" else "assistant"):
             # Render assistant content as native Streamlit Markdown.  This is
             # important because the ISG compendium responses intentionally use
             # Markdown tables (Parameter | Description). Wrapping the answer in
             # an HTML div would display the table syntax as plain text.
-            st.markdown(message.get("content", ""))
+            if message.get("role") == "assistant":
+                with st.container(key=f"danip_ai_response_{message_index}"):
+                    st.markdown(message.get("content", ""))
+            else:
+                st.markdown(message.get("content", ""))
 
     # Keep the clear control visually attached to the SAME chat composer.
     # st.chat_input is rendered in Streamlit's fixed bottom layer, so putting
@@ -13425,7 +13623,8 @@ def render_analysis_chatbot(
             "Review the response for details." if _chat_failed else "The answer is ready in the AI Analyst workspace.",
         )
         answer=(result or {}).get("text","")
-        st.markdown(answer)
+        with st.container(key="danip_ai_response_live"):
+            st.markdown(answer)
         if (result or {}).get("source")=="ISG_INDICATOR_COMPENDIUM":
             st.caption("📚 Source: ISG Indicator Compendium (RAG)")
         elif (result or {}).get("source") in ("LOCAL_M_AND_E","OPENAI_M_AND_E"):
@@ -16102,6 +16301,7 @@ def _render_universal_powerbi_workspace():
 
 
 def render_existing_danip_ai_app():
+    st.markdown(_AI_ANALYST_PRESENTATION_CSS, unsafe_allow_html=True)
     # ============================================================
     # CONNECTION STATUS
     # ============================================================
@@ -16395,10 +16595,9 @@ def render_existing_danip_ai_app():
             ]
             if display_columns:
                 with st.expander("📋 Project/API Registry", expanded=False):
-                    st.dataframe(
+                    render_professional_table(
                         registry_now[display_columns],
-                        use_container_width=True,
-                        hide_index=True,
+                        key="project_registry",
                     )
 
             if st.session_state.get("danip_project_registry_last_loaded"):
@@ -17567,7 +17766,7 @@ def render_existing_danip_ai_app():
                     trend_df = pd.DataFrame([
                         {"Indicator": k, **v} for k, v in trends.items()
                     ])
-                    st.dataframe(trend_df, use_container_width=True, hide_index=True)
+                    render_professional_table(trend_df, key="advanced_trends")
                     try:
                         import plotly.express as px
                         chart_rows = []
@@ -17600,10 +17799,9 @@ def render_existing_danip_ai_app():
 
                 if volatility:
                     st.markdown("#### Volatility & Distribution")
-                    st.dataframe(
+                    render_professional_table(
                         pd.DataFrame([{ "Indicator": k, **v } for k, v in volatility.items()]),
-                        use_container_width=True,
-                        hide_index=True,
+                        key="advanced_volatility",
                     )
 
             with t2:
@@ -17612,7 +17810,10 @@ def render_existing_danip_ai_app():
                     for indicator, rows in forecasts.items():
                         for row in rows:
                             forecast_rows.append({"Indicator": indicator, **row})
-                    st.dataframe(pd.DataFrame(forecast_rows), use_container_width=True, hide_index=True)
+                    render_professional_table(
+                        pd.DataFrame(forecast_rows),
+                        key="advanced_forecast",
+                    )
                     st.caption("Forecasts use a simple deterministic linear trend and should be treated as directional, not causal predictions.")
                 else:
                     st.info("Forecasting requires at least four valid ordered periods.")
@@ -17620,7 +17821,7 @@ def render_existing_danip_ai_app():
             with t3:
                 if correlations:
                     corr_df = pd.DataFrame(correlations)
-                    st.dataframe(corr_df, use_container_width=True, hide_index=True)
+                    render_professional_table(corr_df, key="advanced_correlations")
                     try:
                         import plotly.express as px
                         matrix = advanced.get("correlation_matrix", {})
@@ -17643,17 +17844,23 @@ def render_existing_danip_ai_app():
             with t4:
                 st.metric("Detected anomalies", f"{len(anomalies):,}")
                 if anomalies:
-                    st.dataframe(pd.DataFrame(anomalies), use_container_width=True, hide_index=True)
+                    render_professional_table(
+                        pd.DataFrame(anomalies),
+                        key="advanced_anomalies",
+                    )
                     st.warning("Anomalies are flagged for investigation; they are never automatically deleted or changed.")
                 else:
                     st.success("No advanced statistical anomalies were detected in the selected numeric fields.")
 
             with t5:
                 if benchmarking:
-                    for indicator, rows in list(benchmarking.items())[:8]:
+                    for benchmark_index, (indicator, rows) in enumerate(list(benchmarking.items())[:8]):
                         st.markdown(f"**{indicator} — organisation-unit benchmark**")
                         bench_df = pd.DataFrame(rows)
-                        st.dataframe(bench_df, use_container_width=True, hide_index=True)
+                        render_professional_table(
+                            bench_df,
+                            key=f"advanced_benchmark_{benchmark_index}",
+                        )
                 else:
                     st.info("Organisation-unit benchmarking requires a detected OU field and a manageable number of OUs.")
 
@@ -18140,10 +18347,9 @@ def render_existing_danip_ai_app():
         else:
             st.caption(f"Displaying all {len(table_df):,} matching rows.")
 
-        st.dataframe(
+        render_professional_table(
             table_df,
-            use_container_width=True,
-            hide_index=True,
+            key="complete_loaded_dataset",
             height=600,
         )
 
@@ -18166,7 +18372,7 @@ def render_existing_danip_ai_app():
                 "Non-Missing": [int(df[c].notna().sum()) for c in df.columns],
                 "Missing": [int(df[c].isna().sum()) for c in df.columns],
             })
-            st.dataframe(column_info, use_container_width=True, hide_index=True)
+            render_professional_table(column_info, key="complete_dataset_columns")
 
 
 
@@ -18787,12 +18993,9 @@ def render_existing_danip_ai_app():
                 b.metric("On track", int(performance["Status"].eq("🟢 On track").sum()))
                 c.metric("Attention", int(performance["Status"].eq("🟡 Attention").sum()))
                 d.metric("Off track", int(performance["Status"].eq("🔴 Off track").sum()))
-                st.dataframe(
-                    performance.style.format({
-                        "Target": "{:,.2f}", "Actual": "{:,.2f}",
-                        "Achievement %": "{:,.1f}%", "Gap": "{:,.2f}"
-                    }),
-                    use_container_width=True, hide_index=True
+                render_professional_table(
+                    performance,
+                    key="meal_performance",
                 )
                 _meal_download(performance, "DANIP_MEAL_Performance.csv", "⬇️ Export Performance")
             else:
@@ -18830,14 +19033,9 @@ def render_existing_danip_ai_app():
         with tabs[2]:
             st.markdown("### Outcome Monitoring & Change")
             if outcome_status == "SUCCESS":
-                st.dataframe(
-                    outcome.style.format({
-                        "First Value": "{:,.2f}",
-                        "Latest Value": "{:,.2f}",
-                        "Absolute Change": "{:,.2f}",
-                        "% Change": "{:,.1f}%"
-                    }),
-                    use_container_width=True, hide_index=True
+                render_professional_table(
+                    outcome,
+                    key="meal_outcomes",
                 )
                 st.caption(
                     "Descriptive first-versus-latest comparison only. "
@@ -18868,7 +19066,7 @@ def render_existing_danip_ai_app():
                     .rename_axis(selected).reset_index(name="Records")
                 )
                 counts["Share %"] = counts["Records"] / max(len(df), 1) * 100
-                st.dataframe(counts, use_container_width=True, hide_index=True)
+                render_professional_table(counts, key="meal_equity_counts")
                 st.caption(
                     "Record shares are descriptive. Equity gaps should be assessed against "
                     "population denominators, programme targets and context."
@@ -18879,7 +19077,7 @@ def render_existing_danip_ai_app():
         # 5 Indicator registry
         with tabs[4]:
             st.markdown("### Indicator Registry / Data Dictionary")
-            st.dataframe(registry, use_container_width=True, hide_index=True)
+            render_professional_table(registry, key="meal_indicator_registry")
             _meal_download(registry, "DANIP_MEAL_Indicator_Registry.csv", "⬇️ Export Indicator Registry")
             st.info(
                 "The registry detects available technical fields from the live dataset. "
@@ -18925,7 +19123,10 @@ def render_existing_danip_ai_app():
                     st.rerun()
 
             if not st.session_state["meal_feedback"].empty:
-                st.dataframe(st.session_state["meal_feedback"].drop(columns=["_MEAL_ID"], errors="ignore"), use_container_width=True, hide_index=True)
+                render_professional_table(
+                    st.session_state["meal_feedback"].drop(columns=["_MEAL_ID"], errors="ignore"),
+                    key="meal_feedback",
+                )
                 _meal_download(st.session_state["meal_feedback"].drop(columns=["_MEAL_ID"], errors="ignore"), "DANIP_MEAL_Accountability.csv", "⬇️ Export Accountability Register")
 
         # 7 Learning
@@ -18953,7 +19154,10 @@ def render_existing_danip_ai_app():
                     st.session_state["meal_learning"] = _meal_persistent_df("meal_learning")
                     st.rerun()
             if not st.session_state["meal_learning"].empty:
-                st.dataframe(st.session_state["meal_learning"].drop(columns=["_MEAL_ID"], errors="ignore"), use_container_width=True, hide_index=True)
+                render_professional_table(
+                    st.session_state["meal_learning"].drop(columns=["_MEAL_ID"], errors="ignore"),
+                    key="meal_learning",
+                )
                 _meal_download(st.session_state["meal_learning"].drop(columns=["_MEAL_ID"], errors="ignore"), "DANIP_MEAL_Learning.csv", "⬇️ Export Learning Register")
 
         # 8 Actions
@@ -18988,7 +19192,10 @@ def render_existing_danip_ai_app():
                     st.session_state["meal_actions"] = _meal_persistent_df("meal_actions")
                     st.rerun()
             if not st.session_state["meal_actions"].empty:
-                st.dataframe(st.session_state["meal_actions"].drop(columns=["_MEAL_ID"], errors="ignore"), use_container_width=True, hide_index=True)
+                render_professional_table(
+                    st.session_state["meal_actions"].drop(columns=["_MEAL_ID"], errors="ignore"),
+                    key="meal_actions",
+                )
                 _meal_download(st.session_state["meal_actions"].drop(columns=["_MEAL_ID"], errors="ignore"), "DANIP_MEAL_Action_Tracker.csv", "⬇️ Export Action Tracker")
 
         # 9 Risks / assumptions
@@ -19085,7 +19292,7 @@ def render_existing_danip_ai_app():
                 "Value": str(int(len(st.session_state["meal_actions"]) - st.session_state["meal_actions"]["Status"].astype(str).str.lower().isin(["completed", "closed"]).sum()) if not st.session_state["meal_actions"].empty else 0),
                 "Interpretation": "Items requiring follow-up"
             }])
-            st.dataframe(report, use_container_width=True, hide_index=True)
+            render_professional_table(report, key="meal_executive_review")
 
             st.markdown("#### Recommended MEAL Review Questions")
             st.markdown(
