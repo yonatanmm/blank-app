@@ -2163,24 +2163,25 @@ with refresh_col:
 # HEADER
 # ============================================================
 
-st.markdown(
-    """
-    <div class="app-hero">
-        <div class="app-title">DANIP AI Data Analyst</div>
-        <div class="app-subtitle">
-            A premium evidence-first workspace for DHIS2, tabular and API data.
-            Ask questions in natural language, explore performance, compare indicators,
-            assess data quality and turn evidence into decision-ready intelligence.
+if workspace != "🤖 DANIP AI Data Analyst":
+    st.markdown(
+        """
+        <div class="app-hero">
+            <div class="app-title">DANIP AI Data Analyst</div>
+            <div class="app-subtitle">
+                A premium evidence-first workspace for DHIS2, tabular and API data.
+                Ask questions in natural language, explore performance, compare indicators,
+                assess data quality and turn evidence into decision-ready intelligence.
+            </div>
+            <div class="status-row">
+                <span class="status-pill status-ok">● Complete Data Processing</span>
+                <span class="status-pill status-info">● User-Driven Analysis</span>
+                <span class="status-pill status-info">● Data Quality First</span>
+            </div>
         </div>
-        <div class="status-row">
-            <span class="status-pill status-ok">● Complete Data Processing</span>
-            <span class="status-pill status-info">● User-Driven Analysis</span>
-            <span class="status-pill status-info">● Data Quality First</span>
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 # ============================================================
@@ -13204,20 +13205,17 @@ For a NORMAL NON-REPORT QUESTION, remain concise and use sections where useful:
 _AI_ANALYST_PRESENTATION_CSS = """
 <style>
 /* These rules are injected only while the AI Analyst workspace is active. */
-section[data-testid="stMain"] {
+.stApp {
     min-width: 0 !important;
     color: var(--text-color, #172b3a) !important;
 }
-section[data-testid="stMain"] .block-container {
+.block-container {
     width: 100% !important;
     max-width: 1560px !important;
     margin-inline: auto !important;
     padding: .9rem clamp(.7rem, 2vw, 1.6rem) 3rem !important;
 }
-/* The shared shell has its own compact workspace bar; use this AI-only page title. */
-section[data-testid="stMain"] .app-hero {
-    display: none !important;
-}
+
 .danip-ai-page-header {
     position: relative;
     overflow: hidden;
@@ -13253,33 +13251,33 @@ section[data-testid="stMain"] .app-hero {
     font-size: .88rem;
     line-height: 1.5;
 }
-section[data-testid="stMain"] .section-card,
-section[data-testid="stMain"] .guided-panel,
-section[data-testid="stMain"] .danip-ai-page-header {
+.section-card,
+.guided-panel,
+.danip-ai-page-header {
     box-sizing: border-box;
     max-width: 100%;
 }
-section[data-testid="stMain"] .section-card,
-section[data-testid="stMain"] .guided-panel {
+.section-card,
+.guided-panel {
     border: 1px solid rgba(148, 163, 184, .25) !important;
     border-radius: 14px !important;
     background: var(--secondary-background-color, #fff) !important;
     box-shadow: 0 3px 12px rgba(15, 23, 42, .045) !important;
     color: var(--text-color, #172b3a) !important;
 }
-section[data-testid="stMain"] .section-title,
-section[data-testid="stMain"] .guided-panel .section-title {
+.section-title,
+.guided-panel .section-title {
     color: var(--text-color, #172b3a) !important;
     -webkit-text-fill-color: var(--text-color, #172b3a) !important;
     font-size: 1rem !important;
 }
-section[data-testid="stMain"] .section-help,
-section[data-testid="stMain"] .guided-panel .section-help {
+.section-help,
+.guided-panel .section-help {
     color: var(--text-color, #64748b) !important;
     -webkit-text-fill-color: var(--text-color, #64748b) !important;
     opacity: .76;
 }
-section[data-testid="stMain"] [data-testid="stMetric"] {
+[data-testid="stMetric"] {
     min-width: 0 !important;
     min-height: 82px !important;
     border: 1px solid rgba(148, 163, 184, .28) !important;
@@ -13287,49 +13285,49 @@ section[data-testid="stMain"] [data-testid="stMetric"] {
     background: var(--secondary-background-color, #fff) !important;
     box-shadow: 0 3px 12px rgba(15, 23, 42, .05) !important;
 }
-section[data-testid="stMain"] [data-testid="stMetric"] [data-testid="stMetricLabel"],
-section[data-testid="stMain"] [data-testid="stMetric"] [data-testid="stMetricValue"],
-section[data-testid="stMain"] [data-testid="stMetric"] [data-testid="stMetricDelta"] {
+[data-testid="stMetric"] [data-testid="stMetricLabel"],
+[data-testid="stMetric"] [data-testid="stMetricValue"],
+[data-testid="stMetric"] [data-testid="stMetricDelta"] {
     color: var(--text-color, #172b3a) !important;
     -webkit-text-fill-color: var(--text-color, #172b3a) !important;
 }
-section[data-testid="stMain"] [data-testid="stSelectbox"] label,
-section[data-testid="stMain"] [data-testid="stMultiSelect"] label,
-section[data-testid="stMain"] [data-testid="stTextInput"] label,
-section[data-testid="stMain"] [data-testid="stTextArea"] label {
+[data-testid="stSelectbox"] label,
+[data-testid="stMultiSelect"] label,
+[data-testid="stTextInput"] label,
+[data-testid="stTextArea"] label {
     color: var(--text-color, #172b3a) !important;
     -webkit-text-fill-color: var(--text-color, #172b3a) !important;
     font-size: .78rem !important;
     font-weight: 700 !important;
 }
-section[data-testid="stMain"] [data-testid="stSelectbox"] [data-baseweb="select"] > div,
-section[data-testid="stMain"] [data-testid="stMultiSelect"] [data-baseweb="select"] > div,
-section[data-testid="stMain"] [data-testid="stTextInput"] input,
-section[data-testid="stMain"] [data-testid="stTextArea"] textarea {
+[data-testid="stSelectbox"] [data-baseweb="select"] > div,
+[data-testid="stMultiSelect"] [data-baseweb="select"] > div,
+[data-testid="stTextInput"] input,
+[data-testid="stTextArea"] textarea {
     min-width: 0 !important;
     border-color: rgba(148, 163, 184, .42) !important;
     background: var(--secondary-background-color, #fff) !important;
     color: var(--text-color, #172b3a) !important;
     -webkit-text-fill-color: var(--text-color, #172b3a) !important;
 }
-section[data-testid="stMain"] [data-testid="stSelectbox"] [data-baseweb="select"] *,
-section[data-testid="stMain"] [data-testid="stMultiSelect"] [data-baseweb="select"] * {
+[data-testid="stSelectbox"] [data-baseweb="select"] *,
+[data-testid="stMultiSelect"] [data-baseweb="select"] * {
     color: var(--text-color, #172b3a) !important;
     -webkit-text-fill-color: var(--text-color, #172b3a) !important;
 }
-section[data-testid="stMain"] [data-testid="stMultiSelect"] [data-baseweb="tag"] {
+[data-testid="stMultiSelect"] [data-baseweb="tag"] {
     border: 1px solid rgba(79, 124, 255, .24) !important;
     background: rgba(79, 124, 255, .10) !important;
 }
-section[data-testid="stMain"] [data-testid="stSelectbox"] input,
-section[data-testid="stMain"] [data-testid="stMultiSelect"] input,
-section[data-testid="stMain"] [data-testid="stTextInput"] input::placeholder,
-section[data-testid="stMain"] [data-testid="stTextArea"] textarea::placeholder {
+[data-testid="stSelectbox"] input,
+[data-testid="stMultiSelect"] input,
+[data-testid="stTextInput"] input::placeholder,
+[data-testid="stTextArea"] textarea::placeholder {
     color: var(--text-color, #64748b) !important;
     -webkit-text-fill-color: var(--text-color, #64748b) !important;
     opacity: .72;
 }
-section[data-testid="stMain"] div[data-testid="stPlotlyChart"] {
+div[data-testid="stPlotlyChart"] {
     min-width: 0 !important;
     max-width: 100% !important;
     padding: .35rem !important;
@@ -13338,7 +13336,7 @@ section[data-testid="stMain"] div[data-testid="stPlotlyChart"] {
     background: var(--secondary-background-color, #fff) !important;
     box-shadow: 0 3px 12px rgba(15, 23, 42, .04) !important;
 }
-section[data-testid="stMain"] .empty-state {
+.empty-state {
     max-width: 920px;
     margin: .65rem auto 1rem;
     border: 1px dashed rgba(148, 163, 184, .48) !important;
@@ -13347,14 +13345,14 @@ section[data-testid="stMain"] .empty-state {
     color: var(--text-color, #172b3a) !important;
     box-shadow: 0 3px 12px rgba(15, 23, 42, .035);
 }
-section[data-testid="stMain"] h2,
-section[data-testid="stMain"] h3,
-section[data-testid="stMain"] h4 {
+h2,
+h3,
+h4 {
     color: var(--text-color, #172b3a) !important;
     -webkit-text-fill-color: var(--text-color, #172b3a) !important;
     letter-spacing: -.018em;
 }
-section[data-testid="stMain"] div[class*="st-key-dataset_suggestion_"] button {
+div[class*="st-key-dataset_suggestion_"] button {
     width: 100% !important;
     min-height: 40px !important;
     border: 1px solid rgba(79, 124, 255, .24) !important;
@@ -13365,11 +13363,11 @@ section[data-testid="stMain"] div[class*="st-key-dataset_suggestion_"] button {
     font-size: .78rem !important;
     text-align: left !important;
 }
-section[data-testid="stMain"] div[class*="st-key-dataset_suggestion_"] button:hover {
+div[class*="st-key-dataset_suggestion_"] button:hover {
     border-color: var(--primary-color, #4f7cff) !important;
     background: rgba(79, 124, 255, .08) !important;
 }
-section[data-testid="stMain"] .danip-analysis-chat {
+.danip-analysis-chat {
     margin: .2rem 0 .65rem !important;
     padding: .95rem 1.05rem !important;
     border: 1px solid rgba(79, 124, 255, .26) !important;
@@ -13377,26 +13375,26 @@ section[data-testid="stMain"] .danip-analysis-chat {
     background: var(--secondary-background-color, #fff) !important;
     box-shadow: 0 5px 18px rgba(15, 23, 42, .055) !important;
 }
-section[data-testid="stMain"] .danip-analysis-chat .chat-kicker {
+.danip-analysis-chat .chat-kicker {
     color: var(--primary-color, #315fca) !important;
     -webkit-text-fill-color: var(--primary-color, #315fca) !important;
     font-size: .66rem !important;
     letter-spacing: .12em !important;
 }
-section[data-testid="stMain"] .danip-analysis-chat .chat-title {
+.danip-analysis-chat .chat-title {
     color: var(--text-color, #172b3a) !important;
     -webkit-text-fill-color: var(--text-color, #172b3a) !important;
     font-size: 1.25rem !important;
     font-weight: 760 !important;
 }
-section[data-testid="stMain"] .danip-analysis-chat .chat-help {
+.danip-analysis-chat .chat-help {
     max-width: 900px;
     margin-bottom: .1rem !important;
     color: var(--text-color, #64748b) !important;
     -webkit-text-fill-color: var(--text-color, #64748b) !important;
     opacity: .78;
 }
-section[data-testid="stMain"] [data-testid="stChatInput"] {
+[data-testid="stChatInput"] {
     max-width: 1120px !important;
     margin-inline: auto !important;
     border: 1px solid rgba(148, 163, 184, .48) !important;
@@ -13404,14 +13402,14 @@ section[data-testid="stMain"] [data-testid="stChatInput"] {
     background: var(--secondary-background-color, #fff) !important;
     box-shadow: 0 4px 16px rgba(15, 23, 42, .10) !important;
 }
-section[data-testid="stMain"] [data-testid="stChatInput"] textarea {
+[data-testid="stChatInput"] textarea {
     min-height: 48px !important;
     color: var(--text-color, #172b3a) !important;
     -webkit-text-fill-color: var(--text-color, #172b3a) !important;
     caret-color: var(--text-color, #172b3a) !important;
     background: transparent !important;
 }
-section[data-testid="stMain"] [data-testid="stChatInput"] textarea::placeholder {
+[data-testid="stChatInput"] textarea::placeholder {
     color: var(--text-color, #64748b) !important;
     -webkit-text-fill-color: var(--text-color, #64748b) !important;
     opacity: .68 !important;
@@ -13483,7 +13481,7 @@ div[class*="st-key-danip_ai_response_"] tbody tr:hover td {
     background: rgba(59, 130, 246, .055);
 }
 @media (max-width: 640px) {
-    section[data-testid="stMain"] .block-container {
+    .block-container {
         padding: .7rem .55rem 2.25rem !important;
     }
     .danip-ai-page-header {
@@ -13491,11 +13489,11 @@ div[class*="st-key-danip_ai_response_"] tbody tr:hover td {
         border-radius: 12px;
     }
     .danip-ai-page-title { font-size: 1.45rem; }
-    section[data-testid="stMain"] div[data-testid="stHorizontalBlock"]:not(:has(.st-key-danip_workspace_selector)) {
+    div[data-testid="stHorizontalBlock"]:not(:has(.st-key-danip_workspace_selector)) {
         flex-wrap: wrap !important;
         gap: .55rem !important;
     }
-    section[data-testid="stMain"] div[data-testid="stHorizontalBlock"]:not(:has(.st-key-danip_workspace_selector)) > [data-testid="column"] {
+    div[data-testid="stHorizontalBlock"]:not(:has(.st-key-danip_workspace_selector)) > [data-testid="column"] {
         flex: 1 1 100% !important;
         min-width: 100% !important;
     }
@@ -13504,11 +13502,11 @@ div[class*="st-key-danip_ai_response_"] tbody tr:hover td {
     }
 }
 @media (min-width: 641px) and (max-width: 960px) {
-    section[data-testid="stMain"] div[data-testid="stHorizontalBlock"]:not(:has(.st-key-danip_workspace_selector)) {
+    div[data-testid="stHorizontalBlock"]:not(:has(.st-key-danip_workspace_selector)) {
         flex-wrap: wrap !important;
         gap: .65rem !important;
     }
-    section[data-testid="stMain"] div[data-testid="stHorizontalBlock"]:not(:has(.st-key-danip_workspace_selector)) > [data-testid="column"] {
+    div[data-testid="stHorizontalBlock"]:not(:has(.st-key-danip_workspace_selector)) > [data-testid="column"] {
         flex: 1 1 calc(50% - .65rem) !important;
         min-width: calc(50% - .65rem) !important;
     }
