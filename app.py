@@ -151,7 +151,7 @@ DANIP_OAUTH_ME_URL = _dhis2_secret(
 # can be restored later by changing only this value.
 # ============================================================
 
-ENABLE_DHIS2_AUTHENTICATION = True
+ENABLE_DHIS2_AUTHENTICATION = False
 
 
 if "danip_authenticated" not in st.session_state:
@@ -20017,8 +20017,7 @@ section[data-testid="stSidebar"] > div:first-child {
     font-weight:700 !important;
 }
 /* Prevent the sidebar from being hidden by its collapse/expand controls. */
-[data-testid="stSidebarCollapseButton"],
-[data-testid="stSidebarCollapsedControl"] {
+[data-testid="stSidebarCollapseButton"] {
     display:none !important;
 }
 .common-sidebar-section {
