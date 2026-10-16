@@ -1115,7 +1115,7 @@ st.markdown(
         border-spacing: 0 !important;
         background: #ffffff !important;
         color: #111827 !important;
-        font-size: .80rem !important;
+        font-size: .90rem !important;
     }
 
     .dq-table th {
@@ -1125,7 +1125,8 @@ st.markdown(
         background: #ffffff !important;
         color: #111827 !important;
         -webkit-text-fill-color: #111827 !important;
-        font-weight: 800 !important;
+        font-size: .94rem !important;
+        font-weight: 900 !important;
         text-align: left !important;
         padding: .72rem .70rem !important;
         border-bottom: 2px solid #cbd5e1 !important;
@@ -1140,6 +1141,7 @@ st.markdown(
         background: #ffffff !important;
         color: #111827 !important;
         -webkit-text-fill-color: #111827 !important;
+        font-size: .88rem !important;
         padding: .70rem .70rem !important;
         border-bottom: 1px solid #e5e7eb !important;
         border-right: 1px solid #f1f5f9 !important;
@@ -13483,7 +13485,8 @@ div[class*="st-key-danip_ai_table_"] [data-testid="stDataFrame"] {
     background: var(--secondary-background-color, #fff) !important;
 }
 div[class*="st-key-danip_ai_table_"] [data-testid="stDataFrame"] [role="columnheader"] {
-    font-weight: 700 !important;
+    font-size: .94rem !important;
+    font-weight: 800 !important;
 }
 div[class*="st-key-danip_ai_response_"] {
     min-width: 0;
@@ -13699,7 +13702,8 @@ def render_professional_table(
         {
             "selector": "th",
             "props": [
-                ("font-weight", "700"),
+                ("font-size", "15px"),
+                ("font-weight", "800"),
                 ("background-color", "rgba(148, 163, 184, .12)"),
                 ("border-bottom", "1px solid rgba(148, 163, 184, .35)"),
                 ("padding", "8px 10px"),
@@ -13712,6 +13716,7 @@ def render_professional_table(
         {
             "selector": "td",
             "props": [
+                ("font-size", "14px"),
                 ("border-bottom", "1px solid rgba(148, 163, 184, .16)"),
                 ("padding", "7px 10px"),
                 ("white-space", "normal"),
