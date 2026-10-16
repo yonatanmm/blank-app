@@ -71,7 +71,7 @@ st.set_page_config(
     page_title="DANIP AI | Secure Access",
     page_icon="🔐",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
 
 
@@ -618,7 +618,7 @@ div[data-testid="stLinkButton"] > a:hover {
     box-shadow: 0 8px 24px rgba(8,17,40,.20);
 }
 .danip-login-footer { color: rgba(230,237,252,.65); font-size: .76rem; margin-top: 36px; }
-[data-testid="stSidebar"] { display: none !important; }
+[data-testid="stSidebar"] { display: __DANIP_SIDEBAR_DISPLAY__ !important; }
 @media (max-width: 760px) {
     .stApp {
         background-image: linear-gradient(90deg, rgba(18,31,66,.88), rgba(20,35,73,.68)), __DANIP_LOGIN_BACKGROUND__;
@@ -648,7 +648,10 @@ div[data-testid="stLinkButton"] > a:hover {
     .danip-login-footer { margin-top: 27px; }
 }
 </style>
-""".replace("__DANIP_LOGIN_BACKGROUND__", _login_hero_background),
+""".replace("__DANIP_LOGIN_BACKGROUND__", _login_hero_background).replace(
+        "__DANIP_SIDEBAR_DISPLAY__",
+        "none" if not st.session_state.danip_authenticated else "block",
+    ),
     unsafe_allow_html=True,
 )
 
