@@ -15384,10 +15384,10 @@ def render_common_sidebar():
         # -----------------------------------------------------
         st.markdown(
             '<div class="common-sidebar-brand">'
-            '<div class="common-sidebar-mark">D</div>'
             '<div class="common-sidebar-brand-text">'
-            '<div class="common-sidebar-name">DANIP</div>'
-            '<div class="common-sidebar-subtitle">Data + M&amp;E Intelligence</div>'
+            '<div class="common-sidebar-name">Data Governance Intelligence Hub</div>'
+            '<div class="common-sidebar-subtitle">AI-Powered Data Quality, Metadata &amp; Governance</div>'
+            '<div class="common-sidebar-credit">Developed by Fitsum Yimam</div>'
             '</div></div>',
             unsafe_allow_html=True,
         )
@@ -15432,7 +15432,6 @@ def render_common_sidebar():
             )
         st.session_state["nexus_sidebar_last_workspace"] = current_workspace
 
-        st.markdown('<div class="common-sidebar-section">WORKSPACES</div>', unsafe_allow_html=True)
         sidebar_workspaces = [
             ("🤖 DANIP AI Data Analyst", "🤖 DANIP AI Data Analyst", "Ask indicator questions, load data, and run AI analysis.", "sidebar_workspace_ai"),
             ("🧭 DANIP M&E Management Hub", "M&E Hub", "Review output indicators, performance, and reporting trends.", "sidebar_workspace_me"),
@@ -15440,18 +15439,29 @@ def render_common_sidebar():
             ("🌐 AI Public Website Builder", "Website Builder", "Build a public-facing site from approved analysis.", "sidebar_workspace_builder"),
             ("📅 My Reports & Monitoring", "Reports & Monitoring", "Review saved reports and monitoring activity.", "sidebar_workspace_reports"),
         ]
+        sidebar_sections = [
+            ("OVERVIEW", sidebar_workspaces[:2]),
+            ("DATA DISCOVERY", sidebar_workspaces[2:3]),
+            ("DATA QUALITY", sidebar_workspaces[4:5]),
+            ("PLATFORM", sidebar_workspaces[3:4]),
+        ]
         with st.container(key="common_sidebar_navigation"):
-            for workspace_value, label, description, widget_key in sidebar_workspaces:
-                is_active = current_workspace == workspace_value
-                st.button(
-                    label,
-                    key=widget_key,
-                    help=description,
-                    type="primary" if is_active else "secondary",
-                    use_container_width=True,
-                    on_click=_select_workspace_from_sidebar,
-                    args=(workspace_value,),
+            for section_name, section_workspaces in sidebar_sections:
+                st.markdown(
+                    f'<div class="common-sidebar-section">{section_name}</div>',
+                    unsafe_allow_html=True,
                 )
+                for workspace_value, label, description, widget_key in section_workspaces:
+                    is_active = current_workspace == workspace_value
+                    st.button(
+                        label,
+                        key=widget_key,
+                        help=description,
+                        type="primary" if is_active else "secondary",
+                        use_container_width=True,
+                        on_click=_select_workspace_from_sidebar,
+                        args=(workspace_value,),
+                    )
 
         # -----------------------------------------------------
         # DATASET STATUS
@@ -19965,20 +19975,99 @@ section[data-testid="stSidebar"] > div:first-child {
 
 /* Keep the workspace sidebar static and expanded. */
 section[data-testid="stSidebar"] {
-    width:clamp(280px,23vw,340px) !important;
-    min-width:clamp(280px,23vw,340px) !important;
-    max-width:340px !important;
+    width:285px !important;
+    min-width:285px !important;
+    max-width:285px !important;
+    background:#111827 !important;
+    border-right:1px solid rgba(255,255,255,.08) !important;
+}
+section[data-testid="stSidebar"] > div:first-child {
+    padding:1.4rem 1rem 1.2rem !important;
+}
+[data-testid="stSidebar"] .nexus-live-monitor,
+[data-testid="stSidebar"] .common-sidebar-card {
+    display:none !important;
+}
+.common-sidebar-brand {
+    display:block !important;
+    padding:0 0 10px !important;
+    margin:0 0 20px !important;
+    border:0 !important;
+}
+.common-sidebar-name {
+    max-width:245px !important;
+    font-size:1.05rem !important;
+    line-height:1.2 !important;
+    font-weight:850 !important;
+}
+.common-sidebar-subtitle {
+    max-width:245px !important;
+    margin-top:10px !important;
+    color:#9fb0c4 !important;
+    -webkit-text-fill-color:#9fb0c4 !important;
+    font-size:.73rem !important;
+    line-height:1.4 !important;
+    font-weight:650 !important;
+}
+.common-sidebar-credit {
+    margin-top:8px !important;
+    color:#e5e7eb !important;
+    -webkit-text-fill-color:#e5e7eb !important;
+    font-size:.65rem !important;
+    font-weight:700 !important;
 }
 /* Prevent the sidebar from being hidden by its collapse/expand controls. */
 [data-testid="stSidebarCollapseButton"],
 [data-testid="stSidebarCollapsedControl"] {
     display:none !important;
 }
+.common-sidebar-section {
+    margin:14px 2px 4px !important;
+    color:#60a5fa !important;
+    -webkit-text-fill-color:#60a5fa !important;
+    font-size:.59rem !important;
+    letter-spacing:.06em !important;
+    font-weight:850 !important;
+}
+[data-testid="stSidebar"] .st-key-common_sidebar_navigation {
+    gap:8px !important;
+}
+[data-testid="stSidebar"] .st-key-common_sidebar_navigation button,
+[data-testid="stSidebar"] .st-key-common_sidebar_navigation [data-testid="stBaseButton-primary"],
+[data-testid="stSidebar"] .st-key-common_sidebar_navigation [data-testid="stBaseButton-secondary"] {
+    min-height:42px !important;
+    padding:9px 11px !important;
+    border:0 !important;
+    border-left:3px solid #2563eb !important;
+    border-radius:11px !important;
+    background:#172033 !important;
+    color:#e8eef6 !important;
+    -webkit-text-fill-color:#e8eef6 !important;
+    box-shadow:none !important;
+    text-align:left !important;
+    justify-content:flex-start !important;
+    white-space:normal !important;
+    font-size:.76rem !important;
+    line-height:1.25 !important;
+    font-weight:750 !important;
+}
+[data-testid="stSidebar"] .st-key-sidebar_workspace_powerbi button {
+    border-left-color:#a855f7 !important;
+}
+[data-testid="stSidebar"] .st-key-sidebar_workspace_builder button {
+    border-left-color:#16a34a !important;
+}
+[data-testid="stSidebar"] .st-key-common_sidebar_navigation button:hover {
+    background:#202c41 !important;
+    border-left-color:#60a5fa !important;
+    color:#fff !important;
+    -webkit-text-fill-color:#fff !important;
+}
 @media (max-width:760px) {
     section[data-testid="stSidebar"] {
-        width:min(88vw,320px) !important;
-        min-width:min(88vw,320px) !important;
-        max-width:min(88vw,320px) !important;
+        width:min(100vw,285px) !important;
+        min-width:min(100vw,285px) !important;
+        max-width:min(100vw,285px) !important;
     }
     section[data-testid="stSidebar"] > div:first-child { padding-left:.75rem !important; padding-right:.75rem !important; }
     .nexus-live-monitor { padding:10px !important; }
