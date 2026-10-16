@@ -13488,6 +13488,48 @@ div[class*="st-key-danip_ai_table_"] [data-testid="stDataFrame"] [role="columnhe
     font-size: .94rem !important;
     font-weight: 800 !important;
 }
+/* The complete dataset preview uses Streamlit's static table renderer so
+   font sizing is honored while the table scrolls inside its own viewport. */
+div[class*="st-key-danip_ai_static_table_"] {
+    width: 100% !important;
+    max-width: 100% !important;
+    max-height: 500px !important;
+    overflow: auto !important;
+    border: 1px solid rgba(148, 163, 184, .28) !important;
+    border-radius: 8px !important;
+    background: var(--secondary-background-color, #fff) !important;
+}
+div[class*="st-key-danip_ai_static_table_"] table {
+    width: max-content !important;
+    min-width: 100% !important;
+    border-collapse: separate !important;
+    border-spacing: 0 !important;
+    font-size: 14px !important;
+}
+div[class*="st-key-danip_ai_static_table_"] thead th {
+    position: sticky !important;
+    top: 0 !important;
+    z-index: 2 !important;
+    min-width: 125px !important;
+    padding: 10px 12px !important;
+    background: var(--secondary-background-color, #f3f6fb) !important;
+    color: var(--text-color, #172b3a) !important;
+    font-size: 15px !important;
+    font-weight: 800 !important;
+    line-height: 1.35 !important;
+    white-space: normal !important;
+    overflow-wrap: anywhere !important;
+}
+div[class*="st-key-danip_ai_static_table_"] tbody td {
+    min-width: 125px !important;
+    padding: 9px 12px !important;
+    color: var(--text-color, #172b3a) !important;
+    font-size: 14px !important;
+    line-height: 1.4 !important;
+    vertical-align: top !important;
+    white-space: normal !important;
+    overflow-wrap: anywhere !important;
+}
 div[class*="st-key-danip_ai_response_"] {
     min-width: 0;
     padding: .7rem .85rem;
@@ -13599,6 +13641,7 @@ def render_professional_table(
     hide_index=True,
     column_config=None,
     row_height=30,
+    static_readable=False,
 ):
     """Render an AI Analyst dataframe with presentation-only formatting."""
     if not isinstance(data, pd.DataFrame):
@@ -13739,15 +13782,22 @@ def render_professional_table(
     if data.size <= 60000:
         styled = styled.highlight_null(color="rgba(245, 158, 11, .12)")
 
-    with st.container(key=f"danip_ai_table_{safe_key}"):
-        st.dataframe(
-            styled,
-            width="stretch",
-            hide_index=hide_index,
-            height="auto" if height is None else height,
-            row_height=row_height,
-            column_config=configs or None,
-        )
+    if static_readable and len(data) <= 500:
+        # Small, read-only previews can use full Styler typography. Larger
+        # datasets keep the virtualized interactive grid for responsiveness.
+        with st.container(key=f"danip_ai_static_table_{safe_key}"):
+            static_styled = styled.hide(axis="index") if hide_index else styled
+            st.table(static_styled)
+    else:
+        with st.container(key=f"danip_ai_table_{safe_key}"):
+            st.dataframe(
+                styled,
+                width="stretch",
+                hide_index=hide_index,
+                height="auto" if height is None else height,
+                row_height=row_height,
+                column_config=configs or None,
+            )
 
 
 def render_analysis_chatbot(
@@ -18708,6 +18758,7 @@ def render_existing_danip_ai_app():
             key="complete_loaded_dataset",
             height=480,
             row_height=30,
+            static_readable=True,
         )
 
         with st.expander("📊 Dataset Information", expanded=False):
