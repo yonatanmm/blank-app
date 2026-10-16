@@ -1,19 +1,3 @@
-"""Streamlit Cloud entry point for the DANIP AI app.
-
-Keep this deployment entry point intentionally thin: it starts the existing
-application directly without the legacy DHIS2 OAuth gateway.
-"""
-
-from pathlib import Path
-import runpy
-
-
-APP_FILE = Path(__file__).with_name("app.py")
-
-if not APP_FILE.is_file():
-    raise FileNotFoundError(f"DANIP app file was not found: {APP_FILE}")
-
-runpy.run_path(str(APP_FILE), run_name="__main__")
 # ============================================================
 # NEXUS DANIP
 # SECURE DHIS2 OAUTH2 AUTHENTICATION GATEWAY
@@ -87,7 +71,7 @@ st.set_page_config(
     page_title="DANIP AI | Secure Access",
     page_icon="🔐",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 
@@ -238,280 +222,278 @@ if "danip_access_token" not in st.session_state:
 # CSS
 # ============================================================
 
-if not st.session_state.danip_authenticated:
-    st.markdown(
-        """
-    <style>
+st.markdown(
+    """
+<style>
 
-    /* ============================================================
-       APPLICATION BACKGROUND
-       ============================================================ */
+/* ============================================================
+   APPLICATION BACKGROUND
+   ============================================================ */
 
-    .stApp {
-        background: #f4f7fa;
-    }
-
-
-    /* ============================================================
-       STREAMLIT HEADER
-       ============================================================ */
-
-    [data-testid="stHeader"] {
-        background: transparent;
-    }
+.stApp {
+    background: #f4f7fa;
+}
 
 
-    /* ============================================================
-       MAIN CONTAINER
-       ============================================================ */
+/* ============================================================
+   STREAMLIT HEADER
+   ============================================================ */
 
+[data-testid="stHeader"] {
+    background: transparent;
+}
+
+
+/* ============================================================
+   MAIN CONTAINER
+   ============================================================ */
+
+.block-container {
+    box-sizing: border-box;
+    width: 100%;
+    max-width: 720px;
+    padding: clamp(1rem, 4vh, 2.5rem) clamp(.75rem, 3vw, 1.5rem) 2rem;
+}
+
+
+/* ============================================================
+   LOGIN CARD
+   ============================================================ */
+
+.danip-card {
+    box-sizing: border-box;
+    width: 100%;
+    max-width: 620px;
+    margin: 0 auto;
+    background: #ffffff;
+    border: 1px solid #d7dee6;
+    border-radius: 15px;
+    padding: clamp(18px, 4vw, 30px);
+    box-shadow: 0 8px 28px rgba(23,55,75,0.08);
+}
+
+
+/* ============================================================
+   TITLE
+   ============================================================ */
+
+.danip-title {
+    text-align: center;
+    color: #17374b;
+    font-size: clamp(22px, 4vw, 30px);
+    font-weight: 900;
+    letter-spacing: -0.3px;
+    margin-top: 2px;
+    margin-bottom: 5px;
+}
+
+
+/* ============================================================
+   SUBTITLE
+   ============================================================ */
+
+.danip-subtitle {
+    text-align: center;
+    color: #557087;
+    font-size: clamp(12px, 2vw, 14px);
+    font-weight: 500;
+    margin-bottom: 28px;
+}
+
+
+/* ============================================================
+   SECURITY BOX
+   ============================================================ */
+
+.danip-security {
+    background: #1d1f27;
+    color: #ffffff;
+    border-radius: 8px;
+    padding: 14px 16px;
+    margin-bottom: 16px;
+    overflow-wrap: anywhere;
+}
+
+
+.danip-security-title {
+    color: #ffffff;
+    font-size: 12px;
+    font-weight: 900;
+    margin-bottom: 7px;
+}
+
+
+.danip-security-text {
+    color: #ffffff;
+    font-size: 13px;
+    line-height: 1.65;
+    font-weight: 600;
+}
+
+
+/* ============================================================
+   PROVIDER BOX
+   ============================================================ */
+
+.danip-provider {
+    background: #edf6fb;
+    border: 1px solid #c9dce8;
+    border-radius: 8px;
+    padding: 11px 13px;
+    color: #174b72;
+    font-size: 12px;
+    line-height: 1.65;
+    margin-bottom: 16px;
+    overflow-wrap: anywhere;
+}
+
+
+.danip-provider b {
+    color: #17374b;
+}
+
+
+/* ============================================================
+   DHIS2 LOGIN BUTTON
+   ============================================================ */
+
+div[data-testid="stLinkButton"] > a {
+
+    width: 100%;
+
+    min-height: 48px;
+    box-sizing: border-box;
+
+    border-radius: 7px;
+
+    border: none;
+
+    background: #ff4b4b;
+
+    color: #ffffff !important;
+
+    font-size: 14px;
+
+    font-weight: 800;
+
+    text-decoration: none !important;
+
+    display: flex;
+
+    align-items: center;
+
+    justify-content: center;
+
+    transition: all 0.15s ease;
+}
+
+
+div[data-testid="stLinkButton"] > a:hover {
+
+    background: #e83e3e;
+
+    color: #ffffff !important;
+
+    transform: translateY(-1px);
+}
+
+
+/* ============================================================
+   AUTHENTICATED USER
+   ============================================================ */
+
+.danip-user-box {
+
+    background: #eaf7ef;
+
+    border: 1px solid #b9dec6;
+
+    border-radius: 8px;
+
+    padding: 9px 10px;
+
+    color: #174b34;
+
+    font-size: 10px;
+
+    font-weight: 800;
+
+    margin-bottom: 10px;
+}
+
+
+/* ============================================================
+   FOOTER
+   ============================================================ */
+
+.danip-footer {
+
+    text-align: center;
+
+    color: #8292a1;
+
+    font-size: 11px;
+
+    margin-top: 27px;
+}
+
+/* Keep the login card readable and touch friendly on tablets and phones. */
+@media (max-width: 640px) {
     .block-container {
-        box-sizing: border-box;
-        width: 100%;
-        max-width: 720px;
-        padding: clamp(1rem, 4vh, 2.5rem) clamp(.75rem, 3vw, 1.5rem) 2rem;
+        max-width: 100%;
+        padding: 1rem .75rem 1.5rem;
     }
-
-
-    /* ============================================================
-       LOGIN CARD
-       ============================================================ */
 
     .danip-card {
-        box-sizing: border-box;
-        width: 100%;
-        max-width: 620px;
-        margin: 0 auto;
-        background: #ffffff;
-        border: 1px solid #d7dee6;
-        border-radius: 15px;
-        padding: clamp(18px, 4vw, 30px);
-        box-shadow: 0 8px 28px rgba(23,55,75,0.08);
+        max-width: 100%;
+        padding: 20px 16px;
+        border-radius: 12px;
     }
-
-
-    /* ============================================================
-       TITLE
-       ============================================================ */
-
-    .danip-title {
-        text-align: center;
-        color: #17374b;
-        font-size: clamp(22px, 4vw, 30px);
-        font-weight: 900;
-        letter-spacing: -0.3px;
-        margin-top: 2px;
-        margin-bottom: 5px;
-    }
-
-
-    /* ============================================================
-       SUBTITLE
-       ============================================================ */
 
     .danip-subtitle {
-        text-align: center;
-        color: #557087;
-        font-size: clamp(12px, 2vw, 14px);
-        font-weight: 500;
-        margin-bottom: 28px;
+        margin-bottom: 22px;
     }
 
-
-    /* ============================================================
-       SECURITY BOX
-       ============================================================ */
-
-    .danip-security {
-        background: #1d1f27;
-        color: #ffffff;
-        border-radius: 8px;
-        padding: 14px 16px;
-        margin-bottom: 16px;
-        overflow-wrap: anywhere;
-    }
-
-
-    .danip-security-title {
-        color: #ffffff;
-        font-size: 12px;
-        font-weight: 900;
-        margin-bottom: 7px;
-    }
-
-
-    .danip-security-text {
-        color: #ffffff;
-        font-size: 13px;
-        line-height: 1.65;
-        font-weight: 600;
-    }
-
-
-    /* ============================================================
-       PROVIDER BOX
-       ============================================================ */
-
+    .danip-security,
     .danip-provider {
-        background: #edf6fb;
-        border: 1px solid #c9dce8;
-        border-radius: 8px;
-        padding: 11px 13px;
-        color: #174b72;
-        font-size: 12px;
-        line-height: 1.65;
-        margin-bottom: 16px;
-        overflow-wrap: anywhere;
+        padding: 13px;
     }
-
-
-    .danip-provider b {
-        color: #17374b;
-    }
-
-
-    /* ============================================================
-       DHIS2 LOGIN BUTTON
-       ============================================================ */
 
     div[data-testid="stLinkButton"] > a {
+        min-height: 50px;
+    }
+}
 
-        width: 100%;
-
-        min-height: 48px;
-        box-sizing: border-box;
-
-        border-radius: 7px;
-
-        border: none;
-
-        background: #ff4b4b;
-
-        color: #ffffff !important;
-
-        font-size: 14px;
-
-        font-weight: 800;
-
-        text-decoration: none !important;
-
-        display: flex;
-
-        align-items: center;
-
-        justify-content: center;
-
-        transition: all 0.15s ease;
+@media (max-width: 380px) {
+    .block-container {
+        padding-right: .5rem;
+        padding-left: .5rem;
     }
 
-
-    div[data-testid="stLinkButton"] > a:hover {
-
-        background: #e83e3e;
-
-        color: #ffffff !important;
-
-        transform: translateY(-1px);
+    .danip-card {
+        padding: 16px 13px;
     }
 
-
-    /* ============================================================
-       AUTHENTICATED USER
-       ============================================================ */
-
-    .danip-user-box {
-
-        background: #eaf7ef;
-
-        border: 1px solid #b9dec6;
-
-        border-radius: 8px;
-
-        padding: 9px 10px;
-
-        color: #174b34;
-
-        font-size: 10px;
-
-        font-weight: 800;
-
-        margin-bottom: 10px;
+    .danip-security-text,
+    .danip-provider {
+        font-size: 12px;
     }
+}
 
 
-    /* ============================================================
-       FOOTER
-       ============================================================ */
+/* ============================================================
+   SIDEBAR
+   ============================================================ */
 
-    .danip-footer {
+[data-testid="stSidebar"] {
 
-        text-align: center;
+    background: #f4f7fa;
+}
 
-        color: #8292a1;
-
-        font-size: 11px;
-
-        margin-top: 27px;
-    }
-
-    /* Keep the login card readable and touch friendly on tablets and phones. */
-    @media (max-width: 640px) {
-        .block-container {
-            max-width: 100%;
-            padding: 1rem .75rem 1.5rem;
-        }
-
-        .danip-card {
-            max-width: 100%;
-            padding: 20px 16px;
-            border-radius: 12px;
-        }
-
-        .danip-subtitle {
-            margin-bottom: 22px;
-        }
-
-        .danip-security,
-        .danip-provider {
-            padding: 13px;
-        }
-
-        div[data-testid="stLinkButton"] > a {
-            min-height: 50px;
-        }
-    }
-
-    @media (max-width: 380px) {
-        .block-container {
-            padding-right: .5rem;
-            padding-left: .5rem;
-        }
-
-        .danip-card {
-            padding: 16px 13px;
-        }
-
-        .danip-security-text,
-        .danip-provider {
-            font-size: 12px;
-        }
-    }
-
-
-    /* ============================================================
-       SIDEBAR
-       ============================================================ */
-
-    [data-testid="stSidebar"] {
-
-        background: #f4f7fa;
-    }
-
-    </style>
-    """,
-        unsafe_allow_html=True,
-    )
-
+</style>
+""",
+    unsafe_allow_html=True,
+)
 
 # The sign-in page uses a full-bleed hero; keep these styles separate from the
 # older card rules above so every login element shares one responsive layout.
@@ -525,152 +507,150 @@ try:
 except OSError:
     _login_hero_background = "none"
 
-if not st.session_state.danip_authenticated:
-    st.markdown(
-        """
-    <style>
+st.markdown(
+    """
+<style>
+.stApp {
+    min-height: 100vh;
+    background-color: #172746;
+    background-image: linear-gradient(90deg, rgba(18,31,66,.92) 0%, rgba(26,41,79,.78) 48%, rgba(22,37,74,.40) 100%), __DANIP_LOGIN_BACKGROUND__;
+    background-position: center;
+    background-size: cover;
+    background-repeat: no-repeat;
+}
+[data-testid="stAppViewContainer"] { min-height: 100vh; }
+.block-container {
+    box-sizing: border-box;
+    width: 100%;
+    max-width: none;
+    min-height: 100vh;
+    padding: 0 clamp(22px, 8vw, 140px);
+}
+[data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stDecoration"], .stAppDeployButton {
+    display: none !important;
+}
+.st-key-danip_login_hero {
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: flex-start;
+    width: min(100%, 620px);
+    min-height: 100vh;
+    padding: 64px 0 56px;
+    color: #fff;
+}
+.danip-login-content { width: 100%; }
+.danip-login-brand {
+    color: #fff;
+    font-size: clamp(2.6rem, 6vw, 4rem);
+    font-weight: 950;
+    line-height: 1;
+    letter-spacing: -.065em;
+    margin: 0 0 40px;
+    text-shadow: 0 2px 18px rgba(0,0,0,.12);
+}
+.danip-login-kicker {
+    color: #b9d4ff;
+    font-size: .75rem;
+    font-weight: 800;
+    letter-spacing: .17em;
+    text-transform: uppercase;
+    margin-bottom: 12px;
+}
+.danip-login-title {
+    color: #fff;
+    font-size: clamp(1.9rem, 4vw, 2.75rem);
+    line-height: 1.13;
+    letter-spacing: -.035em;
+    font-weight: 850;
+    margin: 0 0 15px;
+}
+.danip-login-description {
+    max-width: 540px;
+    color: rgba(244,247,255,.86);
+    font-size: clamp(1rem, 1.8vw, 1.12rem);
+    line-height: 1.65;
+    margin: 0 0 26px;
+}
+.danip-login-security {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    color: rgba(235,241,255,.78);
+    font-size: .86rem;
+    margin: 25px 0 0;
+}
+.danip-login-security-mark {
+    width: 24px;
+    height: 24px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid rgba(255,255,255,.28);
+    border-radius: 50%;
+    color: #d7e5ff;
+    flex: 0 0 auto;
+}
+div[data-testid="stLinkButton"] { width: fit-content; max-width: 100%; }
+div[data-testid="stLinkButton"] > a {
+    width: auto;
+    min-width: 218px;
+    min-height: 50px;
+    box-sizing: border-box;
+    padding: 0 27px;
+    border-radius: 999px;
+    border: 1px solid rgba(255,255,255,.9);
+    background: #fff;
+    color: #465b91 !important;
+    font-size: .96rem;
+    font-weight: 800;
+    text-decoration: none !important;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    transition: transform .16s ease, background-color .16s ease, box-shadow .16s ease;
+}
+div[data-testid="stLinkButton"] > a:hover {
+    background: #eef3ff;
+    color: #344b85 !important;
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px rgba(8,17,40,.20);
+}
+.danip-login-footer { color: rgba(230,237,252,.65); font-size: .76rem; margin-top: 36px; }
+[data-testid="stSidebar"] { display: none !important; }
+@media (max-width: 760px) {
     .stApp {
-        min-height: 100vh;
-        background-color: #172746;
-        background-image: linear-gradient(90deg, rgba(18,31,66,.92) 0%, rgba(26,41,79,.78) 48%, rgba(22,37,74,.40) 100%), __DANIP_LOGIN_BACKGROUND__;
-        background-position: center;
-        background-size: cover;
-        background-repeat: no-repeat;
+        background-image: linear-gradient(90deg, rgba(18,31,66,.88), rgba(20,35,73,.68)), __DANIP_LOGIN_BACKGROUND__;
+        background-position: 60% center;
     }
-    [data-testid="stAppViewContainer"] { min-height: 100vh; }
-    .block-container {
-        box-sizing: border-box;
-        width: 100%;
-        max-width: none;
-        min-height: 100vh;
-        padding: 0 clamp(22px, 8vw, 140px);
+    .block-container { padding: 0 clamp(20px, 6vw, 52px); }
+    .st-key-danip_login_hero { width: min(100%, 560px); min-height: 100svh; padding: 44px 0; }
+    .danip-login-brand { margin-bottom: 32px; }
+    div[data-testid="stLinkButton"] > a { min-height: 52px; }
+}
+@media (max-width: 480px) {
+    .stApp {
+        background-image: linear-gradient(90deg, rgba(16,29,62,.87), rgba(16,29,62,.73)), __DANIP_LOGIN_BACKGROUND__;
+        background-position: 63% center;
     }
-    [data-testid="stHeader"], [data-testid="stToolbar"], [data-testid="stDecoration"], .stAppDeployButton {
-        display: none !important;
-    }
+    .block-container { padding: 0 22px; }
     .st-key-danip_login_hero {
-        box-sizing: border-box;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
-        align-items: flex-start;
-        width: min(100%, 620px);
-        min-height: 100vh;
-        padding: 64px 0 56px;
-        color: #fff;
+        justify-content: flex-end;
+        min-height: 100svh;
+        padding: 0 0 max(34px, env(safe-area-inset-bottom));
     }
-    .danip-login-content { width: 100%; }
-    .danip-login-brand {
-        color: #fff;
-        font-size: clamp(2.6rem, 6vw, 4rem);
-        font-weight: 950;
-        line-height: 1;
-        letter-spacing: -.065em;
-        margin: 0 0 40px;
-        text-shadow: 0 2px 18px rgba(0,0,0,.12);
-    }
-    .danip-login-kicker {
-        color: #b9d4ff;
-        font-size: .75rem;
-        font-weight: 800;
-        letter-spacing: .17em;
-        text-transform: uppercase;
-        margin-bottom: 12px;
-    }
-    .danip-login-title {
-        color: #fff;
-        font-size: clamp(1.9rem, 4vw, 2.75rem);
-        line-height: 1.13;
-        letter-spacing: -.035em;
-        font-weight: 850;
-        margin: 0 0 15px;
-    }
-    .danip-login-description {
-        max-width: 540px;
-        color: rgba(244,247,255,.86);
-        font-size: clamp(1rem, 1.8vw, 1.12rem);
-        line-height: 1.65;
-        margin: 0 0 26px;
-    }
-    .danip-login-security {
-        display: flex;
-        align-items: center;
-        gap: 9px;
-        color: rgba(235,241,255,.78);
-        font-size: .86rem;
-        margin: 25px 0 0;
-    }
-    .danip-login-security-mark {
-        width: 24px;
-        height: 24px;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        border: 1px solid rgba(255,255,255,.28);
-        border-radius: 50%;
-        color: #d7e5ff;
-        flex: 0 0 auto;
-    }
-    div[data-testid="stLinkButton"] { width: fit-content; max-width: 100%; }
-    div[data-testid="stLinkButton"] > a {
-        width: auto;
-        min-width: 218px;
-        min-height: 50px;
-        box-sizing: border-box;
-        padding: 0 27px;
-        border-radius: 999px;
-        border: 1px solid rgba(255,255,255,.9);
-        background: #fff;
-        color: #465b91 !important;
-        font-size: .96rem;
-        font-weight: 800;
-        text-decoration: none !important;
-        display: inline-flex;
-        align-items: center;
-        justify-content: center;
-        transition: transform .16s ease, background-color .16s ease, box-shadow .16s ease;
-    }
-    div[data-testid="stLinkButton"] > a:hover {
-        background: #eef3ff;
-        color: #344b85 !important;
-        transform: translateY(-2px);
-        box-shadow: 0 8px 24px rgba(8,17,40,.20);
-    }
-    .danip-login-footer { color: rgba(230,237,252,.65); font-size: .76rem; margin-top: 36px; }
-    [data-testid="stSidebar"] { display: none !important; }
-    @media (max-width: 760px) {
-        .stApp {
-            background-image: linear-gradient(90deg, rgba(18,31,66,.88), rgba(20,35,73,.68)), __DANIP_LOGIN_BACKGROUND__;
-            background-position: 60% center;
-        }
-        .block-container { padding: 0 clamp(20px, 6vw, 52px); }
-        .st-key-danip_login_hero { width: min(100%, 560px); min-height: 100svh; padding: 44px 0; }
-        .danip-login-brand { margin-bottom: 32px; }
-        div[data-testid="stLinkButton"] > a { min-height: 52px; }
-    }
-    @media (max-width: 480px) {
-        .stApp {
-            background-image: linear-gradient(90deg, rgba(16,29,62,.87), rgba(16,29,62,.73)), __DANIP_LOGIN_BACKGROUND__;
-            background-position: 63% center;
-        }
-        .block-container { padding: 0 22px; }
-        .st-key-danip_login_hero {
-            justify-content: flex-end;
-            min-height: 100svh;
-            padding: 0 0 max(34px, env(safe-area-inset-bottom));
-        }
-        .danip-login-brand { font-size: 2.65rem; margin-bottom: 28px; }
-        .danip-login-title { font-size: clamp(1.85rem, 9vw, 2.35rem); }
-        .danip-login-description { font-size: 1rem; margin-bottom: 22px; }
-        div[data-testid="stLinkButton"], div[data-testid="stLinkButton"] > a { width: 100%; }
-        div[data-testid="stLinkButton"] > a { min-height: 54px; }
-        .danip-login-footer { margin-top: 27px; }
-    }
-    </style>
-    """.replace("__DANIP_LOGIN_BACKGROUND__", _login_hero_background),
-        unsafe_allow_html=True,
-    )
-
+    .danip-login-brand { font-size: 2.65rem; margin-bottom: 28px; }
+    .danip-login-title { font-size: clamp(1.85rem, 9vw, 2.35rem); }
+    .danip-login-description { font-size: 1rem; margin-bottom: 22px; }
+    div[data-testid="stLinkButton"], div[data-testid="stLinkButton"] > a { width: 100%; }
+    div[data-testid="stLinkButton"] > a { min-height: 54px; }
+    .danip-login-footer { margin-top: 27px; }
+}
+</style>
+""".replace("__DANIP_LOGIN_BACKGROUND__", _login_hero_background),
+    unsafe_allow_html=True,
+)
 
 
 # ============================================================
@@ -1581,3 +1561,4 @@ if st.session_state.danip_authenticated:
 else:
 
     login_page()
+
