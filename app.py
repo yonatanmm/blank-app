@@ -19963,18 +19963,14 @@ section[data-testid="stSidebar"] > div:first-child {
     -webkit-text-fill-color:initial !important;
 }
 
-/* Keep the shared workspace menu visible on every page and viewport. */
-section[data-testid="stSidebar"] {
-    display:block !important;
-    visibility:visible !important;
-    opacity:1 !important;
-    transform:translateX(0) !important;
+/* Apply sidebar sizing only while expanded so Streamlit can hide it. */
+section[data-testid="stSidebar"][aria-expanded="true"] {
     width:clamp(280px,23vw,340px) !important;
     min-width:clamp(280px,23vw,340px) !important;
     max-width:340px !important;
 }
 @media (max-width:760px) {
-    section[data-testid="stSidebar"] {
+    section[data-testid="stSidebar"][aria-expanded="true"] {
         width:min(88vw,320px) !important;
         min-width:min(88vw,320px) !important;
         max-width:min(88vw,320px) !important;
