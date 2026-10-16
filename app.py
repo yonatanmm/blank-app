@@ -20375,6 +20375,26 @@ section[data-testid="stSidebar"] > div:first-child {
     font-size:.72rem !important;
     font-weight:750 !important;
 }
+[data-testid="stSidebar"] [data-testid="stExpander"] details > summary {
+    background:#1e293b !important;
+    color:#f8fafc !important;
+    -webkit-text-fill-color:#f8fafc !important;
+    border:1px solid rgba(255,255,255,.14) !important;
+    border-radius:8px !important;
+}
+[data-testid="stSidebar"] [data-testid="stExpander"] details > summary * {
+    color:#f8fafc !important;
+    -webkit-text-fill-color:#f8fafc !important;
+    fill:#f8fafc !important;
+}
+[data-testid="stSidebar"] [data-testid="stExpander"] details > summary:hover {
+    background:#293548 !important;
+}
+[data-testid="stSidebar"] [data-testid="stExpander"] [data-testid="stExpanderDetails"] {
+    background:#111827 !important;
+    color:#e5e7eb !important;
+    -webkit-text-fill-color:#e5e7eb !important;
+}
 
 /* Dataset metrics */
 .sidebar-metric-grid {
