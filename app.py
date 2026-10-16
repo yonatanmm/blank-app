@@ -19963,14 +19963,19 @@ section[data-testid="stSidebar"] > div:first-child {
     -webkit-text-fill-color:initial !important;
 }
 
-/* Apply sidebar sizing only while expanded so Streamlit can hide it. */
-section[data-testid="stSidebar"][aria-expanded="true"] {
+/* Keep the workspace sidebar static and expanded. */
+section[data-testid="stSidebar"] {
     width:clamp(280px,23vw,340px) !important;
     min-width:clamp(280px,23vw,340px) !important;
     max-width:340px !important;
 }
+/* Prevent the sidebar from being hidden by its collapse/expand controls. */
+[data-testid="stSidebarCollapseButton"],
+[data-testid="stSidebarCollapsedControl"] {
+    display:none !important;
+}
 @media (max-width:760px) {
-    section[data-testid="stSidebar"][aria-expanded="true"] {
+    section[data-testid="stSidebar"] {
         width:min(88vw,320px) !important;
         min-width:min(88vw,320px) !important;
         max-width:min(88vw,320px) !important;
