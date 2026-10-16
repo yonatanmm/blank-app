@@ -13281,7 +13281,12 @@ def render_professional_table(
 ):
     """Render an AI Analyst dataframe with presentation-only formatting."""
     if not isinstance(data, pd.DataFrame):
-        st.dataframe(data, use_container_width=True, hide_index=hide_index, height=height)
+        st.dataframe(
+            data,
+            use_container_width=True,
+            hide_index=hide_index,
+            height="auto" if height is None else height,
+        )
         return
 
     safe_key = re.sub(r"[^A-Za-z0-9_-]+", "_", str(key)).strip("_") or "table"
@@ -13388,7 +13393,7 @@ def render_professional_table(
             styled,
             width="stretch",
             hide_index=hide_index,
-            height=height,
+            height="auto" if height is None else height,
             row_height=row_height,
             column_config=configs or None,
         )
