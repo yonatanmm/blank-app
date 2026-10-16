@@ -13850,25 +13850,37 @@ def render_analysis_chatbot(
     if "analysis_chat_messages" not in st.session_state:
         st.session_state["analysis_chat_messages"]=[]
 
-    # Chat-only controls: the clear control is deliberately placed directly
-    # beside the chat input so it is always visible. It clears ONLY the chatbot
-    # conversation/state and never clears the loaded DHIS2/API data, dashboard
-    # analysis, M&E Hub data, or application source URL.
-    if "analysis_chat_messages" not in st.session_state:
+    def _clear_analysis_chat():
+        # Clear only chatbot state. Keep loaded DHIS2/API data and dashboard
+        # analysis available after Streamlit reruns.
         st.session_state["analysis_chat_messages"] = []
+        st.session_state["analysis_chat_last_result"] = None
+        st.session_state["analysis_chat_external_status"] = None
+        st.session_state["analysis_chat_new_question_mode"] = True
+        st.session_state.pop("analysis_chat_text_input", None)
 
-    clear_chat_clicked = False
-
-    st.markdown("""
-    <div class="danip-analysis-chat">
-      <div class="chat-kicker">DANIP AI · ANALYTICS WORKSPACE</div>
-      <div class="chat-title">Ask DANIP AI</div>
-      <div class="chat-help">
-        Ask about programme data, trends, data quality or indicator definitions. Current values and
-        performance use loaded DHIS2 data; general M&amp;E questions also work without a dataset.
-      </div>
-    </div>
-    """,unsafe_allow_html=True)
+    # Keep a small, accessible clear control in the chatbot header. The chat
+    # composer is fixed by Streamlit, so overlaying its area can cover the
+    # input or send button on smaller screens.
+    _chat_header, _chat_clear = st.columns([10, 1], vertical_alignment="center")
+    with _chat_header:
+        st.markdown("""
+        <div class="danip-analysis-chat">
+          <div class="chat-kicker">DANIP AI · ANALYTICS WORKSPACE</div>
+          <div class="chat-title">Ask DANIP AI</div>
+          <div class="chat-help">
+            Ask about programme data, trends, data quality or indicator definitions. Current values and
+            performance use loaded DHIS2 data; general M&amp;E questions also work without a dataset.
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+    with _chat_clear:
+        st.button(
+            "🗑️",
+            key="analysis_chat_clear_icon",
+            help="Clear chat",
+            on_click=_clear_analysis_chat,
+        )
 
     if chat_source:
         st.markdown(
@@ -13893,11 +13905,6 @@ def render_analysis_chatbot(
             else:
                 st.markdown(message.get("content", ""))
 
-    # Keep the clear control visually attached to the SAME chat composer.
-    # st.chat_input is rendered in Streamlit's fixed bottom layer, so putting
-    # the button in a normal second column makes it jump to the far right.
-    # We keep the widget in the same main content area and pull the clear
-    # control back to the right edge of the chat composer with responsive CSS.
     # Dynamic suggestions are generated from the current dataframe schema. Each
     # suggestion feeds the same chatbot route as a typed question.
     _suggestion_df = df if isinstance(df, pd.DataFrame) and not df.empty else None
@@ -13910,48 +13917,46 @@ def render_analysis_chatbot(
             if st.button(_suggestion, key=f"dataset_suggestion_{_i}", use_container_width=True):
                 _suggested_question = _suggestion
 
-    question=st.chat_input(
-        "Ask a question about the currently loaded data or an indicator definition...",
-        key="analysis_chat_input",
-    ) or _suggested_question
-
-    def _clear_analysis_chat():
-        # IMPORTANT: clear ONLY chatbot state. Do not rerun from inside the
-        # chatbot. The button click itself triggers Streamlit's normal rerun,
-        # allowing the dashboard to continue and reuse its cached dataset.
-        st.session_state["analysis_chat_messages"] = []
-        st.session_state["analysis_chat_last_result"] = None
-        st.session_state["analysis_chat_external_status"] = None
-        st.session_state["analysis_chat_new_question_mode"] = True
-
-    st.button(
-        "🧹 Clear Chat",
-        key="analysis_chat_clear_icon",
-        help="Clear only chatbot conversation. DHIS2/API data and dashboard analysis will remain unchanged.",
-        on_click=_clear_analysis_chat,
-    )
+    # Use a normal in-flow form instead of st.chat_input, which Streamlit pins
+    # to the viewport edge regardless of where it is called. This keeps the
+    # complete chatbot below the project, country, and activity selectors and
+    # below the dashboard content.
+    with st.form("analysis_chat_composer", clear_on_submit=True):
+        _chat_input_col, _chat_send_col = st.columns(
+            [12, 1], vertical_alignment="center"
+        )
+        with _chat_input_col:
+            _typed_question = st.text_input(
+                "Chat message",
+                placeholder="Ask a question about the loaded data or an indicator definition...",
+                label_visibility="collapsed",
+                key="analysis_chat_text_input",
+            )
+        with _chat_send_col:
+            _chat_send_clicked = st.form_submit_button(
+                "↑",
+                type="primary",
+                help="Send message",
+                use_container_width=True,
+                key="analysis_chat_send",
+            )
+    question = (_typed_question if _chat_send_clicked else "") or _suggested_question
 
     st.markdown("""
     <style>
-      /* Move ONLY this clear button into the chat-composer zone. */
       div.st-key-analysis_chat_clear_icon {
-        position: fixed !important;
-        z-index: 1002 !important;
-        bottom: 17px !important;
-        left: calc(50% + 10px) !important;
-        width: 38px !important;
-        height: 38px !important;
-        margin: 0 !important;
-        padding: 0 !important;
+        display: flex !important;
+        justify-content: flex-end !important;
+        margin: .2rem 0 0 auto !important;
       }
 
       div.st-key-analysis_chat_clear_icon button {
-        width: 110px !important;
-        height: 38px !important;
-        min-width: 110px !important;
-        min-height: 38px !important;
-        padding: 0 10px !important;
-        border-radius: 9px !important;
+        width: 42px !important;
+        height: 42px !important;
+        min-width: 42px !important;
+        min-height: 42px !important;
+        padding: 0 !important;
+        border-radius: 12px !important;
         border: 1px solid #cbd5e1 !important;
         background: #ffffff !important;
         color: #334155 !important;
@@ -13963,25 +13968,37 @@ def render_analysis_chatbot(
         border-color: #94a3b8 !important;
       }
 
-      @media (max-width: 1000px) {
-        div.st-key-analysis_chat_clear_icon {
-          left: auto !important;
-          right: 58px !important;
-          bottom: 16px !important;
-        }
+      div.st-key-analysis_chat_composer {
+        margin-top: .35rem !important;
+        padding: .45rem !important;
+        border: 1px solid rgba(148, 163, 184, .48) !important;
+        border-radius: 13px !important;
+        background: var(--secondary-background-color, #fff) !important;
+        box-shadow: 0 4px 16px rgba(15, 23, 42, .10) !important;
+      }
+
+      div.st-key-analysis_chat_composer input {
+        min-height: 42px !important;
+        border: 0 !important;
+        background: transparent !important;
+      }
+
+      div.st-key-analysis_chat_send button {
+        width: 42px !important;
+        height: 42px !important;
+        min-height: 42px !important;
+        padding: 0 !important;
+        border-radius: 10px !important;
+        font-size: 1.25rem !important;
       }
 
       @media (max-width: 640px) {
-        div.st-key-analysis_chat_clear_icon {
-          right: 52px !important;
-          bottom: 15px !important;
-        }
         div.st-key-analysis_chat_clear_icon button {
-          width: 96px !important;
-          height: 34px !important;
-          min-width: 96px !important;
-          min-height: 34px !important;
-          border-radius: 8px !important;
+          width: 38px !important;
+          height: 38px !important;
+          min-width: 38px !important;
+          min-height: 38px !important;
+          border-radius: 10px !important;
         }
       }
     </style>
@@ -14077,8 +14094,6 @@ def render_analysis_chatbot(
 # ============================================================
 
 ME_HUB_DB_PATH = os.path.join(BASE_DIR, "danip_me_management.db")
-
-
 def _me_hub_conn():
     conn = sqlite3.connect(ME_HUB_DB_PATH)
     conn.execute("PRAGMA foreign_keys = ON")
@@ -16840,7 +16855,7 @@ def render_existing_danip_ai_app():
         )
 
     st.caption(
-        "Select Project / Program → Country → Type → API. DANIP filters each list from the "
+        "Select Project / Program → Country → Activity → API. DANIP filters each list from the "
         "live registry, then retrieves only the API matching all four selections."
     )
 
@@ -16897,7 +16912,7 @@ def render_existing_danip_ai_app():
                 project_options,
                 index=0 if project_options else None,
                 key="danip_project_selector",
-                help="Choose the project/program first. Country, Type and API are then filtered from this selection.",
+                help="Choose the project/program first. Country, Activity and API are then filtered from this selection.",
             )
             st.session_state["danip_selected_project"] = selected_project
 
@@ -16965,7 +16980,7 @@ def render_existing_danip_ai_app():
                 r"[^A-Za-z0-9_-]+", "_", f"{selected_project}__{selected_country}"
             )
             selected_type = st.selectbox(
-                "🗂️ 3. Type",
+                "🗂️ 3. Activity",
                 type_values,
                 index=0,
                 key=type_widget_key,
@@ -21269,9 +21284,8 @@ if workspace == "🤖 DANIP AI Data Analyst":
     # when data is actually available. Indicator definitions, compendium
     # questions and general M&E questions do not require an API.
     render_ai_header()
-    render_analysis_chatbot()
-
     render_existing_danip_ai_app()
+    render_analysis_chatbot()
 
 
 elif workspace == "🧭 DANIP M&E Management Hub":
