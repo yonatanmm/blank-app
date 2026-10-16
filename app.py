@@ -13203,6 +13203,219 @@ For a NORMAL NON-REPORT QUESTION, remain concise and use sections where useful:
 
 _AI_ANALYST_PRESENTATION_CSS = """
 <style>
+/* These rules are injected only while the AI Analyst workspace is active. */
+section[data-testid="stMain"] {
+    min-width: 0 !important;
+    color: var(--text-color, #172b3a) !important;
+}
+section[data-testid="stMain"] .block-container {
+    width: 100% !important;
+    max-width: 1560px !important;
+    margin-inline: auto !important;
+    padding: .9rem clamp(.7rem, 2vw, 1.6rem) 3rem !important;
+}
+/* The shared shell has its own compact workspace bar; use this AI-only page title. */
+section[data-testid="stMain"] .app-hero {
+    display: none !important;
+}
+.danip-ai-page-header {
+    position: relative;
+    overflow: hidden;
+    margin: .2rem 0 .9rem;
+    padding: 1rem clamp(1rem, 2vw, 1.45rem);
+    border: 1px solid rgba(148, 163, 184, .24);
+    border-left: 4px solid #4f7cff;
+    border-radius: 15px;
+    background: linear-gradient(120deg, #101827 0%, #172b43 62%, #23466b 100%);
+    box-shadow: 0 8px 24px rgba(15, 23, 42, .12);
+}
+.danip-ai-page-kicker {
+    color: #a9c7ff !important;
+    -webkit-text-fill-color: #a9c7ff !important;
+    font-size: .66rem;
+    font-weight: 800;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+}
+.danip-ai-page-title {
+    margin: .18rem 0 .22rem;
+    color: #fff !important;
+    -webkit-text-fill-color: #fff !important;
+    font-size: clamp(1.5rem, 2.5vw, 1.9rem);
+    font-weight: 780;
+    letter-spacing: -.035em;
+    line-height: 1.15;
+}
+.danip-ai-page-subtitle {
+    margin: 0;
+    color: #d4deeb !important;
+    -webkit-text-fill-color: #d4deeb !important;
+    font-size: .88rem;
+    line-height: 1.5;
+}
+section[data-testid="stMain"] .section-card,
+section[data-testid="stMain"] .guided-panel,
+section[data-testid="stMain"] .danip-ai-page-header {
+    box-sizing: border-box;
+    max-width: 100%;
+}
+section[data-testid="stMain"] .section-card,
+section[data-testid="stMain"] .guided-panel {
+    border: 1px solid rgba(148, 163, 184, .25) !important;
+    border-radius: 14px !important;
+    background: var(--secondary-background-color, #fff) !important;
+    box-shadow: 0 3px 12px rgba(15, 23, 42, .045) !important;
+    color: var(--text-color, #172b3a) !important;
+}
+section[data-testid="stMain"] .section-title,
+section[data-testid="stMain"] .guided-panel .section-title {
+    color: var(--text-color, #172b3a) !important;
+    -webkit-text-fill-color: var(--text-color, #172b3a) !important;
+    font-size: 1rem !important;
+}
+section[data-testid="stMain"] .section-help,
+section[data-testid="stMain"] .guided-panel .section-help {
+    color: var(--text-color, #64748b) !important;
+    -webkit-text-fill-color: var(--text-color, #64748b) !important;
+    opacity: .76;
+}
+section[data-testid="stMain"] [data-testid="stMetric"] {
+    min-width: 0 !important;
+    min-height: 82px !important;
+    border: 1px solid rgba(148, 163, 184, .28) !important;
+    border-radius: 13px !important;
+    background: var(--secondary-background-color, #fff) !important;
+    box-shadow: 0 3px 12px rgba(15, 23, 42, .05) !important;
+}
+section[data-testid="stMain"] [data-testid="stMetric"] [data-testid="stMetricLabel"],
+section[data-testid="stMain"] [data-testid="stMetric"] [data-testid="stMetricValue"],
+section[data-testid="stMain"] [data-testid="stMetric"] [data-testid="stMetricDelta"] {
+    color: var(--text-color, #172b3a) !important;
+    -webkit-text-fill-color: var(--text-color, #172b3a) !important;
+}
+section[data-testid="stMain"] [data-testid="stSelectbox"] label,
+section[data-testid="stMain"] [data-testid="stMultiSelect"] label,
+section[data-testid="stMain"] [data-testid="stTextInput"] label,
+section[data-testid="stMain"] [data-testid="stTextArea"] label {
+    color: var(--text-color, #172b3a) !important;
+    -webkit-text-fill-color: var(--text-color, #172b3a) !important;
+    font-size: .78rem !important;
+    font-weight: 700 !important;
+}
+section[data-testid="stMain"] [data-testid="stSelectbox"] [data-baseweb="select"] > div,
+section[data-testid="stMain"] [data-testid="stMultiSelect"] [data-baseweb="select"] > div,
+section[data-testid="stMain"] [data-testid="stTextInput"] input,
+section[data-testid="stMain"] [data-testid="stTextArea"] textarea {
+    min-width: 0 !important;
+    border-color: rgba(148, 163, 184, .42) !important;
+    background: var(--secondary-background-color, #fff) !important;
+    color: var(--text-color, #172b3a) !important;
+    -webkit-text-fill-color: var(--text-color, #172b3a) !important;
+}
+section[data-testid="stMain"] [data-testid="stSelectbox"] [data-baseweb="select"] *,
+section[data-testid="stMain"] [data-testid="stMultiSelect"] [data-baseweb="select"] * {
+    color: var(--text-color, #172b3a) !important;
+    -webkit-text-fill-color: var(--text-color, #172b3a) !important;
+}
+section[data-testid="stMain"] [data-testid="stMultiSelect"] [data-baseweb="tag"] {
+    border: 1px solid rgba(79, 124, 255, .24) !important;
+    background: rgba(79, 124, 255, .10) !important;
+}
+section[data-testid="stMain"] [data-testid="stSelectbox"] input,
+section[data-testid="stMain"] [data-testid="stMultiSelect"] input,
+section[data-testid="stMain"] [data-testid="stTextInput"] input::placeholder,
+section[data-testid="stMain"] [data-testid="stTextArea"] textarea::placeholder {
+    color: var(--text-color, #64748b) !important;
+    -webkit-text-fill-color: var(--text-color, #64748b) !important;
+    opacity: .72;
+}
+section[data-testid="stMain"] div[data-testid="stPlotlyChart"] {
+    min-width: 0 !important;
+    max-width: 100% !important;
+    padding: .35rem !important;
+    border: 1px solid rgba(148, 163, 184, .24) !important;
+    border-radius: 13px !important;
+    background: var(--secondary-background-color, #fff) !important;
+    box-shadow: 0 3px 12px rgba(15, 23, 42, .04) !important;
+}
+section[data-testid="stMain"] .empty-state {
+    max-width: 920px;
+    margin: .65rem auto 1rem;
+    border: 1px dashed rgba(148, 163, 184, .48) !important;
+    border-radius: 14px !important;
+    background: var(--secondary-background-color, #fff) !important;
+    color: var(--text-color, #172b3a) !important;
+    box-shadow: 0 3px 12px rgba(15, 23, 42, .035);
+}
+section[data-testid="stMain"] h2,
+section[data-testid="stMain"] h3,
+section[data-testid="stMain"] h4 {
+    color: var(--text-color, #172b3a) !important;
+    -webkit-text-fill-color: var(--text-color, #172b3a) !important;
+    letter-spacing: -.018em;
+}
+section[data-testid="stMain"] div[class*="st-key-dataset_suggestion_"] button {
+    width: 100% !important;
+    min-height: 40px !important;
+    border: 1px solid rgba(79, 124, 255, .24) !important;
+    border-radius: 10px !important;
+    background: var(--secondary-background-color, #fff) !important;
+    color: var(--text-color, #172b3a) !important;
+    -webkit-text-fill-color: var(--text-color, #172b3a) !important;
+    font-size: .78rem !important;
+    text-align: left !important;
+}
+section[data-testid="stMain"] div[class*="st-key-dataset_suggestion_"] button:hover {
+    border-color: var(--primary-color, #4f7cff) !important;
+    background: rgba(79, 124, 255, .08) !important;
+}
+section[data-testid="stMain"] .danip-analysis-chat {
+    margin: .2rem 0 .65rem !important;
+    padding: .95rem 1.05rem !important;
+    border: 1px solid rgba(79, 124, 255, .26) !important;
+    border-radius: 15px !important;
+    background: var(--secondary-background-color, #fff) !important;
+    box-shadow: 0 5px 18px rgba(15, 23, 42, .055) !important;
+}
+section[data-testid="stMain"] .danip-analysis-chat .chat-kicker {
+    color: var(--primary-color, #315fca) !important;
+    -webkit-text-fill-color: var(--primary-color, #315fca) !important;
+    font-size: .66rem !important;
+    letter-spacing: .12em !important;
+}
+section[data-testid="stMain"] .danip-analysis-chat .chat-title {
+    color: var(--text-color, #172b3a) !important;
+    -webkit-text-fill-color: var(--text-color, #172b3a) !important;
+    font-size: 1.25rem !important;
+    font-weight: 760 !important;
+}
+section[data-testid="stMain"] .danip-analysis-chat .chat-help {
+    max-width: 900px;
+    margin-bottom: .1rem !important;
+    color: var(--text-color, #64748b) !important;
+    -webkit-text-fill-color: var(--text-color, #64748b) !important;
+    opacity: .78;
+}
+section[data-testid="stMain"] [data-testid="stChatInput"] {
+    max-width: 1120px !important;
+    margin-inline: auto !important;
+    border: 1px solid rgba(148, 163, 184, .48) !important;
+    border-radius: 13px !important;
+    background: var(--secondary-background-color, #fff) !important;
+    box-shadow: 0 4px 16px rgba(15, 23, 42, .10) !important;
+}
+section[data-testid="stMain"] [data-testid="stChatInput"] textarea {
+    min-height: 48px !important;
+    color: var(--text-color, #172b3a) !important;
+    -webkit-text-fill-color: var(--text-color, #172b3a) !important;
+    caret-color: var(--text-color, #172b3a) !important;
+    background: transparent !important;
+}
+section[data-testid="stMain"] [data-testid="stChatInput"] textarea::placeholder {
+    color: var(--text-color, #64748b) !important;
+    -webkit-text-fill-color: var(--text-color, #64748b) !important;
+    opacity: .68 !important;
+}
 div[class*="st-key-danip_ai_table_"] {
     min-width: 0 !important;
     max-width: 100% !important;
@@ -13270,12 +13483,54 @@ div[class*="st-key-danip_ai_response_"] tbody tr:hover td {
     background: rgba(59, 130, 246, .055);
 }
 @media (max-width: 640px) {
+    section[data-testid="stMain"] .block-container {
+        padding: .7rem .55rem 2.25rem !important;
+    }
+    .danip-ai-page-header {
+        padding: .8rem .85rem;
+        border-radius: 12px;
+    }
+    .danip-ai-page-title { font-size: 1.45rem; }
+    section[data-testid="stMain"] div[data-testid="stHorizontalBlock"]:not(:has(.st-key-danip_workspace_selector)) {
+        flex-wrap: wrap !important;
+        gap: .55rem !important;
+    }
+    section[data-testid="stMain"] div[data-testid="stHorizontalBlock"]:not(:has(.st-key-danip_workspace_selector)) > [data-testid="column"] {
+        flex: 1 1 100% !important;
+        min-width: 100% !important;
+    }
     div[class*="st-key-danip_ai_response_"] {
         padding: .55rem .6rem;
     }
 }
+@media (min-width: 641px) and (max-width: 960px) {
+    section[data-testid="stMain"] div[data-testid="stHorizontalBlock"]:not(:has(.st-key-danip_workspace_selector)) {
+        flex-wrap: wrap !important;
+        gap: .65rem !important;
+    }
+    section[data-testid="stMain"] div[data-testid="stHorizontalBlock"]:not(:has(.st-key-danip_workspace_selector)) > [data-testid="column"] {
+        flex: 1 1 calc(50% - .65rem) !important;
+        min-width: calc(50% - .65rem) !important;
+    }
+}
 </style>
 """
+
+
+def render_ai_header():
+    """Render the compact DANIP AI page heading; presentation only."""
+    st.markdown(
+        """
+        <header class="danip-ai-page-header">
+            <div class="danip-ai-page-kicker">Monitoring · Evaluation · Learning</div>
+            <h1 class="danip-ai-page-title">DANIP AI Data Analyst</h1>
+            <p class="danip-ai-page-subtitle">
+                AI-powered programme monitoring, analytics and M&amp;E intelligence.
+            </p>
+        </header>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def render_professional_table(
@@ -13452,11 +13707,11 @@ def render_analysis_chatbot(
 
     st.markdown("""
     <div class="danip-analysis-chat">
-      <div class="chat-kicker">DANIP AI · INDEPENDENT M&E ASSISTANT</div>
-      <div class="chat-title">💬 Ask an Indicator or M&E Question</div>
+      <div class="chat-kicker">DANIP AI · ANALYTICS WORKSPACE</div>
+      <div class="chat-title">Ask DANIP AI</div>
       <div class="chat-help">
-        Indicator definitions, ISG Indicator Compendium questions and general M&E questions work
-        <b>without a DHIS2/API link</b>. Current values, trends and performance use the loaded DHIS2 data.
+        Ask about programme data, trends, data quality or indicator definitions. Current values and
+        performance use loaded DHIS2 data; general M&amp;E questions also work without a dataset.
       </div>
     </div>
     """,unsafe_allow_html=True)
@@ -16758,10 +17013,10 @@ def render_existing_danip_ai_app():
         st.markdown(
             """
             <div class="empty-state">
-                <div style="font-size:2rem;">📡</div>
-                <strong>Select a Project/Program and API</strong>
+                <div style="font-size:1.7rem;">📡</div>
+                <strong>No dataset loaded yet</strong>
                 <div style="margin-top:.35rem;">
-                    DANIP will use the selected registered API to retrieve the data automatically.
+                    Select a Project/Program and API to load programme data and start an analysis.
                 </div>
             </div>
             """,
@@ -20478,6 +20733,7 @@ if workspace == "🤖 DANIP AI Data Analyst":
     # DHIS2 dataset is empty. Current-data questions are routed to DHIS2 only
     # when data is actually available. Indicator definitions, compendium
     # questions and general M&E questions do not require an API.
+    render_ai_header()
     render_analysis_chatbot()
 
     render_existing_danip_ai_app()
