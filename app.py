@@ -1096,14 +1096,21 @@ st.markdown(
     }
 
     .dq-table-wrap {
+        display: block !important;
         width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
         overflow-x: auto !important;
+        overflow-y: hidden !important;
+        -webkit-overflow-scrolling: touch !important;
         background: #ffffff !important;
     }
 
     .dq-table {
-        width: 100% !important;
-        min-width: 1050px !important;
+        width: max-content !important;
+        min-width: 1100px !important;
+        max-width: none !important;
+        table-layout: auto !important;
         border-collapse: separate !important;
         border-spacing: 0 !important;
         background: #ffffff !important;
@@ -1123,7 +1130,10 @@ st.markdown(
         padding: .72rem .70rem !important;
         border-bottom: 2px solid #cbd5e1 !important;
         border-right: 1px solid #eef2f7 !important;
-        white-space: nowrap !important;
+        white-space: normal !important;
+        overflow-wrap: anywhere !important;
+        word-break: normal !important;
+        vertical-align: top !important;
     }
 
     .dq-table td {
@@ -1135,7 +1145,44 @@ st.markdown(
         border-right: 1px solid #f1f5f9 !important;
         vertical-align: top !important;
         line-height: 1.4 !important;
+        white-space: normal !important;
+        overflow-wrap: anywhere !important;
+        word-break: normal !important;
     }
+
+    /* Quality register: keep evidence/action readable and status fields compact. */
+    .dq-table:not(.dq-detail-table) th:nth-child(1),
+    .dq-table:not(.dq-detail-table) td:nth-child(1) { min-width: 160px !important; }
+    .dq-table:not(.dq-detail-table) th:nth-child(2),
+    .dq-table:not(.dq-detail-table) td:nth-child(2) { min-width: 200px !important; }
+    .dq-table:not(.dq-detail-table) th:nth-child(3),
+    .dq-table:not(.dq-detail-table) td:nth-child(3),
+    .dq-table:not(.dq-detail-table) th:nth-child(4),
+    .dq-table:not(.dq-detail-table) td:nth-child(4),
+    .dq-table:not(.dq-detail-table) th:nth-child(5),
+    .dq-table:not(.dq-detail-table) td:nth-child(5) { min-width: 95px !important; }
+    .dq-table:not(.dq-detail-table) th:nth-child(6),
+    .dq-table:not(.dq-detail-table) td:nth-child(6) { min-width: 280px !important; }
+    .dq-table:not(.dq-detail-table) th:nth-child(7),
+    .dq-table:not(.dq-detail-table) td:nth-child(7) { min-width: 300px !important; }
+
+    /* Issue register: percentage/count columns stay narrow, prose columns expand. */
+    .dq-detail-table th:nth-child(1),
+    .dq-detail-table td:nth-child(1),
+    .dq-detail-table th:nth-child(5),
+    .dq-detail-table td:nth-child(5),
+    .dq-detail-table th:nth-child(6),
+    .dq-detail-table td:nth-child(6) { min-width: 80px !important; }
+    .dq-detail-table th:nth-child(2),
+    .dq-detail-table td:nth-child(2) { min-width: 160px !important; }
+    .dq-detail-table th:nth-child(3),
+    .dq-detail-table td:nth-child(3),
+    .dq-detail-table th:nth-child(4),
+    .dq-detail-table td:nth-child(4) { min-width: 210px !important; }
+    .dq-detail-table th:nth-child(7),
+    .dq-detail-table td:nth-child(7) { min-width: 250px !important; }
+    .dq-detail-table th:nth-child(8),
+    .dq-detail-table td:nth-child(8) { min-width: 300px !important; }
 
     .dq-table tbody tr:hover td {
         background: #f8fafc !important;
@@ -1144,7 +1191,8 @@ st.markdown(
 
     .dq-domain {
         font-weight: 800 !important;
-        white-space: nowrap !important;
+        white-space: normal !important;
+        overflow-wrap: anywhere !important;
     }
 
     .dq-metric {
@@ -1366,7 +1414,7 @@ st.markdown(
     }
 
     .dq-detail-table {
-        min-width: 1150px !important;
+        min-width: 1500px !important;
     }
 
     @media (max-width: 800px) {
@@ -13211,8 +13259,10 @@ _AI_ANALYST_PRESENTATION_CSS = """
 }
 .block-container {
     width: 100% !important;
-    max-width: 1560px !important;
-    margin-inline: auto !important;
+    max-width: none !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+    box-sizing: border-box !important;
     padding: .9rem clamp(.7rem, 2vw, 1.6rem) 3rem !important;
 }
 
@@ -13337,8 +13387,8 @@ div[data-testid="stPlotlyChart"] {
     box-shadow: 0 3px 12px rgba(15, 23, 42, .04) !important;
 }
 .empty-state {
-    max-width: 920px;
-    margin: .65rem auto 1rem;
+    max-width: 100%;
+    margin: .65rem 0 1rem;
     border: 1px dashed rgba(148, 163, 184, .48) !important;
     border-radius: 14px !important;
     background: var(--secondary-background-color, #fff) !important;
@@ -13395,8 +13445,10 @@ div[class*="st-key-dataset_suggestion_"] button:hover {
     opacity: .78;
 }
 [data-testid="stChatInput"] {
-    max-width: 1120px !important;
-    margin-inline: auto !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
     border: 1px solid rgba(148, 163, 184, .48) !important;
     border-radius: 13px !important;
     background: var(--secondary-background-color, #fff) !important;
@@ -13416,13 +13468,18 @@ div[class*="st-key-dataset_suggestion_"] button:hover {
 }
 div[class*="st-key-danip_ai_table_"] {
     min-width: 0 !important;
+    width: 100% !important;
     max-width: 100% !important;
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    -webkit-overflow-scrolling: touch !important;
 }
 div[class*="st-key-danip_ai_table_"] [data-testid="stDataFrame"] {
+    min-width: 0 !important;
+    width: 100% !important;
     max-width: 100% !important;
     border: 1px solid rgba(148, 163, 184, .28) !important;
     border-radius: 8px !important;
-    overflow: hidden !important;
     background: var(--secondary-background-color, #fff) !important;
 }
 div[class*="st-key-danip_ai_table_"] [data-testid="stDataFrame"] [role="columnheader"] {
@@ -13501,7 +13558,7 @@ div[class*="st-key-danip_ai_response_"] tbody tr:hover td {
         padding: .55rem .6rem;
     }
 }
-@media (min-width: 641px) and (max-width: 960px) {
+@media (min-width: 641px) and (max-width: 1100px) {
     div[data-testid="stHorizontalBlock"]:not(:has(.st-key-danip_workspace_selector)) {
         flex-wrap: wrap !important;
         gap: .65rem !important;
@@ -13616,14 +13673,25 @@ def render_professional_table(
             continue
 
         if pd.api.types.is_string_dtype(series.dtype) or pd.api.types.is_object_dtype(series.dtype):
-            if column not in configs and re.search(
-                r"indicator|organisationunit|organizationunit|orgunit|organisation|organization|facility|country|project|programme|program|description|name",
-                label,
-                flags=re.IGNORECASE,
-            ):
+            if column not in configs:
+                compact_text = re.sub(r"[^a-z0-9%]+", " ", label.lower()).strip()
+                if re.search(
+                    r"\b(priority|status|count|percent|percentage|pct|score|severity|rating|result|rank)\b|%",
+                    compact_text,
+                ):
+                    text_width = "small"
+                elif re.search(
+                    r"\b(indicator|interpretation|recommended action|recommendation|action|description|evidence|details|impact|narrative|explanation|comment)\b",
+                    compact_text,
+                ):
+                    text_width = "large"
+                else:
+                    # Dimension, finding, period, and organisation fields use
+                    # a readable medium width; unknown text fields do too.
+                    text_width = "medium"
                 configs[column] = st.column_config.TextColumn(
                     label=label,
-                    width="large",
+                    width=text_width,
                     alignment="left",
                 )
 
@@ -13635,6 +13703,10 @@ def render_professional_table(
                 ("background-color", "rgba(148, 163, 184, .12)"),
                 ("border-bottom", "1px solid rgba(148, 163, 184, .35)"),
                 ("padding", "8px 10px"),
+                ("white-space", "normal"),
+                ("overflow-wrap", "anywhere"),
+                ("word-break", "normal"),
+                ("vertical-align", "top"),
             ],
         },
         {
@@ -13642,6 +13714,10 @@ def render_professional_table(
             "props": [
                 ("border-bottom", "1px solid rgba(148, 163, 184, .16)"),
                 ("padding", "7px 10px"),
+                ("white-space", "normal"),
+                ("overflow-wrap", "anywhere"),
+                ("word-break", "normal"),
+                ("vertical-align", "top"),
             ],
         },
         {
@@ -20798,3 +20874,4 @@ elif workspace == "📅 My Reports & Monitoring":
 # ============================================================
 # END — DANIP AI + SEPARATE DANIP M&E MANAGEMENT HUB
 # ============================================================app
+
