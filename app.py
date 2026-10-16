@@ -11,6 +11,7 @@ import re
 import json
 import time
 import threading
+import logging
 import http.server
 import socketserver
 import textwrap
@@ -2187,26 +2188,9 @@ with refresh_col:
         unsafe_allow_html=True,
     )
     if st.button("↻ Refresh", key="nexus_top_refresh", help="Refresh and reset the current session", use_container_width=True):
-        # Full application reset: also remove the pasted API/Data URL so the
-        # user returns to a completely blank starting point. Persistent MEAL
-        # records in danip_meal.db are intentionally preserved.
-        _auth_state = {
-            "danip_authenticated": st.session_state.get("danip_authenticated", False),
-            "danip_user": st.session_state.get("danip_user", {}),
-            "danip_access_token": st.session_state.get("danip_access_token", ""),
-            "danip_refresh_token": st.session_state.get("danip_refresh_token", ""),
-        }
-        st.session_state.clear()
-        st.session_state.update(_auth_state)
-        st.session_state["data_url_input"] = ""
-        st.session_state["last_analyzed_url"] = ""
-        st.session_state["loaded_source_url"] = ""
-        st.session_state["data_loaded"] = False
-        try:
-            st.query_params.clear()
-        except Exception:
-            pass
-        st.rerun()
+        # Keep the active source and authenticated session intact. The request
+        # is processed after the data-loading helpers have been defined below.
+        st.session_state["nexus_force_refresh_requested"] = True
 
 
 # ============================================================
@@ -2405,23 +2389,31 @@ def _dhis2_session():
     return session
 
 
-def dhis2_get(url, accept="application/json", timeout=180):
+def dhis2_get(url, accept="application/json", timeout=180, force_refresh=False):
+    request_headers = {"Accept": accept}
+    if force_refresh:
+        request_headers.update({
+            "Cache-Control": "no-cache, no-store, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        })
     try:
         response = _dhis2_session().get(
             url,
-            headers={"Accept": accept},
+            headers=request_headers,
             timeout=timeout,
         )
     except requests.exceptions.RequestException as e:
         raise Exception(f"Unable to connect to DHIS2:\n\n{e}")
 
     if response.status_code == 401:
-        st.session_state["danip_authenticated"] = False
-        st.session_state["danip_access_token"] = ""
-        st.session_state["danip_refresh_token"] = ""
+        if not force_refresh:
+            st.session_state["danip_authenticated"] = False
+            st.session_state["danip_access_token"] = ""
+            st.session_state["danip_refresh_token"] = ""
         raise PermissionError(
             "The DHIS2 user session has expired or is no longer authorized. "
-            "Please sign in again."
+            + ("The current sign-in was preserved; retry after confirming DHIS2 access." if force_refresh else "Please sign in again.")
         )
 
     if response.status_code != 200:
@@ -2494,25 +2486,33 @@ def change_extension(url, new_extension):
     )
 
 
-def get_csv_from_analytics_url(url):
+def get_csv_from_analytics_url(url, force_refresh=False):
     """Request the original DHIS2 Analytics URL as CSV.
 
     Do not rewrite /api/analytics into /api/analytics.csv. DHIS2
     Analytics is a query endpoint; the response format is negotiated
     through the request headers/query parameters.
     """
+    request_headers = {
+        "Accept": "text/csv,application/csv;q=0.9,*/*;q=0.1",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+    if force_refresh:
+        request_headers.update({
+            "Cache-Control": "no-cache, no-store, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        })
+
     response = _dhis2_session().get(
         url,
-        headers={
-            "Accept": "text/csv,application/csv;q=0.9,*/*;q=0.1",
-            "Cache-Control": "no-cache",
-            "Pragma": "no-cache",
-        },
+        headers=request_headers,
         timeout=180,
     )
 
     if response.status_code == 401:
-        _handle_dhis2_response_error(response, url)
+        _handle_dhis2_response_error(response, url, preserve_auth=force_refresh)
 
     if response.status_code != 200:
         return None
@@ -2630,7 +2630,7 @@ def read_json_response(response):
         )
 
 
-def get_analytics_data(url):
+def get_analytics_data(url, force_refresh=False):
     """Load a DHIS2 Analytics endpoint using the authenticated user token.
 
     Registry APIs can be published as /api/analytics.xls, /api/analytics.xlsx,
@@ -2647,7 +2647,7 @@ def get_analytics_data(url):
     # Analytics CSV/JSON negotiation below.
     if extension == "xls":
         return read_xls_response(
-            dhis2_get(url, accept="application/vnd.ms-excel", timeout=180)
+            dhis2_get(url, accept="application/vnd.ms-excel", timeout=180, force_refresh=force_refresh)
         )
 
     if extension == "xlsx":
@@ -2656,18 +2656,19 @@ def get_analytics_data(url):
                 url,
                 accept="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 timeout=180,
+                force_refresh=force_refresh,
             )
         )
 
     if extension == "csv":
         return read_csv_response(
-            dhis2_get(url, accept="text/csv,application/csv", timeout=180)
+            dhis2_get(url, accept="text/csv,application/csv", timeout=180, force_refresh=force_refresh)
         )
 
     # First request the ORIGINAL extension-less Analytics endpoint as CSV.
     # This avoids the old and incorrect /api/analytics.csv path transformation.
     try:
-        csv_df = get_csv_from_analytics_url(url)
+        csv_df = get_csv_from_analytics_url(url, force_refresh=force_refresh)
         if isinstance(csv_df, pd.DataFrame) and not csv_df.empty:
             return csv_df
     except PermissionError:
@@ -2682,6 +2683,7 @@ def get_analytics_data(url):
         url,
         accept="application/json",
         timeout=180,
+        force_refresh=force_refresh,
     )
     return read_json_response(response)
 
@@ -2701,14 +2703,19 @@ def _is_dhis2_url(url):
         return False
 
 
-def _handle_dhis2_response_error(response, url):
+def _handle_dhis2_response_error(response, url, preserve_auth=False):
     if response.status_code == 401:
-        st.session_state["danip_authenticated"] = False
-        st.session_state["danip_access_token"] = ""
-        st.session_state["danip_refresh_token"] = ""
+        if not preserve_auth:
+            st.session_state["danip_authenticated"] = False
+            st.session_state["danip_access_token"] = ""
+            st.session_state["danip_refresh_token"] = ""
         raise PermissionError(
             "The authenticated DHIS2 session has expired or is no longer authorized. "
-            "Please sign in again through the DANIP authentication gateway."
+            + (
+                "The current sign-in was preserved; retry after confirming DHIS2 access."
+                if preserve_auth
+                else "Please sign in again through the DANIP authentication gateway."
+            )
         )
 
     if response.status_code != 200:
@@ -2719,22 +2726,29 @@ def _handle_dhis2_response_error(response, url):
         )
 
 
-def get_visualization_data(uid):
+def get_visualization_data(uid, force_refresh=False):
     """Retrieve the data behind a DHIS2 Data Visualizer saved visualization."""
     token_session = _dhis2_session()
 
     data_url = f"{DHIS2_URL}/api/visualizations/{uid}/data"
+    request_headers = {"Accept": "application/json"}
+    if force_refresh:
+        request_headers.update({
+            "Cache-Control": "no-cache, no-store, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        })
 
     try:
         response = token_session.get(
             data_url,
-            headers={"Accept": "application/json"},
+            headers=request_headers,
             timeout=180,
         )
     except requests.exceptions.RequestException as e:
         raise Exception(f"Unable to connect to the DHIS2 visualization API:\n\n{e}")
 
-    _handle_dhis2_response_error(response, data_url)
+    _handle_dhis2_response_error(response, data_url, preserve_auth=force_refresh)
 
     return response.json()
 
@@ -3089,7 +3103,7 @@ def _google_drive_confirmation_url(html_text, original_url):
     return action or original_url
 
 
-def _download_project_registry_bytes(source_url):
+def _download_project_registry_bytes(source_url, force_refresh=False):
     """Download registry bytes from Excel, Google Drive, or Google Sheets."""
     source_url = str(source_url or "").strip()
     if not source_url:
@@ -3106,6 +3120,12 @@ def _download_project_registry_bytes(source_url):
         "Accept": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,"
                   "application/vnd.ms-excel,text/csv,text/plain,text/html;q=0.8,*/*;q=0.5",
     }
+    if force_refresh:
+        headers.update({
+            "Cache-Control": "no-cache, no-store, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        })
 
     # First attempt: direct source/export URL.
     response = session.get(
@@ -3210,7 +3230,7 @@ def _registry_active(value):
     }
 
 
-def load_danip_project_registry():
+def load_danip_project_registry(force_refresh=False):
     """Read the current DANIP project/program registry workbook.
 
     The workbook is intentionally read at pull time so adding a new row
@@ -3222,7 +3242,10 @@ def load_danip_project_registry():
     if not source_url:
         raise ValueError("DANIP_PROJECT_REGISTRY_URL is not configured.")
 
-    content = _download_project_registry_bytes(source_url)
+    content = _download_project_registry_bytes(
+        source_url,
+        force_refresh=force_refresh,
+    )
 
     # Read the first worksheet by default. The registry is a configuration
     # table, not the reporting dataset itself. Use an explicit engine for XLSX
@@ -3404,7 +3427,7 @@ def pull_active_danip_projects():
     return master, registry, project_results, errors
 
 
-def get_direct_api_data(url):
+def get_direct_api_data(url, force_refresh=False):
     """
     Load DHIS2 data using ONLY the currently authenticated user's OAuth token.
 
@@ -3444,7 +3467,7 @@ def get_direct_api_data(url):
                 "The DHIS2 Data Visualizer URL does not contain a valid visualization UID."
             )
 
-        return get_visualization_data(uid)
+        return get_visualization_data(uid, force_refresh=force_refresh)
 
     # ------------------------------------------------------------
     # DHIS2 Visualization API
@@ -3452,12 +3475,12 @@ def get_direct_api_data(url):
     if "/api/visualizations/" in lower:
         match = re.search(r"/api/visualizations/([A-Za-z0-9]{11})(?:/data)?", url)
         if match and lower.rstrip("/").endswith("/data"):
-            return get_visualization_data(match.group(1))
+            return get_visualization_data(match.group(1), force_refresh=force_refresh)
 
         # If the user supplied the metadata endpoint, first try its data endpoint.
         if match:
             try:
-                return get_visualization_data(match.group(1))
+                return get_visualization_data(match.group(1), force_refresh=force_refresh)
             except Exception:
                 # Fall back to the metadata response below.
                 pass
@@ -3474,6 +3497,7 @@ def get_direct_api_data(url):
             dhis2_get(
                 url,
                 accept="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                force_refresh=force_refresh,
             )
         )
 
@@ -3482,26 +3506,27 @@ def get_direct_api_data(url):
             dhis2_get(
                 url,
                 accept="application/vnd.ms-excel",
+                force_refresh=force_refresh,
             )
         )
 
     if extension == "csv":
         return read_csv_response(
-            dhis2_get(url, accept="application/csv")
+            dhis2_get(url, accept="application/csv", force_refresh=force_refresh)
         )
 
     # ------------------------------------------------------------
     # DHIS2 Analytics API (no explicit file extension)
     # ------------------------------------------------------------
     if "/api/analytics" in lower:
-        return get_analytics_data(url)
+        return get_analytics_data(url, force_refresh=force_refresh)
 
     # ------------------------------------------------------------
     # Generic DHIS2 JSON API
     # ------------------------------------------------------------
     if "/api/" in lower or _is_dhis2_url(url):
         return read_json_response(
-            dhis2_get(url, accept="application/json")
+            dhis2_get(url, accept="application/json", force_refresh=force_refresh)
         )
 
     raise ValueError(
@@ -16992,6 +17017,7 @@ def render_existing_danip_ai_app():
                     help="Only APIs matching the selected Project/Program, Country and Type are shown.",
                 )
                 selected_api, selected_registry_row = api_lookup[selected_api_label]
+                st.session_state["danip_current_api_url"] = selected_api
 
                 # Keep the currently selected API available to the rest of the
                 # application without using the same widget key across cascades.
@@ -17121,6 +17147,9 @@ def render_existing_danip_ai_app():
                 st.session_state["data_loaded"] = True
                 st.session_state["danip_selected_api_url"] = retrieval_url
                 st.session_state["danip_selected_project_loaded"] = selected_project
+                st.session_state["danip_active_source_from_registry"] = bool(
+                    selected_registry_row is not None and retrieval_url == selected_api
+                )
                 st.session_state["danip_project_results"] = [{
                     "project": selected_project,
                     "country": str(selected_registry_row.get("Country", "")) if selected_registry_row is not None else "",
@@ -19915,6 +19944,11 @@ def render_existing_danip_ai_app():
             st.session_state["loaded_df"] = df.copy()
             st.session_state["loaded_source_url"] = source_url
             st.session_state["data_loaded"] = True
+            st.session_state["danip_active_source_from_registry"] = bool(
+                selected_registry_row is not None
+                and not manual_api_url
+                and source_url == selected_api
+            )
 
             _nexus_sidebar_status(
                 f"Dataset loaded successfully — {len(df):,} records",
@@ -20760,7 +20794,166 @@ section[data-testid="stSidebar"] > div:first-child {
     unsafe_allow_html=True,
 )
 
+def _restore_dataset_source_metadata(fresh_df, previous_df):
+    """Carry registry context onto a refreshed API response when it is absent there."""
+    if not isinstance(previous_df, pd.DataFrame):
+        return fresh_df
+
+    metadata_columns = (
+        "DANIP Project/Program",
+        "DANIP Country",
+        "DANIP Data Source",
+        "DANIP Type",
+        "DANIP API URL",
+    )
+    for column in metadata_columns:
+        if column in fresh_df.columns or column not in previous_df.columns:
+            continue
+        values = previous_df[column].dropna().astype(str).str.strip()
+        values = values[values != ""].unique()
+        if len(values) == 1:
+            fresh_df[column] = values[0]
+    return fresh_df
+
+
+def _process_top_refresh_request():
+    """Refresh the live registry/API source before rendering the workspace."""
+    if not st.session_state.pop("nexus_force_refresh_requested", False):
+        refresh_notice = st.session_state.pop("nexus_refresh_notice", None)
+        if refresh_notice:
+            st.success(
+                "✅ Latest data loaded successfully. "
+                f"Last refreshed: {refresh_notice}"
+            )
+        return
+
+    source_url = next((
+        str(st.session_state.get(key, "") or "").strip()
+        for key in (
+            "loaded_source_url",
+            "data_url_input",
+            "danip_current_api_url",
+            "danip_selected_api_url",
+            "last_analyzed_url",
+        )
+        if str(st.session_state.get(key, "") or "").strip()
+    ), "")
+    previous_df = st.session_state.get("loaded_df")
+
+    if not source_url:
+        st.warning(
+            "⚠️ Latest data refresh failed. The dashboard is showing the last "
+            "successfully loaded dataset. No active API source is available."
+        )
+        return
+
+    refreshed_registry = None
+    refreshed_from_registry = bool(
+        st.session_state.get("danip_active_source_from_registry")
+        or (
+            source_url == str(st.session_state.get("danip_selected_api_url", "") or "").strip()
+            and st.session_state.get("danip_selected_project_loaded")
+        )
+    )
+
+    try:
+        with st.spinner("🔄 Refreshing the source workbook/API and rebuilding dashboard data..."):
+            if refreshed_from_registry:
+                # This app's live Excel configuration source is a Google Sheets
+                # project registry. Re-download its current XLSX export first.
+                refreshed_registry = load_danip_project_registry(force_refresh=True)
+
+            fresh_raw = get_direct_api_data(source_url, force_refresh=True)
+            fresh_df = normalize_dataframe(fresh_raw)
+            if not isinstance(fresh_df, pd.DataFrame) or fresh_df.empty or fresh_df.shape[1] == 0:
+                raise ValueError("The active API returned no usable rows or columns.")
+
+            fresh_df = _restore_dataset_source_metadata(fresh_df, previous_df)
+            fresh_issues, _fresh_matrix, fresh_summary = build_quality_matrix(fresh_df)
+            if not isinstance(fresh_summary, dict):
+                raise ValueError("The refreshed dataset did not produce a valid quality summary.")
+    except Exception as refresh_error:
+        # Avoid logging the exception message or traceback here: DHIS2 response
+        # errors can contain source URLs or response details. The exception class
+        # is enough to diagnose the failure category without exposing credentials.
+        logging.error(
+            "DANIP source refresh failed (%s); retaining the last successful dataset.",
+            type(refresh_error).__name__,
+        )
+        if isinstance(previous_df, pd.DataFrame) and not previous_df.empty:
+            st.warning(
+                "⚠️ Latest data refresh failed. The dashboard is showing the last "
+                "successfully loaded dataset."
+            )
+        else:
+            st.warning(
+                "⚠️ Latest data refresh failed. No previously loaded dataset was available to retain."
+            )
+        _nexus_sidebar_status(
+            "Latest data refresh failed",
+            "error",
+            "DATA REFRESH",
+            "The last successfully loaded dataset remains active.",
+        )
+        return
+
+    refreshed_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    st.session_state["loaded_df"] = fresh_df.copy()
+    st.session_state["loaded_source_url"] = source_url
+    st.session_state["last_analyzed_url"] = source_url
+    st.session_state["data_loaded"] = True
+    st.session_state["nexus_chat_df"] = fresh_df.copy()
+    st.session_state["nexus_chat_source_url"] = source_url
+    st.session_state["danip_api_quality_issues"] = fresh_issues
+    st.session_state["danip_api_quality_summary"] = fresh_summary
+    st.session_state["auto_dhis2_last_success"] = refreshed_at
+    if refreshed_from_registry:
+        st.session_state["danip_project_registry"] = refreshed_registry
+        st.session_state["danip_project_registry_error"] = ""
+        st.session_state["danip_project_registry_last_loaded"] = refreshed_at
+        st.session_state["danip_active_source_from_registry"] = True
+    st.session_state["nexus_last_data_refresh"] = refreshed_at
+
+    # Drop only dataset-dependent calculations and numerical chat context.
+    for key in (
+        "nexus_chat_active_dataset_fingerprint",
+        "nexus_chat_last_analysis_result",
+        "nexus_chat_last_analysis_plan",
+        "analysis_chat_last_result",
+        "analysis_chat_external_status",
+        "guided_preview_plan",
+        "last_chart_plan",
+    ):
+        st.session_state.pop(key, None)
+    st.session_state["analysis_chat_messages"] = []
+    st.session_state["analysis_chat_new_question_mode"] = True
+
+    # Retain selected analysis controls when they remain valid for the new schema.
+    try:
+        fresh_options = get_analysis_options(fresh_df)
+        valid_dimensions = fresh_options.get("dimension_columns", [])
+        valid_numeric = fresh_options.get("numeric_columns", [])
+        selected_x = st.session_state.get("guided_x_axis")
+        if selected_x and selected_x != "-- Select X-axis --" and selected_x not in valid_dimensions:
+            st.session_state["guided_x_axis"] = "-- Select X-axis --"
+        selected_y = st.session_state.get("guided_y_axes", [])
+        if isinstance(selected_y, (list, tuple, set)):
+            st.session_state["guided_y_axes"] = [value for value in selected_y if value in valid_numeric]
+    except Exception:
+        logging.exception("Unable to validate saved analysis selections after data refresh.")
+
+    st.session_state["nexus_refresh_notice"] = refreshed_at
+    _nexus_sidebar_status(
+        "Latest data refreshed successfully",
+        "success",
+        "DATA REFRESH",
+        f"{len(fresh_df):,} rows × {len(fresh_df.columns):,} columns are active.",
+    )
+    st.rerun()
+
+
 render_common_sidebar()
+_process_top_refresh_request()
 
 
 st.markdown(
